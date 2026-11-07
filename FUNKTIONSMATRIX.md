@@ -1,0 +1,102 @@
+# Funktionsmatrix für Arco Commander
+
+Die Matrix zerlegt die Windows-Desktopfunktionen in Umsetzungspakete. M1 bis M5 verweisen auf den [Entwicklungsplan](PLAN.md). Alle Zeilen sind geplant. Die Prüffälle beschreiben beobachtbares Verhalten und werden in M0 um Dialogoptionen, Kommandozeilenparameter, INI-Schlüssel und plattformspezifische Varianten ergänzt. Die Tabellen markieren außerdem, wo eine Funktion von Dateisystem, Server, Hilfsprogramm, Plugin oder Hardware abhängt. [Funktionsübersicht](https://www.ghisler.com/featurel.htm), [Offizielle Hilfe und FAQ](https://www.ghisler.com/dfaq.htm), [Änderungen bis 11.58.1](https://www.ghisler.com/history115801.txt).
+
+## Fenster, Navigation und Auswahl
+
+| ID | Funktionsumfang | Prüffall | Stufe |
+| --- | --- | --- | --- |
+| UI-01 | Zwei unabhängige Fenster, aktive Quelle und passives Ziel, horizontal oder übereinander, Splitter, Fenster angleichen und tauschen | `Tab` ändert Quelle und Ziel. Tauschen erhält die Tabs und ihren Zustand. | M1, M2 |
+| UI-02 | Ordner-Tabs pro Seite, im Hintergrund oder auf Gegenseite öffnen, umordnen, duplizieren, verschieben, umbenennen, sperren, Tab-Liste, Gruppen speichern und laden | Ein gesperrter Tab folgt exakt dem gewählten Sperrmodus. Nach Neustart erscheinen beide gespeicherten Gruppen. | M1, M4 |
+| UI-03 | Laufwerksbuttons und -liste, freier Speicher, Pfadfeld, Stamm- und Elternordner, Aktualisieren, Verlauf vor/zurück, Favoriten mit Untermenüs | Laufwerkswechsel, UNC-Pfad, Favorit und Rücksprung erhalten den jeweiligen Cursorzustand. | M1, M2 |
+| UI-04 | Kurz-, Detail-, Kommentar-, Baum-, Miniatur- und Schnellansicht, separater Baum für beide oder je Fenster | Wechsel zwischen allen Ansichten per Taste und Menü behält die Selektion, soweit die Ansicht sie abbildet. | M1, M2 |
+| UI-05 | Eigene Spalten, Spaltensätze, automatische Ansichtsregeln, Datei- und Auswahlfarben, Schrift, Sortierung nach mehreren Spalten, natürliche Sortierung, umgekehrte und unsortierte Ansicht | Ein gespeicherter Spaltensatz nutzt ein Metadatenfeld. Ordnerwechsel aktiviert eine hinterlegte Regel. | M2, M4 |
+| UI-06 | Zweigansicht `Strg+B` und partielle Zweigansicht `Strg+Umschalt+B`, nur Programme, nur markierte Dateien, versteckte/Systemdateien, Ignorierliste | Partielle Zweigansicht zeigt genau die erwarteten ausgewählten Teilbäume. | M2 |
+| UI-07 | Auswahl per Tastatur und Maus, Masken, gleiche Erweiterung, Invertieren, Auswahl merken/wiederherstellen, Auswahl als Dateiliste und aus der Zwischenablage | Die wiederhergestellte Auswahl nach einem Kopiervorgang entspricht dem vorherigen Satz. | M1, M2 |
+| UI-08 | Schnellsuche und Schnellfilter `Strg+S`, Suchmuster, optionale RegEx, Kurzbefehle mit Ziffernblock und konfigurierbare Starttasten | Filter und Suchsprung verhalten sich im gleichen Ordner unterschiedlich wie in der Referenz. | M1, M2 |
+| UI-09 | Menüs, horizontale/vertikale Buttonbar, Funktionsleiste, Startermenü, konfigurierbare Tastaturbelegung, eigene Symbole und Vorlagen, Dunkel-/Hell-/Systemmodus | Ein Button mit Parametern löst denselben Befehl aus wie das zugeordnete Tastenkürzel. | M1, M4 |
+| UI-10 | Dialoge in weiteren Referenzsprachen, Hilfeindex, Tastaturhilfe und Einstellungen pro Anzeige, Position und Instanz | Auflösung, DPI und Sprache ändern. Dialoge bleiben bedienbar und Texte werden vollständig angezeigt. | M2, M5 |
+
+Grundlage für die Ansichten und Auswahlregeln sind die mitgelieferten Hilfethemen `foldertabs.htm`, `keyboard.htm`, `menu_show.htm`, `menu_mark.htm` und `dlg_configautomodeswitch.htm`. [Offizielle Hilfe](https://www.ghisler.com/dfaq.htm), [Hersteller-Galerie](https://www.ghisler.com/screenshots_new/de/).
+
+## Dateioperationen und Windows-Integration
+
+| ID | Funktionsumfang | Prüffall | Stufe |
+| --- | --- | --- | --- |
+| FILE-01 | Öffnen, Bearbeiten, neue Textdatei, neue Ordner, Einzel- und Verzeichnisbaum-Kopieren, Verschieben, Umbenennen, Löschen, Papierkorb und endgültiges Löschen | F4–F8 aus beiden Fenstern prüfen. Der Papierkorb stellt eine gelöschte Testdatei wieder her. | M1 |
+| FILE-02 | Zielmaske, Filter mit gespeicherter Suche, relative Pfade, Kopieren in mehrere markierte Ordner, gleiche oder andere Seite | Drei Testdateien mit verschachtelten Pfaden in mehrere Ziele kopieren und Ergebnis gegen die Referenz prüfen. | M1, M2 |
+| FILE-03 | Konfliktdialog mit Seitenvergleich, Metadaten und Vorschau, Überschreiben, Überspringen, Anhängen, Umbenennen, Regeln für alle und nach Datum/Größe | Neue, ältere, gleichnamige und gesperrte Dateien in einem Auftrag mit verschiedenen Entscheidungen behandeln. | M1, M2 |
+| FILE-04 | Hintergrund-Transfermanager, Reihenfolge, Pause/Fortsetzen/Abbruch je Fähigkeit, Fortschritt, Wiederholversuch, Geschwindigkeitsbegrenzung und konfigurierbares Log | Parallel navigieren und zwei Jobs mit Zielkonflikt starten. Abbruch und Wiederanlauf hinterlassen einen prüfbaren Zustand. | M1, M3 |
+| FILE-05 | Attribute, Zeitstempel, rekursive Änderungen, Platzbedarf und Ordnergrößen, Dateieigenschaften, Kommentare in kompatibler `descript.ion` | Attribute und Kommentare auf einer Kopie erhalten. Eigenschaften und Größen auf NTFS und exFAT prüfen. | M2 |
+| FILE-06 | Unicode und lange Pfade, UNC, Laufwerkswechsel und Dateisystem-Refresh, Symlinks/Junctions/Hardlinks, NTFS-Optionen für ADS, ACLs und Sparse Files | Datei über Volumegrenze verschieben und Metadatenregeln prüfen. Eine Junction-Schleife darf keine Rekursion auslösen. | M1, M2 |
+| FILE-07 | Explorer-Kontextmenüs, Systemdateizuordnungen, interne Zuordnungen mit eigenen Verben, Öffnen mit, Verknüpfungen, UAC und Aufruf als anderer Benutzer | System- und interne Zuordnung unterscheiden sich im Test wie eingestellt. Eine einzelne privilegierte Aktion startet über den dafür vorgesehenen Helfer. | M2, M4 |
+| FILE-08 | Shell-Zwischenablage für Dateien, kopieren/ausschneiden/einfügen, Pfade/Namen/Details als Text, Drag-and-drop zwischen Fenstern und mit Explorer | Datei von und zu Explorer ziehen. Mehrfachauswahl als Dateien und separat als Text in die Zwischenablage geben. | M1, M2 |
+| FILE-09 | Desktop und weitere Shell-Orte, Netzlaufwerke verbinden/trennen, Freigaben erstellen/entfernen, administrative Freigaben, Datenträger benennen, System- und Versionsinfo | Eine Test-SMB-Freigabe verbinden, im Panel öffnen und wieder trennen. Freigabeoperationen unter Windows-Rechten prüfen. | M2 |
+| FILE-10 | Dateilisten mit und ohne Unterverzeichnisse drucken, Textinhalt drucken, Druckvorschau und Einstellungen | Dieselbe Dateiauswahl als Liste und als Textinhalt an einen Testdrucker übergeben. | M2 |
+
+Einige Kopieroptionen hängen vom Dateisystem und von den gewählten Einstellungen ab. Die Referenzfälle stammen aus den Kopier-, Lösch- und Überschreibdialogen, dem Menü und den Versionshinweisen. [Dateioperationen im Hersteller-FAQ](https://www.ghisler.com/dfaqfile.htm), [Versionshinweise](https://www.ghisler.com/mailing.htm).
+
+## Suche, Vorschau und Dateiwerkzeuge
+
+| ID | Funktionsumfang | Prüffall | Stufe |
+| --- | --- | --- | --- |
+| TOOL-01 | Suche nach Namen, mehreren Masken und Ausschlüssen, RegEx, Text und Hex, Kodierung, Attributen, Größe und Zeit, gewählter Rekursionstiefe, in mehreren Pfaden und markierten Einträgen | Kodierte Textprobe auf mehreren Laufwerken finden. Suche abbrechen und vorhandene Ergebnisse weiterverwenden. | M1, M2 |
+| TOOL-02 | Suche in Archiven, Suche nach Plugin-Feldern, Suchprofile speichern/laden, Suche separat öffnen, Treffer in Dateifenster übernehmen | Gespeicherte Suche öffnen und Treffer als Dateiliste übernehmen. Danach Suche innerhalb eines Archivs und nach WDX-Feld prüfen. | M2, M3, M4 |
+| TOOL-03 | Everything optional anbinden, `ev:` und `ed:` sowie verfügbare Indexdetails und Ordnergrößen, interne Suche bei fehlender Integration | Suchbereiche und Ergebnislisten mit installiertem Everything prüfen. Ohne Dienst funktioniert die interne Suche. | M2 |
+| TOOL-04 | Duplikatsuche nach Name, Größe und Inhalt, erweiterte Eigenschaften je Referenzoption | Gleichnamige unterschiedliche Dateien von echten Inhaltsduplikaten unterscheiden. | M2, M4 |
+| TOOL-05 | Lister und Quick View für Text, Hex, Binär, HTML, RTF, Bilder und Multimedia, Kodierungswahl, Suchen, Position anspringen, mehrere Dateien und Fenster | Große und nebenläufig geänderte Datei in Text und Hex öffnen. Vorschau und externe Viewer-/Editorzuordnung aus beiden Seiten prüfen. | M1, M2 |
+| TOOL-06 | Miniaturen mit Cache, Viewer- und Thumbnail-Plugins, externe Bildbetrachter, Druck aus Lister | Cache bei Änderungen invalidieren. Ein WLX-Plugin zeigt eine Datei über Lister und Quick View. | M2, M4 |
+| TOOL-07 | Mehrfachumbenennung mit Vorschau, Vorlagen, Namens- und Erweiterungsmasken, Zähler, Datums-/Metadaten-/Clipboard-Platzhalter, RegEx, Groß-/Kleinschreibung, Namen im Editor und Rücknahme | Zyklus, Umbenennung nur der Groß-/Kleinschreibung, Kollision, ungültige Zielnamen und `[X+]` mit leerem Clipboard prüfen. | M2, M4 |
+| TOOL-08 | Dateien nach Inhalt vergleichen, Text/Binär, Kodierung, Unterschiede navigieren, Optionen zum Ignorieren, Text bearbeiten und Änderungen übernehmen | Vergleich zweier kodierter Dateien mit Änderungen auf beiden Seiten. Nur bewusst übernommene Änderung wird geschrieben. | M2 |
+| TOOL-09 | Fenster/Verzeichnisse vergleichen und markieren, neuere/abweichende markieren und gleiche ausblenden | Vergleich nach Namen und Zeit vom Vergleich nach Inhalt unterscheiden und markierte Ergebnisse prüfen. | M2 |
+| TOOL-10 | Verzeichnisse synchronisieren, rekursiv, symmetrisch/asymmetrisch, leere Ordner, nur Auswahl, Filter, Zeit-/Größen-/Inhaltsvergleich, Profil und richtungsbezogene Vorschau | Zwei Bäume mit leeren Ordnern, geänderter Datei und Zielüberhang vergleichen. Nur freigegebene Schritte ausführen. | M2 |
+| TOOL-11 | Synchronisierung mit ZIP/7z und zwischen unterstützten Archivseiten sowie lokal↔FTP, serverseitige Prüfsummen bei angebotenen Befehlen | Lokalen Baum mit Archiv und Test-FTP vergleichen. Abbruch zeigt, welche Schritte bereits abgeschlossen sind. | M3 |
+| TOOL-12 | Prüfsummen erzeugen und verifizieren, SFV/CRC32, MD5, SHA-1, SHA-2, SHA-3 und BLAKE3, Referenzdateien und Zwischenablage | Referenz-Prüfsummendateien mit Unicode-Pfaden lesen. Manipulierte Datei und Hash aus der Zwischenablage erkennen. | M2 |
+| TOOL-13 | Dateien aufspalten und zusammenfügen, TC-kompatible Teilnamen und Begleitdatei, MIME/UUE/XXE kodieren und dekodieren, BinHex dekodieren | Clone und TC setzen die Teile des jeweils anderen Programms wieder zusammen. BinHex-Testprobe korrekt dekodieren. | M2 |
+
+Die CHM-Hilfe dokumentiert die Varianten in `dlg_search.htm`, `lister.htm`, `dlg_multi_rename_tool.htm`, `dlg_synchronize_dirs.htm` und `dlg_createsfv.htm`. Everything ist eine optionale externe Suchintegration. [Offizielle CHM-Hilfe](https://www.totalcommander.ch/help/tcmdd1158_chm.zip), [Everything-SDK](https://www.voidtools.com/support/everything/sdk/), [Änderungsübersicht](https://www.ghisler.com/mailing.htm).
+
+## Archive
+
+| ID | Funktionsumfang | Prüffall | Stufe |
+| --- | --- | --- | --- |
+| ARC-01 | Archive wie Verzeichnisse betreten, navigieren, Dateien anzeigen, suchen, auspacken und testen. Datei zwischen Archiv und Dateisystem sowie zwischen zwei Archiven kopieren | Einträge per `F3` lesen und `F5` zwischen zwei Archiven übertragen. Defektes Archiv führt zu einem konkreten Fehler. | M3 |
+| ARC-02 | ZIP, ZIP64 und 7z intern erstellen, lesen und bearbeiten, soweit TC dies je Format und Option zulässt. TAR/GZ lesen und die von TC vorgesehenen Schreibpfade abdecken | ZIP64 mit Unicode-Namen, 7z mit umbenanntem Unterverzeichnis und TAR mit Unterpfad wechselseitig mit TC testen. | M3 |
+| ARC-03 | RAR, ARJ, LZH/LHA, CAB, ACE und UC2 lesen gemäß Referenz. Prüfen, wann TC intern, per Plugin oder mit externem Packer öffnet. CAB bleibt beim Lesen und Entpacken | Originale Testarchive mit unterschiedlichen Versionen und Methoden öffnen und extrahieren. Fehlende externe Werkzeuge eindeutig melden. | M3, M5 |
+| ARC-04 | Konfigurierbare externe Packer für die von TC angebotenen Schreibpfade, etwa ARJ, LHA, RAR, UC2, ACE sowie externe ZIP-/7z-Tools | Kompatible Werkzeuge mit getrennten Argumenten und korrekter Pfadbehandlung starten. UC2-Präfix und Ergebnis gegen TC prüfen. | M3, M5 |
+| ARC-05 | Passwörter, Verschlüsselung, verschlüsselte Header, Multi-Volume- und SFX-Archive, Optionen je Format, packen pro Datei/Ordner und im Hintergrund | Verschlüsseltes Archiv ohne Namensspuren in Verlauf und Log öffnen. Mehrteiliges Archiv testen und unterstütztes SFX erzeugen. | M3, M5 |
+| ARC-06 | Archiv bearbeiten, Einträge löschen/umbenennen, Test nach Packen, Teilmengen entpacken, Zielmasken, Zoneninformationen bei Extraktion, externe Packer und WCX | Abbruch während eines Archivumbaus lässt das bisherige Archiv auf einem geeigneten lokalen Volume lesbar. | M3, M4 |
+| ARC-07 | Kompressionsmethoden innerhalb von ZIP wie Deflate, BZIP2, LZMA, PPMd, XZ, Zstandard und Brotli gemäß TC, einzelne `.zst`- und `.br`-Dateien, ZipCrypto und AES nach Referenz | Ein Prüfkorpus unterscheidet die Methoden anhand der Header. Jede Probe mit erwartetem Inhalt und Hash entpacken. | M3, M5 |
+
+Für jedes Format braucht die Release-Matrix eigene Spalten für Auflisten, Lesen, Schreiben, Ändern, Verschlüsselung, Mehrteiler, SFX und erforderliche Zusatzsoftware. M0 klärt mit echten Dateien und der Herstellerdokumentation, welcher Backend-Weg für ACE und UC2 auf Windows 11 praktikabel ist. Die Angabe eines Dateiformats allein sagt nichts über die unterstützten Aktionen. [Packfunktionen](https://www.ghisler.com/featurel.htm), [Offizielle Hilfe mit Packer-Dialogen](https://www.ghisler.com/dfaq.htm), [WCX-Schnittstelle](https://www.ghisler.com/plugins.htm).
+
+## FTP und physische Direktverbindungen
+
+| ID | Funktionsumfang | Prüffall | Stufe |
+| --- | --- | --- | --- |
+| NET-01 | FTP/FTPS als Dateifenster, Schnellverbindung, Profile, aktive/passive Übertragung, IPv4/IPv6, Zertifikate, gespeicherte Zugangsdaten und Passwortschutz | Explizite und implizite FTPS-Verbindung anhand der Referenzoptionen testen. Falsche Zertifikatskette führt zu einer verständlichen Entscheidung. | M3 |
+| NET-02 | HTTP-, FTP- und SOCKS4/5-Proxys nach Referenz, Servertypen und konfigurierbare Listings, MLSD/LIST, Zeichensatz, Verbindungsdetails, versteckte Dateien, Serverkommandos, MODE Z und ältere OTP-Authentifizierung | MLSD-, Unix-/Windows- und abweichendes Listing korrekt lesen. Proxy, Kompression und Legacy-Authentifizierung mit passenden Testservern prüfen. | M3, M5 |
+| NET-03 | Upload/Download, binärer und Textmodus, Hintergrundtransfer, Download aus Liste und URL, fortsetzbarer Transfer bei Unterstützung, Verbindungsoptionen, Unix-Rechte per Serverbefehl | Binären Download und Upload bei Netzabbruch unterbrechen. Nur bei bestätigter Unterstützung und passendem Teilstück fortsetzen. | M3 |
+| NET-04 | FXP zwischen zwei Servern, serverseitige Fähigkeiten, FTP-Sync, Zeitstempel und optionaler serverseitiger Inhaltsvergleich | Transfer zwischen geeigneten Testservern ohne lokale Datenkopie. Ein abgelehntes FXP bleibt im Auftrag als solcher Fehler sichtbar. | M3 |
+| NET-05 | USB-Direkttransfer mit unterstütztem Easy-Transfer-Kabel, Client-/Server-Rollen, Navigation und Kopieren | Physisch mit dokumentiertem Kabel und passender Gegenstelle testen. Erfolgreiche und abgebrochene Übertragung in beide Richtungen prüfen. | M5 |
+| NET-06 | LPT-Direkttransfer über kompatibles Kabel, Treiber bzw. Brücke und unterstützte TC-Gegenstelle, Servermodus über CLI | Physischer Referenztest mit Signatur- und Treibervoraussetzungen des Zielsystems. Ein blockierter Hardwarepfad bleibt in der Matrix sichtbar. | M5 |
+
+Der FTP-Prototyp prüft libcurl für Standardtransfers und Proxys. FXP und TC-spezifische Listing- und Serverprofile haben eigene Testfälle, bevor das Backend festgelegt wird. USB-Direktverbindung, Parallelport und portable USB-Installation sind drei verschiedene Funktionen. [FTP-FAQ](https://www.ghisler.com/efaqftp.htm), [USB-FAQ](https://www.ghisler.com/dfaqusb.htm), [Kabel-Liste](https://www.ghisler.com/cables/index.htm), [Parallelport-FAQ](https://www.ghisler.com/efaqport.htm), [libcurl für FTP mit TLS](https://curl.se/libcurl/c/CURLOPT_USE_SSL.html).
+
+## Plugins, Befehle und Migration
+
+| ID | Funktionsumfang | Prüffall | Stufe |
+| --- | --- | --- | --- |
+| EXT-01 | **WCX** für Packer, Lesen/Extrahieren/Testen/Packen/Löschen je Plugin, Fortschritt und Abbruch | Ein echtes und ein synthetisches Plugin mit prüfbaren Unicode- und Legacy-Rückrufen testen. | M4 |
+| EXT-02 | **WFX** für Dateisysteme, Navigation, Transfer, Eigenschaften und Operationen je Plugin, Zugangsabfragen | SFTP-Plugin als Referenzworkflow prüfen. Host-Abbruch während einer Übertragung führt zu erkennbarem Teilzustand. | M4 |
+| EXT-03 | **WLX** für Dateivorschau, Schnellansicht und unterstützte Pluginaktionen, Typ-Erkennung und Fenstereinbettung | Lister und Quick View mit derselben Datei. Fokus, Maus, Tastatur, DPI-Wechsel und geschlossenen Host prüfen. | M4 |
+| EXT-04 | **WDX** für Metadaten, eigene Spalten, Suche und Sortierung, Metadatenänderung soweit implementiert | Ein Metadatenfeld wird in Suchergebnis, Spalte und Umbenennungsregel identisch aufgelöst. | M4 |
+| EXT-05 | Plugin-Installation, Verwaltung, Aktivieren/Deaktivieren, Reihenfolge und Erkennungsregeln, x86/x64, ANSI/Unicode und sichere Übergabe von Anmeldedaten | Falsche Architektur, fehlende DLL-Abhängigkeit, Plugin-Timeout und Crash werden dem betroffenen Plugin zugeordnet. | M4 |
+| CFG-01 | Einstellungen und Profile, editierbare Konfigurationsdateien, Sprache, gespeicherte Fensterposition und Zustand, Installer und portable Ausgabe inklusive USB-Betrieb | Portable Ausgabe auf anderem Laufwerk starten. Installer-Version und portable Profile getrennt betreiben und aktualisieren. | M1, M5 |
+| CFG-02 | Import für `wincmd.ini`, `wcx_ftp.ini`, `.bar`, `.tab`, `.mnu`, `usercmd.ini` und Pluginregistrierungen. Unbekannte Schlüssel, ausgelagerte INI-Abschnitte, Original-Encoding und Abhängigkeiten erfassen. FTP-Profile erhalten einen getrennten Ablauf für Zugangsdaten | Referenzprofil aus einer Kopie importieren und Ergebnisbericht mit übernommenen, übersetzten und offenen Einträgen vergleichen. | M4 |
+| CFG-03 | Kommandobrowser, `cm_`/`em_`, numerische IDs, Parameterfamilien, Aliase, Befehlsketten, Platzhalter und benutzerspezifische Menübefehle | Vier Aufrufwege für denselben Befehl testen. Ungültige Parameter und fehlende Befehle erhalten definierte Ergebnisse. | M1, M4 |
+| CFG-04 | Kommandozeile für Navigation, interne und externe Befehle, Auswahl-/Pfadplatzhalter, Terminal im Ordner, Windows-Quoting und erhöhte Aktionen | Pfade mit Leerzeichen, Unicode und Prozentzeichen bleiben bei externer Übergabe unverändert. | M1, M4 |
+| CFG-05 | Startparameter für Seiten und Tabs, Ein-/Mehrinstanz, abweichende INI-Datei, Direktstart von Tools, Übergabe an laufende Instanz und dokumentierte externe Steuerung über `WM_COPYDATA` | `/L=`, `/R=`, `/O`, `/T`, `/S=S` und `/S=P:PORT` in dokumentierten Kontexten mit Referenz vergleichen. Externe Nachrichten nach Inhalt und Absenderkontext prüfen. | M4, M5 |
+| CFG-06 | Signierte Distribution, Updateprüfung, Paket- und Konfigurationsmigration, Versionsinformation und lokale Offline-Hilfe | Upgrade mit einem älteren Clone-Profil und portablem Modus. Ein fehlerhaftes Update kann keine teilweise Konfigurationsmigration hinterlassen. | M5 |
+
+Für M0 sind die mitgelieferten `TOTALCMD.INC`, `WCMD_DEU.MNU`, `TOTALCMD.CHM` und `HISTORY.TXT` maßgeblich. Die öffentliche Befehlsübersicht nennt 11.57 und ergänzt die Referenz insbesondere bei Parametererklärungen. Optionsschalter, Aliasnamen und dynamisch nummerierte Befehle brauchen eigene Varianten im Testkatalog. [Download des 11.58.1-Referenzpakets](https://www.ghisler.com/ddownload.htm), [Befehlsliste](https://www.ghisler.ch/wiki/index.php?title=List_of_internal_commands), [Startparameter](https://www.ghisler.ch/wiki/index.php/Command_line_parameters), [Plugin-SDKs](https://www.ghisler.com/plugins.htm).
