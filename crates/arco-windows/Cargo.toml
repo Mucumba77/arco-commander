@@ -1,0 +1,22 @@
+[package]
+name = "arco-windows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+blake3 = "1"
+percent-encoding = "2"
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+url = "2.5"
+zeroize = "1"
+
+[target.'cfg(windows)'.dependencies]
+trash = "5"
+windows = { version = "0.62", features = ["Win32_System_Com", "Win32_System_Ole", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Registry", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[lints]
+workspace = true

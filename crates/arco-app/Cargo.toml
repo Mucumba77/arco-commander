@@ -1,0 +1,24 @@
+[package]
+name = "arco-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "arco-commander"
+path = "src/main.rs"
+
+[dependencies]
+arco-core.workspace = true
+arco-windows.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
+regex = "1"
+slint.workspace = true
+tempfile.workspace = true
+
+[build-dependencies]
+slint-build.workspace = true
+
+[lints]
+workspace = true

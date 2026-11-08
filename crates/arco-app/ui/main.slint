@@ -1,0 +1,1979 @@
+import { Button, CheckBox, ComboBox, LineEdit, ListView, Palette, ScrollView, TextEdit } from "std-widgets.slint";
+
+export struct FileRow {
+    name: string,
+    full-name: string,
+    extension: string,
+    info: string,
+    time: string,
+    attributes: string,
+    icon: string,
+    selected: bool,
+    wdx-first: string,
+    wdx-second: string,
+    wdx-third: string,
+}
+
+export struct PathItem {
+    label: string,
+    path: string,
+    locked: bool,
+}
+
+export struct PanelData {
+    path: string,
+    rows: [FileRow],
+    tabs: [PathItem],
+    crumbs: [PathItem],
+    tab: int,
+    filter: string,
+    detailed: bool,
+    sort-column: string,
+    wdx-sort-index: int,
+    descending: bool,
+    volume: string,
+    drive: string,
+    local: bool,
+}
+
+export struct SettingsData {
+    toolbar: bool,
+    panel-toolbar: bool,
+    drive-buttons: bool,
+    drive-list: bool,
+    folder-tabs: bool,
+    current-path: bool,
+    breadcrumbs: bool,
+    history-buttons: bool,
+    column-headers: bool,
+    panel-status: bool,
+    command-line: bool,
+    function-keys: bool,
+    numpad-folders: bool,
+    stacked: bool,
+    light: bool,
+    show-hidden: bool,
+    list-font: int,
+    list-font-size: int,
+}
+
+global Typography {
+    public pure function family(choice: int) -> string {
+        return choice == 1 ? "Arial" : choice == 2 ? "Verdana" : "Segoe UI";
+    }
+    public pure function size(choice: int) -> length {
+        return choice == 0 ? 12px : choice == 2 ? 16px : choice == 3 ? 18px : 14px;
+    }
+}
+
+export struct SyncOptionsData {
+    mode: int,
+    recursive: bool,
+    empty-dirs: bool,
+    selected-only: bool,
+    by-content: bool,
+    ignore-date: bool,
+    masks: string,
+}
+
+export struct SyncRowData {
+    index: int,
+    path: string,
+    left: string,
+    right: string,
+    comparison: string,
+    action: int,
+    can-left: bool,
+    can-right: bool,
+    can-delete: bool,
+}
+
+export struct FtpRowData {
+    name: string,
+    info: string,
+    modified: string,
+    directory: bool,
+}
+
+export struct FtpProfileData {
+    name: string,
+    address: string,
+    user: string,
+    proxy: string,
+    local-directory: string,
+    security: int,
+    active: bool,
+    listing: int,
+    remember: bool,
+}
+
+export struct PluginRowData {
+    name: string,
+    kind: string,
+    architecture: string,
+    enabled: bool,
+    masks: string,
+    path: string,
+    detection: string,
+}
+
+component FtpProfilesCard inherits Rectangle {
+    in property <[string]> profiles;
+    in property <int> selected;
+    in property <FtpProfileData> data;
+    in property <int> revision;
+    in property <string> notice;
+    callback select(int);
+    callback operate(string, FtpProfileData, string);
+    callback close();
+    background: Colors.surface;
+    border-radius: 12px;
+
+    VerticalLayout {
+        padding: 18px;
+        spacing: 10px;
+        Text { text: "FTP-Verbindungen"; color: Colors.text; font-size: 21px; }
+        ScrollView {
+            VerticalLayout {
+                spacing: 8px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    profile-list := ComboBox {
+                        model: root.profiles;
+                        current-index: root.selected;
+                        accessible-label: "Gespeicherte FTP-Verbindungen";
+                        horizontal-stretch: 1;
+                        selected => { root.select(self.current-index); }
+                    }
+                    Button { text: "Neu"; clicked => { root.select(0); } }
+                    Button { text: "Importieren"; clicked => { root.operate("import", root.data, ""); } }
+                }
+                name := LineEdit { text: root.data.name; placeholder-text: "Profilname"; accessible-label: "Profilname"; }
+                address := LineEdit { text: root.data.address; placeholder-text: "ftp://server:port/startordner/"; accessible-label: "FTP-Adresse und Startordner"; }
+                user := LineEdit { text: root.data.user; placeholder-text: "Benutzername (leer für anonym)"; accessible-label: "Benutzername"; }
+                proxy := LineEdit { text: root.data.proxy; placeholder-text: "HTTP-/SOCKS-Proxy (optional)"; accessible-label: "Proxy"; }
+                local := LineEdit { text: root.data.local-directory; placeholder-text: "Lokaler Startordner im anderen Fenster (optional)"; accessible-label: "Lokaler Startordner"; }
+                security := ComboBox {
+                    model: ["Explizites FTPS (FTP mit TLS)", "Implizites FTPS", "Klartext-FTP"];
+                    current-index: root.data.security;
+                    accessible-label: "Verschlüsselungsmodus";
+                }
+                Text {
+                    text: security.current-index == 2
+                        ? "Klartext-FTP überträgt Passwort und Dateien unverschlüsselt."
+                        : security.current-index == 1 ? "Für implizites FTPS ftps:// verwenden." : "Für explizites FTPS ftp:// verwenden.";
+                    color: Colors.text;
+                    wrap: word-wrap;
+                }
+                active := CheckBox { text: "Aktiver FTP-Modus (Direktverbindung)"; checked: root.data.active; }
+                listing := ComboBox {
+                    model: ["Verzeichnisliste automatisch", "Nur MLSD", "Nur LIST (Unix / IIS)"];
+                    current-index: root.data.listing;
+                    accessible-label: "Format der Verzeichnisliste";
+                }
+                remember := CheckBox { text: "Passwort in Windows-Anmeldeinformationen speichern"; checked: root.data.remember; }
+                password-field := LineEdit {
+                    placeholder-text: root.data.remember ? "Neues Passwort (optional)" : "Passwort zum Speichern";
+                    input-type: password;
+                    enabled: remember.checked;
+                    accessible-label: "FTP-Passwort";
+                }
+            }
+        }
+        Text { text: root.notice; wrap: word-wrap; color: Colors.text; }
+        HorizontalLayout {
+            spacing: 8px;
+            Button {
+                text: "Löschen";
+                enabled: root.selected > 0;
+                clicked => { root.operate("delete", root.data, ""); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Button { text: "Schließen"; clicked => { root.close(); } }
+            Button {
+                text: "Speichern";
+                clicked => {
+                    root.operate("save", {
+                        name: name.text, address: address.text, user: user.text, proxy: proxy.text,
+                        local-directory: local.text,
+                        security: security.current-index, active: active.checked, remember: remember.checked,
+                        listing: listing.current-index,
+                    }, password-field.text);
+                }
+            }
+            Button {
+                text: "Verbinden";
+                enabled: root.selected > 0 && name.text == root.data.name && address.text == root.data.address
+                    && user.text == root.data.user && proxy.text == root.data.proxy
+                    && local.text == root.data.local-directory
+                    && security.current-index == root.data.security && active.checked == root.data.active
+                    && listing.current-index == root.data.listing
+                    && remember.checked == root.data.remember && password-field.text == "";
+                clicked => { root.operate("connect", root.data, ""); }
+            }
+        }
+    }
+
+    changed revision => {
+        profile-list.current-index = root.selected;
+        name.text = root.data.name;
+        address.text = root.data.address;
+        user.text = root.data.user;
+        proxy.text = root.data.proxy;
+        local.text = root.data.local-directory;
+        security.current-index = root.data.security;
+        active.checked = root.data.active;
+        listing.current-index = root.data.listing;
+        remember.checked = root.data.remember;
+        password-field.text = "";
+        if (root.selected == 0) { name.focus(); }
+    }
+    init => { name.focus(); }
+}
+
+export struct ShortcutRow { key: string, label: string }
+struct PanelAction { icon: image, label: string, command: string }
+export struct ShortcutLabels {
+    refresh: string,
+    view: string,
+    edit: string,
+    copy: string,
+    move-file: string,
+    mkdir: string,
+    delete: string,
+}
+
+export global Colors {
+    in property <bool> light;
+    out property <color> background: light ? #e8eff0 : #10181e;
+    out property <color> panel: light ? #f9fcfc : #18232b;
+    out property <color> surface: light ? #f1f6f7 : #212e38;
+    out property <color> edge: light ? #c2d1d5 : #334852;
+    out property <color> accent: light ? #046d5c : #72e3c6;
+    out property <color> text: light ? #1b2f3a : #eff6f7;
+    out property <color> muted: light ? #49616d : #a8bdc7;
+    out property <color> selection: light ? #cfece4 : #264b48;
+    out property <color> cursor: light ? #e3f3ef : #293d45;
+    out property <color> folder: light ? #8c5105 : #efbc78;
+    out property <color> media: light ? #604395 : #c6aefa;
+    out property <color> archive: light ? #8e3a55 : #f1a2b7;
+}
+
+component NavButton inherits Button {
+    in property <string> label;
+    accessible-label: root.label;
+    width: 34px;
+    icon-size: 16px;
+    colorize-icon: true;
+    Tooltip { text: @markdown("\{root.label}"); }
+}
+
+component ActionButton inherits Button {
+    colorize-icon: true;
+    icon-size: 17px;
+}
+
+component DetailCell inherits Text {
+    color: Colors.muted;
+    font-size: 12px;
+    vertical-alignment: center;
+    overflow: elide;
+}
+
+component PluginManagerCard inherits Rectangle {
+    in property <[PluginRowData]> entries;
+    in-out property <int> selection: -1;
+    in property <bool> busy;
+    property <bool> selected: root.selection >= 0 && root.selection < root.entries.length;
+    property <PluginRowData> item: root.selected ? root.entries[root.selection] : { name: "", kind: "", architecture: "", enabled: false, masks: "", path: "", detection: "" };
+    callback operate(string, int);
+    callback close();
+    background: Colors.surface;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: Colors.edge;
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 8px;
+        Text { text: "Plugin-Verwaltung"; color: Colors.text; font-size: 21px; }
+        HorizontalLayout {
+            spacing: 7px;
+            Button { text: "DLL registrieren …"; enabled: !root.busy; clicked => { root.operate("add", -1); } }
+            Button { text: "ZIP installieren …"; enabled: !root.busy; clicked => { root.operate("package", -1); } }
+            Button { text: "Aus wincmd.ini importieren …"; enabled: !root.busy; clicked => { root.operate("import", -1); } }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        ListView {
+            vertical-stretch: 1;
+            accessible-label: "Registrierte Plugins in Ausführungsreihenfolge";
+            for entry[index] in root.entries : Button {
+                height: 33px;
+                text: entry.name + " · " + entry.kind + " · " + entry.architecture + (entry.enabled ? " · Aktiv" : " · Deaktiviert");
+                checkable: true;
+                checked: index == root.selection;
+                clicked => { root.selection = index; }
+            }
+        }
+        if root.selected : VerticalLayout {
+            spacing: 4px;
+            DetailCell { text: root.item.path; }
+            DetailCell { text: root.item.masks == "" ? "Dateimasken: alle bei manueller Auswahl" : "Dateimasken: " + root.item.masks; }
+            if root.item.detection != "" : DetailCell { text: "Importierte TC-Erkennung: " + root.item.detection; }
+        }
+        if !root.selected : DetailCell { text: "Registriere eine Plugin-DLL oder installiere ein Plugin-Paket."; }
+        HorizontalLayout {
+            spacing: 6px;
+            Button { text: root.item.enabled ? "Deaktivieren" : "Aktivieren"; enabled: root.selected && !root.busy; clicked => { root.operate("toggle", root.selection); } }
+            Button { text: "Bearbeiten …"; enabled: root.selected && !root.busy; clicked => { root.operate("edit", root.selection); } }
+            Button { text: "Prüfen"; enabled: root.selected && !root.busy; clicked => { root.operate("probe", root.selection); } }
+            Button { text: "Ausführen"; enabled: root.selected && root.item.enabled && !root.busy; clicked => { root.operate("run", root.selection); } }
+            Button { text: "↑"; accessible-label: "Plugin nach oben"; enabled: root.selected && root.selection > 0 && !root.busy; clicked => { root.operate("up", root.selection); } }
+            Button { text: "↓"; accessible-label: "Plugin nach unten"; enabled: root.selected && root.selection + 1 < root.entries.length && !root.busy; clicked => { root.operate("down", root.selection); } }
+            Button { text: "Entfernen …"; enabled: root.selected && !root.busy; clicked => { root.operate("remove", root.selection); } }
+            Rectangle { horizontal-stretch: 1; }
+            Button { text: "Schließen"; clicked => { root.close(); } }
+        }
+        if root.selected && (root.item.kind == "WCX" || root.item.kind == "WFX") : Button {
+            text: "Dateioperationen …";
+            enabled: root.item.enabled && !root.busy;
+            clicked => { root.operate("files", root.selection); }
+        }
+        if root.selected && root.item.kind == "WDX" : Button {
+            text: "WDX-Spalte hinzufügen …";
+            enabled: root.item.enabled && !root.busy;
+            clicked => { root.operate("column", root.selection); }
+        }
+    }
+}
+
+component FtpBrowserCard inherits FocusScope {
+    in property <string> url;
+    in property <[FtpRowData]> rows;
+    in property <bool> has-parent;
+    in property <bool> detailed;
+    in property <bool> busy;
+    in-out property <int> selection;
+    callback browse(string, int);
+    callback close();
+    init => { self.focus(); }
+
+    function keep-visible() {
+        let top = root.selection * 36px;
+        if top + choices.viewport-y < 0px { choices.viewport-y = -top; }
+        if top + 36px + choices.viewport-y > choices.height {
+            choices.viewport-y = min(0px, choices.height - top - 36px);
+        }
+    }
+
+    changed selection => { root.keep-visible(); }
+    key-pressed(event) => {
+        if (event.text == Key.Escape) { root.close(); return accept; }
+        if (root.busy) { return reject; }
+        if (event.text == Key.Backspace && root.has-parent) { root.browse("up", -1); return accept; }
+        if (root.rows.length == 0) { return reject; }
+        if (event.text == Key.UpArrow || event.text == Key.DownArrow) {
+            root.selection = clamp(root.selection + (event.text == Key.UpArrow ? -1 : 1), 0, root.rows.length - 1);
+            return accept;
+        }
+        if (event.text == Key.Home) { root.selection = 0; return accept; }
+        if (event.text == Key.End) { root.selection = root.rows.length - 1; return accept; }
+        if (event.text == Key.Return) { root.browse("open", root.selection); return accept; }
+        if (event.text == Key.F5) { root.browse("download", root.selection); return accept; }
+        return reject;
+    }
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: 10px;
+        border-width: 1px;
+        border-color: Colors.accent;
+        background: Colors.panel;
+        VerticalLayout {
+            padding: 16px;
+            spacing: 8px;
+            Text { text: "FTP-Verzeichnis"; color: Colors.text; font-size: 20px; font-weight: 700; }
+            HorizontalLayout {
+                spacing: 6px;
+                NavButton { icon: @image-url("icons/up.svg"); label: "Übergeordneter FTP-Ordner"; enabled: root.has-parent && !root.busy; clicked => { root.browse("up", -1); } }
+                NavButton { icon: @image-url("icons/refresh.svg"); label: "FTP-Verzeichnis neu laden"; enabled: !root.busy; clicked => { root.browse("refresh", -1); } }
+                DetailCell {
+                    text: root.url;
+                    horizontal-stretch: 1;
+                    Tooltip { text: @markdown("\{root.url}"); }
+                }
+                NavButton { icon: @image-url("icons/edit.svg"); label: "FTP-Pfad eingeben"; enabled: !root.busy; clicked => { root.browse("path", -1); } }
+            }
+            if !root.detailed : Text {
+                text: "Der Server liefert eine Namensliste. Weitere Ordner erreichst du über die Pfadeingabe.";
+                color: Colors.muted;
+                wrap: word-wrap;
+            }
+            choices := ListView {
+                vertical-stretch: 1;
+                accessible-label: "Dateien und Ordner auf dem FTP-Server";
+                for row[index] in root.rows : Rectangle {
+                    height: 36px;
+                    background: index == root.selection ? Colors.selection : (Math.mod(index, 2) == 0 ? Colors.background : Colors.surface);
+                    accessible-role: list-item;
+                    accessible-label: row.name + " " + row.info;
+                    HorizontalLayout {
+                        padding: 6px;
+                        spacing: 8px;
+                        Image {
+                            source: row.directory ? @image-url("icons/folder.svg") : @image-url("icons/file.svg");
+                            width: 17px; height: 17px;
+                            colorize: row.directory ? Colors.folder : Colors.muted;
+                        }
+                        Text { text: row.name; color: Colors.text; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
+                        DetailCell { text: row.info; width: 95px; }
+                        DetailCell { text: row.modified; width: 112px; }
+                    }
+                    TouchArea {
+                        clicked => { root.selection = index; root.focus(); }
+                        double-clicked => { root.browse("open", index); }
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: 7px;
+                Button {
+                    text: root.rows.length > 0 && root.rows[root.selection].directory ? "Ordner öffnen" : "Herunterladen";
+                    enabled: root.rows.length > 0 && !root.busy;
+                    clicked => { root.browse("open", root.selection); }
+                }
+                Button { text: "Mit lokalem Ordner abgleichen"; enabled: !root.busy; clicked => { root.browse("sync", -1); } }
+                Rectangle { horizontal-stretch: 1; }
+                Button { text: "Schließen"; clicked => { root.close(); } }
+            }
+        }
+    }
+}
+
+component SyncOptionsCard inherits Rectangle {
+    in property <SyncOptionsData> data;
+    in property <int> revision;
+    in property <[string]> roots;
+    in property <[string]> presets;
+    in property <bool> has-selection;
+    in property <int> archive-side;
+    in property <bool> archive-secret;
+    in property <bool> ftp;
+    in property <string> notice;
+    callback configure(SyncOptionsData, string, int);
+    callback close();
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: Colors.accent;
+    background: Colors.panel;
+
+    function draft() -> SyncOptionsData {
+        return {
+            mode: mode.current-index,
+            recursive: recursive.checked,
+            empty-dirs: recursive.checked && empty-dirs.checked,
+            selected-only: root.has-selection && selected-only.checked, by-content: by-content.checked,
+            ignore-date: ignore-date.checked, masks: masks.text,
+        };
+    }
+
+    function reset() {
+        mode.current-index = root.data.mode;
+        recursive.checked = root.data.recursive;
+        empty-dirs.checked = root.data.empty-dirs;
+        selected-only.checked = root.data.selected-only;
+        by-content.checked = root.data.by-content;
+        ignore-date.checked = root.data.ignore-date;
+        masks.text = root.data.masks;
+    }
+
+    init => { root.reset(); }
+    changed data => { root.reset(); }
+    changed revision => { root.reset(); }
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 10px;
+        Text { text: root.ftp ? "FTP mit lokalem Ordner abgleichen" : "Verzeichnisse synchronisieren"; color: Colors.text; font-size: 20px; font-weight: 700; }
+        for folder[index] in root.roots : DetailCell {
+            text: (index == 0 ? (root.ftp ? "Lokal  " : "Links  ") : (root.ftp ? "FTP  " : "Rechts  ")) + folder;
+            Tooltip { text: @markdown("\{folder}"); }
+        }
+        ScrollView {
+            vertical-stretch: 1;
+            VerticalLayout {
+                spacing: 9px;
+                alignment: start;
+                mode := ComboBox {
+                    model: root.ftp
+                        ? ["Beide Seiten abgleichen", "Lokal → FTP", "Lokal auf FTP spiegeln", "FTP → lokal"]
+                        : ["Beide Seiten abgleichen", "Von links nach rechts kopieren", "Links nach rechts spiegeln", "Von rechts nach links kopieren"];
+                    enabled: root.archive-side < 0;
+                    accessible-label: "Richtung der Synchronisierung";
+                }
+                if mode.current-index == 2 : Text {
+                    text: root.ftp ? "Beim Spiegeln werden zusätzliche FTP-Einträge zum Löschen vorgeschlagen."
+                        : "Beim Spiegeln werden zusätzliche Einträge rechts zum Löschen vorgeschlagen.";
+                    color: Colors.accent;
+                    wrap: word-wrap;
+                }
+                if root.ftp : Text {
+                    text: "Der Abgleich verwendet Größe und UTC-Zeit aus MLSD. Beim Inhaltsvergleich werden passende FTP-Dateien zum Vergleich heruntergeladen.";
+                    color: Colors.muted;
+                    wrap: word-wrap;
+                }
+                if root.archive-side >= 0 : Text {
+                    text: "Arco entpackt die Vergleichsdaten in einen temporären Ordner und vergleicht den Inhalt. Freigegebene Dateien werden in den lokalen Ordner kopiert.";
+                    color: Colors.muted;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 14px;
+                    VerticalLayout {
+                        spacing: 4px;
+                        recursive := CheckBox { text: "Unterordner"; }
+                        empty-dirs := CheckBox { text: "Leere Ordner"; enabled: recursive.checked; }
+                        selected-only := CheckBox { text: "Nur markierte Einträge"; enabled: root.has-selection; }
+                    }
+                    VerticalLayout {
+                        spacing: 4px;
+                        by-content := CheckBox { text: "Nach Inhalt vergleichen"; enabled: root.archive-side < 0; }
+                        ignore-date := CheckBox { text: "Datum ignorieren"; enabled: root.archive-side < 0; }
+                    }
+                }
+                masks := LineEdit {
+                    placeholder-text: "Dateimasken, z. B. *.txt;*.md | geheim*";
+                    accessible-label: "Dateimasken mit optionalen Ausschlüssen";
+                }
+                archive-password := LineEdit {
+                    visible: root.archive-secret;
+                    placeholder-text: "Passwort für verschlüsselte ZIP-Einträge";
+                    accessible-label: "ZIP-Passwort";
+                    input-type: password;
+                }
+                HorizontalLayout {
+                    visible: root.archive-side < 0 && !root.ftp;
+                    spacing: 6px;
+                    presets := ComboBox {
+                        model: root.presets;
+                        current-index: 0;
+                        accessible-label: "Synchronisierungsprofil";
+                    }
+                    Button {
+                        text: "Profil laden";
+                        enabled: presets.current-index >= 0;
+                        clicked => { root.configure(root.draft(), presets.current-value, 0); }
+                    }
+                }
+                HorizontalLayout {
+                    visible: root.archive-side < 0 && !root.ftp;
+                    spacing: 6px;
+                    preset-name := LineEdit { placeholder-text: "Profilname"; accessible-label: "Name des Profils"; }
+                    Button { text: "Profil speichern"; clicked => { root.configure(root.draft(), preset-name.text, 1); } }
+                }
+            }
+        }
+        Text { text: root.notice; color: Colors.accent; wrap: word-wrap; }
+        HorizontalLayout {
+            spacing: 7px;
+            Rectangle { horizontal-stretch: 1; }
+            Button { text: "Abbrechen"; clicked => { root.close(); } }
+            Button {
+                text: "Vergleichen";
+                clicked => { root.configure(root.draft(), root.archive-secret ? archive-password.text : "", 2); }
+                init => { self.focus(); }
+            }
+        }
+    }
+}
+
+component SyncReviewCard inherits Rectangle {
+    in property <[string]> roots;
+    in property <[SyncRowData]> rows;
+    in property <string> summary;
+    in property <bool> has-actions;
+    in property <bool> has-deletes;
+    in property <bool> copy-only;
+    callback filter(int);
+    callback choose(int, int);
+    callback run(bool);
+    callback close();
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: Colors.accent;
+    background: Colors.panel;
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 8px;
+        Text { text: root.copy-only ? "FTP-Kopie prüfen" : "Synchronisierung prüfen"; color: Colors.text; font-size: 20px; font-weight: 700; }
+        for folder[index] in root.roots : DetailCell {
+            text: (index == 0 ? "Links  " : "Rechts  ") + folder;
+            Tooltip { text: @markdown("\{folder}"); }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            ComboBox {
+                width: 190px;
+                model: ["Unterschiede", "Alle Einträge", "Gleiche Einträge", "Konflikte"];
+                current-index: 0;
+                accessible-label: "Ergebnisse anzeigen";
+                selected => { approve.checked = false; root.filter(self.current-index); }
+            }
+            DetailCell { text: root.summary; horizontal-stretch: 1; }
+        }
+        ListView {
+            accessible-label: "Vergleich und Kopierrichtungen";
+            vertical-stretch: 1;
+            for row[i] in root.rows : Rectangle {
+                height: 52px;
+                background: Math.mod(i, 2) == 0 ? Colors.background : Colors.surface;
+                HorizontalLayout {
+                    padding: 5px;
+                    spacing: 8px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 2px;
+                        Text { text: row.path; color: Colors.text; overflow: elide; accessible-label: row.path; }
+                        DetailCell { text: "L  " + row.left + "     R  " + row.right + "     " + row.comparison; }
+                    }
+                    if row.can-left : Button {
+                        text: "←"; checkable: true; checked: row.action == 1;
+                        accessible-label: "Nach links kopieren · " + row.path;
+                        clicked => { approve.checked = false; root.choose(row.index, 1); }
+                    }
+                    if row.can-right : Button {
+                        text: "→"; checkable: true; checked: row.action == 2;
+                        accessible-label: "Nach rechts kopieren · " + row.path;
+                        clicked => { approve.checked = false; root.choose(row.index, 2); }
+                    }
+                    if row.can-delete : Button {
+                        text: "Rechts löschen"; checkable: true; checked: row.action == 3;
+                        accessible-label: "Rechts löschen · " + row.path;
+                        clicked => { approve.checked = false; root.choose(row.index, 3); }
+                    }
+                }
+            }
+        }
+        Text {
+            text: "Ausgeführt werden die ausgewählten Aktionen der angezeigten Einträge.";
+            color: Colors.muted;
+            wrap: word-wrap;
+        }
+        approve := CheckBox {
+            text: "Angezeigte Löschungen rechts dauerhaft ausführen";
+            visible: root.has-deletes;
+        }
+        HorizontalLayout {
+            spacing: 7px;
+            Rectangle { horizontal-stretch: 1; }
+            Button { text: "Schließen"; clicked => { root.close(); } init => { self.focus(); } }
+            Button {
+                text: root.copy-only ? "Kopieren" : "Synchronisieren";
+                enabled: root.has-actions && (!root.has-deletes || approve.checked);
+                clicked => { root.run(approve.checked); }
+            }
+        }
+    }
+}
+
+component ColumnButton inherits Button {
+    in property <string> label;
+    in property <bool> sorted;
+    in property <bool> descending;
+    text: root.sorted ? root.label + (root.descending ? " ↓" : " ↑") : root.label;
+    accessible-label: root.sorted ? root.label + (root.descending ? ", absteigend" : ", aufsteigend") : root.label;
+}
+
+component FileGlyph inherits Image {
+    in property <string> kind;
+    source: kind == "parent" ? @image-url("icons/up.svg") :
+        kind == "folder" ? @image-url("icons/folder.svg") :
+        kind == "link" ? @image-url("icons/link.svg") :
+        kind == "image" ? @image-url("icons/image.svg") :
+        kind == "archive" ? @image-url("icons/archive.svg") :
+        kind == "code" ? @image-url("icons/code.svg") :
+        kind == "media" ? @image-url("icons/media.svg") : @image-url("icons/file.svg");
+    colorize: kind == "folder" ? Colors.folder : kind == "media" || kind == "image" ? Colors.media :
+        kind == "archive" ? Colors.archive : kind == "link" || kind == "code" ? Colors.accent : Colors.muted;
+    image-fit: contain;
+}
+
+component FilePanel inherits Rectangle {
+    in property <[string]> wdx-headings;
+    out property <int> first-visible-row: max(0, floor(-listing.viewport-y / root.row-height));
+    out property <int> visible-row-count: max(1, ceil(listing.visible-height / root.row-height));
+    property <bool> show-wdx: root.data.local && root.data.detailed && root.wdx-headings.length > 0;
+    property <bool> show-date: root.data.detailed && (!root.show-wdx || self.width >= 580px);
+    property <length> wdx-width: clamp((self.width - 290px) / max(1, root.wdx-headings.length), 58px, 130px);
+    in property <PanelData> data;
+    in property <int> cursor: -1;
+    in property <string> summary;
+    in property <bool> busy;
+    in property <bool> active;
+    in property <string> side;
+    in property <[string]> drives;
+    in property <SettingsData> settings;
+    property <bool> editing-location;
+    property <bool> show-attributes: root.data.detailed && self.width >= (root.show-wdx ? 700px : 385px);
+    property <length> list-size: Typography.size(root.settings.list-font-size);
+    property <string> list-family: Typography.family(root.settings.list-font);
+    property <length> row-height: root.list-size + 12px;
+    property <length> extension-width: max(53px, root.list-size * 4);
+    property <length> size-width: max(77px, root.list-size * 5.8);
+    property <length> date-width: max(105px, root.list-size * 8.4);
+    property <length> attribute-width: max(51px, root.list-size * 3.7);
+    callback action(string);
+    callback navigate(string);
+    callback select-crumb(int);
+    callback filter(string);
+    callback click-row(int, bool, bool, bool);
+    callback context-row(int, bool);
+    callback drag-row(int);
+    callback select-tab(int);
+    callback return-to-list();
+    border-width: 1px;
+    border-radius: 10px;
+    border-color: root.active ? Colors.accent : Colors.edge;
+    background: Colors.panel;
+
+    public function focus-path() {
+        root.editing-location = true;
+        location.text = root.data.path;
+        location.focus();
+        location.clear-selection();
+    }
+
+    public function cancel-path() -> bool {
+        if (!root.editing-location) { return false; }
+        root.editing-location = false;
+        root.return-to-list();
+        return true;
+    }
+
+    public function focus-filter() { quick-filter.focus(); }
+
+    public function cursor-point() -> Point {
+        return {
+            x: listing.absolute-position.x + min(90px, listing.width / 2),
+            y: listing.absolute-position.y + clamp(root.cursor * root.row-height + listing.viewport-y + root.row-height / 2, 0px, listing.visible-height)
+        };
+    }
+
+    function scroll-to-cursor() {
+        if (root.cursor < 0) { return; }
+        let top = root.cursor * root.row-height;
+        if (top < -listing.viewport-y) {
+            listing.viewport-y = -top;
+        } else if (top + root.row-height > -listing.viewport-y + listing.visible-height) {
+            listing.viewport-y = min(0px, listing.visible-height - top - root.row-height);
+        }
+    }
+
+    changed data => {
+        if (root.active) { root.scroll-to-cursor(); }
+    }
+    changed cursor => {
+        if (root.active) { root.scroll-to-cursor(); }
+    }
+    changed active => {
+        if (root.active) { root.scroll-to-cursor(); }
+    }
+    changed row-height => {
+        if (root.active) { root.scroll-to-cursor(); }
+    }
+
+    VerticalLayout {
+        padding: 6px;
+        spacing: 4px;
+        HorizontalLayout {
+            spacing: 4px;
+            Text { text: root.side; color: root.active ? Colors.accent : Colors.muted; vertical-alignment: center; font-size: 11px; font-weight: 800; }
+            if root.settings.drive-list : ComboBox {
+                model: root.drives;
+                current-value: root.data.drive;
+                accessible-label: "Laufwerk";
+                width: 70px;
+                selected(value) => { root.navigate(value); root.return-to-list(); }
+            }
+            DetailCell { text: root.data.volume; horizontal-stretch: 1; }
+            if root.settings.history-buttons : NavButton { icon: @image-url("icons/back.svg"); label: "Zurück"; clicked => { root.action("back"); } }
+            if root.settings.history-buttons : NavButton { icon: @image-url("icons/forward.svg"); label: "Vorwärts"; clicked => { root.action("forward"); } }
+            NavButton { icon: @image-url("icons/drive.svg"); label: "Zum Laufwerksstamm"; clicked => { root.action("root"); } }
+            NavButton { icon: @image-url("icons/up.svg"); label: "Übergeordneter Ordner"; clicked => { root.action("up"); } }
+            if !root.settings.current-path : NavButton { icon: @image-url("icons/edit.svg"); label: "Pfad eingeben"; clicked => { root.focus-path(); } }
+            if !root.settings.current-path : NavButton { icon: @image-url("icons/star.svg"); label: "Ordnerfavoriten"; clicked => { root.action("favorites"); } }
+        }
+        if root.settings.drive-buttons : Flickable {
+            height: 30px;
+            viewport-height: self.height;
+            viewport-width: max(self.width, drive-buttons.preferred-width);
+            drive-buttons := HorizontalLayout {
+                width: parent.viewport-width;
+                height: parent.viewport-height;
+                spacing: 3px;
+                alignment: start;
+                for drive in root.drives : Button {
+                    text: drive;
+                    accessible-label: "Laufwerk " + drive;
+                    checkable: true;
+                    checked: root.data.drive == drive;
+                    clicked => { root.navigate(drive); root.return-to-list(); }
+                }
+            }
+        }
+        path-row := HorizontalLayout {
+            visible: root.settings.current-path || root.editing-location;
+            height: self.visible ? 34px : 0px;
+            spacing: 4px;
+            Rectangle {
+                horizontal-stretch: 1;
+                min-width: 80px;
+                height: 34px;
+                clip: true;
+                if !root.editing-location : Rectangle {
+                    width: 100%;
+                    height: 100%;
+                    background: Colors.surface;
+                    border-radius: 6px;
+                    if root.settings.breadcrumbs : Flickable {
+                        width: parent.width;
+                        height: parent.height;
+                        viewport-width: max(self.width, path-segments.preferred-width);
+                        viewport-height: self.height;
+                        viewport-x: min(0px, self.width - self.viewport-width);
+                        path-segments := HorizontalLayout {
+                            width: parent.viewport-width;
+                            height: parent.viewport-height;
+                            alignment: start;
+                            padding-left: 5px;
+                            padding-right: 5px;
+                            spacing: 3px;
+                            for crumb[index] in root.data.crumbs : HorizontalLayout {
+                                spacing: 2px;
+                                if index > 0 : Image { source: @image-url("icons/chevron.svg"); width: 10px; height: 10px; colorize: Colors.muted; }
+                                Button {
+                                    text: crumb.label;
+                                    accessible-label: crumb.path;
+                                    clicked => { root.select-crumb(index); root.return-to-list(); }
+                                }
+                            }
+                        }
+                    }
+                    if !root.settings.breadcrumbs : DetailCell {
+                        text: root.data.path;
+                        x: 7px;
+                        width: parent.width - 14px;
+                        height: parent.height;
+                    }
+                }
+                location := LineEdit {
+                    visible: root.editing-location;
+                    width: 100%;
+                    height: 100%;
+                    accessible-label: root.side + " Pfad";
+                    changed has-focus => {
+                        if (!self.has-focus) { root.editing-location = false; }
+                    }
+                    accepted(value) => { root.editing-location = false; root.navigate(value); root.return-to-list(); }
+                }
+            }
+            NavButton { icon: @image-url("icons/edit.svg"); label: "Pfad eingeben"; clicked => { root.focus-path(); } }
+            NavButton { icon: @image-url("icons/star.svg"); label: "Ordnerfavoriten"; clicked => { root.action("favorites"); } }
+        }
+        HorizontalLayout {
+            spacing: 4px;
+            if root.settings.folder-tabs : Flickable {
+                height: 34px;
+                horizontal-stretch: 1;
+                viewport-width: max(self.width, root.data.tabs.length * 112px);
+                viewport-height: self.height;
+                viewport-x: min(0px, max(self.width - self.viewport-width, -root.data.tab * 112px));
+                HorizontalLayout {
+                    width: parent.viewport-width;
+                    alignment: start;
+                    spacing: 4px;
+                    for tab[i] in root.data.tabs : Button {
+                        width: 108px;
+                        text: tab.label;
+                        icon: tab.locked ? @image-url("icons/lock.svg") : @image-url("");
+                        checkable: true;
+                        checked: root.data.tab == i;
+                        accessible-label: tab.path;
+                        clicked => { root.select-tab(i); root.return-to-list(); }
+                    }
+                }
+            }
+            if root.settings.folder-tabs : NavButton { icon: @image-url("icons/plus.svg"); label: "Neuer Tab"; clicked => { root.action("new-tab"); } }
+            if root.settings.folder-tabs : NavButton { icon: @image-url("icons/close.svg"); label: "Tab schließen"; clicked => { root.action("close-tab"); } }
+            if root.settings.folder-tabs : NavButton { icon: @image-url("icons/settings.svg"); label: "Ordner-Tab verwalten"; clicked => { root.action("tab-menu"); } }
+            if !root.settings.folder-tabs : Rectangle { horizontal-stretch: 1; }
+            quick-filter := LineEdit {
+                text: root.data.filter;
+                placeholder-text: "Schnellfilter";
+                accessible-label: root.side + " Schnellfilter";
+                width: 112px;
+                edited(value) => { root.filter(value); }
+                accepted => { root.return-to-list(); }
+            }
+        }
+        if root.settings.column-headers : Rectangle {
+            height: 28px;
+            background: Colors.surface;
+            border-radius: 4px;
+            HorizontalLayout {
+                spacing: 2px;
+                padding-left: 4px;
+                ColumnButton { label: "Name"; sorted: root.data.sort-column == "name"; descending: root.data.descending; horizontal-stretch: 1; clicked => { root.action("sort-name"); } }
+                if root.data.detailed : ColumnButton { label: "Erw."; sorted: root.data.sort-column == "extension"; descending: root.data.descending; width: root.extension-width; clicked => { root.action("sort-extension"); } }
+                if root.data.detailed : ColumnButton { label: "Größe"; sorted: root.data.sort-column == "size"; descending: root.data.descending; width: root.size-width; clicked => { root.action("sort-size"); } }
+                if root.show-date : ColumnButton { label: "Datum"; sorted: root.data.sort-column == "time"; descending: root.data.descending; width: root.date-width; clicked => { root.action("sort-time"); } }
+                if root.show-attributes : ColumnButton { label: "Attr."; sorted: root.data.sort-column == "attributes"; descending: root.data.descending; width: root.attribute-width; clicked => { root.action("sort-attributes"); } }
+                for title[column] in root.wdx-headings : ColumnButton {
+                    visible: root.show-wdx;
+                    width: root.show-wdx ? root.wdx-width : 0px;
+                    label: title;
+                    sorted: root.data.wdx-sort-index == column;
+                    descending: root.data.descending;
+                    clicked => { root.action(column == 0 ? "sort-wdx-first" : column == 1 ? "sort-wdx-second" : "sort-wdx-third"); }
+                }
+            }
+        }
+        listing := ListView {
+            vertical-stretch: 1;
+            accessible-label: root.side + " Dateiliste";
+            for row[i] in root.data.rows : Rectangle {
+                height: root.row-height;
+                background: row.selected ? Colors.selection : (root.active && root.cursor == i ? Colors.cursor : (Math.mod(i, 2) == 1 ? Colors.panel : Colors.background));
+                border-width: root.active && root.cursor == i ? 1px : 0px;
+                border-color: Colors.accent;
+                accessible-role: list-item;
+                accessible-label: row.full-name + " " + row.info + " " + row.time + " " + row.attributes;
+                HorizontalLayout {
+                    padding-left: 7px;
+                    spacing: 2px;
+                    FileGlyph { kind: row.icon; width: 16px; height: 16px; }
+                    Text { text: root.data.detailed ? row.name : row.full-name; color: Colors.text; font-family: root.list-family; font-size: root.list-size; font-weight: 400; horizontal-stretch: 1; overflow: elide; vertical-alignment: center; }
+                    if root.data.detailed : DetailCell { width: root.extension-width; text: row.extension; font-family: root.list-family; font-size: root.list-size; }
+                    if root.data.detailed : DetailCell { width: root.size-width; text: row.info; font-family: root.list-family; font-size: root.list-size; horizontal-alignment: right; }
+                    if root.show-date : DetailCell { width: root.date-width; text: row.time; font-family: root.list-family; font-size: root.list-size; horizontal-alignment: right; }
+                    if root.show-attributes : DetailCell { width: root.attribute-width; text: row.attributes; font-size: root.list-size; horizontal-alignment: center; font-family: "Consolas"; }
+                    for title[column] in root.wdx-headings : DetailCell {
+                        visible: root.show-wdx;
+                        width: root.show-wdx ? root.wdx-width : 0px;
+                        text: column == 0 ? row.wdx-first : column == 1 ? row.wdx-second : row.wdx-third;
+                        font-family: root.list-family;
+                        font-size: root.list-size;
+                    }
+                }
+                TouchArea {
+                    property <bool> drag-started;
+                    property <bool> control-down;
+                    property <bool> shift-down;
+                    property <bool> right-down;
+                    enabled: !root.busy;
+                    mouse-cursor: MouseCursor.pointer;
+                    clicked => {
+                        if (!self.drag-started) {
+                            root.click-row(i, self.control-down, self.shift-down, false);
+                            root.return-to-list();
+                        }
+                    }
+                    double-clicked => {
+                        if (!self.drag-started && !self.control-down && !self.shift-down) {
+                            root.click-row(i, false, false, true);
+                            root.return-to-list();
+                        }
+                    }
+                    pointer-event(event) => {
+                        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                            self.drag-started = false;
+                            self.control-down = event.modifiers.control;
+                            self.shift-down = event.modifiers.shift;
+                        }
+                        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                            self.right-down = true;
+                        }
+                        if (event.kind == PointerEventKind.cancel) { self.right-down = false; }
+                        if (event.kind == PointerEventKind.up && event.button == PointerEventButton.right && self.right-down) {
+                            self.right-down = false;
+                            if (self.mouse-x >= 0px && self.mouse-x < self.width && self.mouse-y >= 0px && self.mouse-y < self.height) {
+                                root.context-row(i, event.modifiers.shift);
+                                root.return-to-list();
+                            }
+                        }
+                    }
+                    moved => {
+                        if (self.pressed && !self.drag-started && (abs(self.mouse-x - self.pressed-x) > 8px || abs(self.mouse-y - self.pressed-y) > 8px)) {
+                            self.drag-started = true;
+                            root.drag-row(i);
+                        }
+                    }
+                }
+            }
+        }
+        if root.settings.panel-status || root.busy : Text {
+            text: root.busy ? "Lädt …" : root.summary;
+            height: 20px;
+            color: root.busy ? Colors.accent : Colors.muted;
+            font-size: 12px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+component SettingsCard inherits Rectangle {
+    in property <SettingsData> current;
+    in property <[ShortcutRow]> shortcut-commands;
+    in property <[ShortcutRow]> shortcut-assigned;
+    in property <string> shortcut-query;
+    in property <string> shortcut-command;
+    in property <string> shortcut-title;
+    in property <string> shortcut-candidate;
+    in property <string> shortcut-notice;
+    in property <bool> shortcut-recording;
+    in property <bool> shortcut-conflict;
+    callback shortcut-filter(string);
+    callback select-shortcut-command(string);
+    callback edit-shortcut(string, string);
+    callback apply(SettingsData, bool);
+    callback close();
+    property <int> page;
+    property <bool> toolbar: root.current.toolbar;
+    property <bool> panel-toolbar: root.current.panel-toolbar;
+    property <bool> drive-buttons: root.current.drive-buttons;
+    property <bool> drive-list: root.current.drive-list;
+    property <bool> folder-tabs: root.current.folder-tabs;
+    property <bool> current-path: root.current.current-path;
+    property <bool> breadcrumbs: root.current.breadcrumbs;
+    property <bool> history-buttons: root.current.history-buttons;
+    property <bool> column-headers: root.current.column-headers;
+    property <bool> panel-status: root.current.panel-status;
+    property <bool> command-line: root.current.command-line;
+    property <bool> function-keys: root.current.function-keys;
+    property <bool> numpad-folders: root.current.numpad-folders;
+    property <bool> stacked: root.current.stacked;
+    property <bool> light: root.current.light;
+    property <bool> show-hidden: root.current.show-hidden;
+    property <int> list-font: root.current.list-font;
+    property <int> list-font-size: root.current.list-font-size;
+    property <SettingsData> draft: {
+        toolbar: root.toolbar, panel-toolbar: root.panel-toolbar, drive-buttons: root.drive-buttons,
+        drive-list: root.drive-list, folder-tabs: root.folder-tabs, current-path: root.current-path,
+        breadcrumbs: root.breadcrumbs, history-buttons: root.history-buttons,
+        column-headers: root.column-headers, panel-status: root.panel-status,
+        command-line: root.command-line, function-keys: root.function-keys,
+        numpad-folders: root.numpad-folders, stacked: root.stacked, light: root.light,
+        show-hidden: root.show-hidden, list-font: root.list-font, list-font-size: root.list-font-size
+    };
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: Colors.accent;
+    background: Colors.panel;
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 12px;
+        Text { text: "Einstellungen"; color: Colors.text; font-size: 20px; font-weight: 700; }
+        HorizontalLayout {
+            spacing: 14px;
+            vertical-stretch: 1;
+            VerticalLayout {
+                width: 155px;
+                alignment: start;
+                spacing: 5px;
+                for label[index] in ["Layout", "Bedienung", "Tastatur", "Schrift"] : Button {
+                    text: label;
+                    checkable: true;
+                    checked: root.page == index;
+                    clicked => { root.page = index; if (index != 2) { root.edit-shortcut("stop", ""); } }
+                    init => { if (index == 0) { self.focus(); } }
+                }
+            }
+            if root.page == 0 : ScrollView {
+                VerticalLayout {
+                    spacing: 5px;
+                    alignment: start;
+                    CheckBox { text: "Obere Symbolleiste anzeigen"; checked <=> root.toolbar; }
+                    CheckBox { text: "Symbolleiste zwischen den Dateifenstern anzeigen"; checked <=> root.panel-toolbar; }
+                    CheckBox { text: "Laufwerksbuttons anzeigen"; checked <=> root.drive-buttons; }
+                    CheckBox { text: "Laufwerksliste anzeigen"; checked <=> root.drive-list; }
+                    CheckBox { text: "Ordner-Tabs anzeigen"; checked <=> root.folder-tabs; }
+                    CheckBox { text: "Aktuellen Pfad anzeigen"; checked <=> root.current-path; }
+                    CheckBox { text: "Anklickbare Pfadsegmente"; enabled: root.current-path; checked <=> root.breadcrumbs; }
+                    CheckBox { text: "Zurück- und Vorwärtsbuttons anzeigen"; checked <=> root.history-buttons; }
+                    CheckBox { text: "Spaltenüberschriften anzeigen"; checked <=> root.column-headers; }
+                    CheckBox { text: "Status der Dateilisten anzeigen"; checked <=> root.panel-status; }
+                    CheckBox { text: "Befehlszeile anzeigen"; checked <=> root.command-line; }
+                    CheckBox { text: "Funktionstastenleiste anzeigen"; checked <=> root.function-keys; }
+                    CheckBox { text: "Dateifenster übereinander"; checked <=> root.stacked; }
+                }
+            }
+            if root.page == 1 : VerticalLayout {
+                alignment: start;
+                spacing: 7px;
+                CheckBox { text: "Mit Num + und Num * auch Ordner markieren"; checked <=> root.numpad-folders; }
+                CheckBox { text: "Versteckte Dateien anzeigen"; checked <=> root.show-hidden; }
+                CheckBox { text: "Helles Farbschema"; checked <=> root.light; }
+                DetailCell { text: "Strg-Klick markiert einzelne Einträge. Umschalt-Klick markiert einen Bereich."; wrap: word-wrap; }
+            }
+            if root.page == 2 : VerticalLayout {
+                spacing: 7px;
+                LineEdit {
+                    text: root.shortcut-query;
+                    placeholder-text: "Befehl filtern";
+                    accessible-label: "Befehl für Tastenkürzel filtern";
+                    edited(value) => { root.shortcut-filter(value); }
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    vertical-stretch: 1;
+                    ListView {
+                        horizontal-stretch: 1;
+                        min-width: 175px;
+                        accessible-label: "Belegbare Befehle";
+                        for row in root.shortcut-commands : Button {
+                            height: 31px;
+                            text: row.label;
+                            checkable: true;
+                            checked: root.shortcut-command == row.key;
+                            clicked => { root.select-shortcut-command(row.key); }
+                        }
+                    }
+                    VerticalLayout {
+                        width: 246px;
+                        spacing: 5px;
+                        DetailCell { text: root.shortcut-title; font-size: 14px; font-weight: 700; }
+                        if root.shortcut-assigned.length == 0 : DetailCell { text: "Ohne Belegung"; }
+                        if root.shortcut-assigned.length > 0 : ListView {
+                            height: 72px;
+                            accessible-label: "Aktuelle Belegungen";
+                            for binding in root.shortcut-assigned : HorizontalLayout {
+                                spacing: 3px;
+                                height: 32px;
+                                DetailCell { text: binding.label; horizontal-stretch: 1; }
+                                Button { text: "Entfernen"; accessible-label: binding.label + " entfernen"; clicked => { root.edit-shortcut("remove", binding.key); } }
+                            }
+                        }
+                        Button {
+                            text: root.shortcut-recording ? "Aufnahme abbrechen" : "Tastenkürzel aufzeichnen";
+                            enabled: root.shortcut-command != "";
+                            clicked => { root.edit-shortcut(root.shortcut-recording ? "stop" : "record", ""); }
+                        }
+                        DetailCell {
+                            text: root.shortcut-recording ? "Tastenkombination drücken · Esc bricht ab" : root.shortcut-candidate;
+                            color: Colors.accent;
+                            wrap: word-wrap;
+                        }
+                        if root.shortcut-notice != "" : DetailCell { text: root.shortcut-notice; wrap: word-wrap; }
+                        Button {
+                            text: root.shortcut-conflict ? "Belegung ersetzen" : "Zuweisen";
+                            enabled: !root.shortcut-recording && root.shortcut-candidate != "";
+                            clicked => { root.edit-shortcut("assign", ""); }
+                        }
+                        Rectangle { vertical-stretch: 1; }
+                    }
+                }
+                HorizontalLayout {
+                    Rectangle { horizontal-stretch: 1; }
+                    Button { text: "Standardbelegung laden"; clicked => { root.edit-shortcut("reset", ""); } }
+                }
+            }
+            if root.page == 3 : VerticalLayout {
+                alignment: start;
+                spacing: 10px;
+                Text { text: "Schrift in den Dateilisten"; color: Colors.text; }
+                ComboBox { model: ["Segoe UI", "Arial", "Verdana"]; current-index <=> root.list-font; accessible-label: "Schriftfamilie"; }
+                ComboBox { model: ["12 px", "14 px", "16 px", "18 px"]; current-index <=> root.list-font-size; accessible-label: "Schriftgröße"; }
+                Rectangle {
+                    min-height: 40px;
+                    background: Colors.surface;
+                    border-radius: 4px;
+                    Text {
+                        x: 10px;
+                        height: parent.height;
+                        text: "Ordnerübersicht_2026.txt · 128 KiB";
+                        color: Colors.text;
+                        font-family: Typography.family(root.list-font);
+                        font-size: Typography.size(root.list-font-size);
+                        font-weight: 400;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+        HorizontalLayout {
+            spacing: 6px;
+            Rectangle { horizontal-stretch: 1; }
+            Button { text: "Abbrechen"; clicked => { root.close(); } }
+            Button { text: "Anwenden"; clicked => { root.apply(root.draft, false); } }
+            Button { text: "OK"; clicked => { root.apply(root.draft, true); } }
+        }
+    }
+}
+
+component DrivePicker inherits FocusScope {
+    in property <string> title;
+    in property <[string]> drives;
+    in property <int> initial;
+    property <int> selection: root.initial;
+    callback choose(string);
+    callback letter(string) -> bool;
+    callback cancel();
+    init => { self.focus(); }
+    key-pressed(event) => {
+        if (event.text == Key.Escape) { root.cancel(); return accept; }
+        if (root.drives.length == 0) { return reject; }
+        if (event.text == Key.UpArrow || event.text == Key.DownArrow) {
+            root.selection = clamp(root.selection + (event.text == Key.UpArrow ? -1 : 1), 0, root.drives.length - 1);
+            choices.viewport-y = min(0px, max(choices.height - choices.viewport-height, -root.selection * 34px));
+            return accept;
+        }
+        if (event.text == Key.Return) { root.choose(root.drives[root.selection]); return accept; }
+        if (root.letter(event.text)) { return accept; }
+        return reject;
+    }
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: 10px;
+        border-width: 1px;
+        border-color: Colors.accent;
+        background: Colors.panel;
+        VerticalLayout {
+            padding: 12px;
+            spacing: 6px;
+            Text { text: root.title; font-size: 17px; font-weight: 700; color: Colors.text; }
+            choices := ListView {
+                for drive[index] in root.drives : Button {
+                    height: 34px;
+                    text: drive;
+                    checkable: true;
+                    checked: index == root.selection;
+                    clicked => { root.choose(drive); }
+                }
+            }
+            DetailCell { text: "↑ ↓ wählen · Enter öffnen · Esc abbrechen"; }
+        }
+    }
+}
+
+export struct PreviewBounds { x: float, y: float, width: float, height: float }
+
+component QuickView inherits Rectangle {
+    in property <string> title;
+    in property <string> note;
+    in property <string> body;
+    in property <image> preview-image;
+    in property <bool> embedded;
+    property <PreviewBounds> bounds: {
+        x: preview-body.absolute-position.x / 1px, y: preview-body.absolute-position.y / 1px,
+        width: preview-body.width / 1px, height: preview-body.height / 1px,
+    };
+    callback bounds-changed(PreviewBounds);
+    changed bounds => { root.bounds-changed(root.bounds); }
+    init => { root.bounds-changed(root.bounds); }
+    callback close();
+    background: Colors.panel;
+    border-width: 1px;
+    border-color: Colors.edge;
+    border-radius: 10px;
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 6px;
+        HorizontalLayout {
+            spacing: 6px;
+            Image { source: @image-url("icons/eye.svg"); width: 18px; height: 18px; colorize: Colors.accent; }
+            DetailCell { text: root.title == "" ? "Schnellansicht" : "Schnellansicht · " + root.title; horizontal-stretch: 1; accessible-label: self.text; }
+            NavButton { icon: @image-url("icons/close.svg"); label: "Schnellansicht schließen"; clicked => { root.close(); } }
+        }
+        if root.note != "" : DetailCell { text: root.note; }
+        preview-body := Rectangle {
+            vertical-stretch: 1;
+            if !root.embedded && root.preview-image.width > 0 : Image {
+                width: 100%; height: 100%;
+                source: root.preview-image;
+                image-fit: contain;
+                accessible-label: root.title;
+            }
+            if !root.embedded && root.preview-image.width == 0 : TextEdit {
+                width: 100%; height: 100%;
+                text: root.body;
+                font-family: "Consolas";
+                read-only: true;
+                accessible-label: "Dateivorschau";
+            }
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "Arco Commander";
+    default-font-family: "Segoe UI";
+    default-font-size: 14px;
+    icon: @image-url("icons/mark.svg");
+    min-width: 910px;
+    min-height: 460px;
+    preferred-width: 1200px;
+    preferred-height: 760px;
+    background: Colors.background;
+    property <ColorScheme> scheme: Colors.light ? ColorScheme.light : ColorScheme.dark;
+    init => { Palette.color-scheme = root.scheme; }
+    changed scheme => { Palette.color-scheme = root.scheme; }
+    in property <PanelData> left;
+    in property <PanelData> right;
+    in property <int> left-cursor: -1;
+    in property <int> right-cursor: -1;
+    in property <string> left-summary;
+    in property <string> right-summary;
+    in property <bool> left-busy;
+    in property <bool> right-busy;
+    in property <[string]> wdx-headings;
+    out property <int> left-wdx-first: left-view.first-visible-row;
+    out property <int> left-wdx-count: left-view.visible-row-count;
+    out property <int> right-wdx-first: right-view.first-visible-row;
+    out property <int> right-wdx-count: right-view.visible-row-count;
+    in property <int> active-panel;
+    in property <bool> stacked;
+    in property <SettingsData> settings;
+    in property <bool> settings-open;
+    in property <ShortcutLabels> shortcut-labels;
+    in property <[ShortcutRow]> shortcut-commands;
+    in property <[ShortcutRow]> shortcut-assigned;
+    in property <string> shortcut-query;
+    in property <string> shortcut-command;
+    in property <string> shortcut-title;
+    in property <string> shortcut-candidate;
+    in property <string> shortcut-notice;
+    in property <bool> shortcut-recording;
+    in property <bool> shortcut-conflict;
+    in property <int> drive-side: -1;
+    in property <int> drive-selection;
+    property <bool> modal-open: root.dialog-kind != "" || root.settings-open || root.drive-side >= 0;
+    in-out property <float> split-ratio: 0.5;
+    in property <bool> quick-open;
+    in property <string> quick-title;
+    in property <string> quick-note;
+    in property <string> quick-text;
+    in property <bool> quick-embedded;
+    in-out property <PreviewBounds> quick-bounds;
+    in property <image> quick-image;
+    in property <[string]> drives;
+    in property <[string]> tools-menu;
+    in property <string> status: "Bereit";
+    in property <bool> job-active;
+    in property <string> job-status;
+    in property <string> dialog-kind;
+    in property <int> dialog-revision;
+    in property <string> dialog-title;
+    in property <string> dialog-description;
+    in property <string> dialog-value;
+    in property <string> dialog-second;
+    in property <string> dialog-placeholder;
+    in property <string> dialog-second-placeholder;
+    in property <bool> dialog-secret;
+    in property <bool> dialog-second-secret;
+    in property <[string]> dialog-options;
+    in property <SyncOptionsData> sync-draft;
+    in property <int> sync-draft-revision;
+    in property <[string]> sync-roots;
+    in property <[string]> sync-presets;
+    in property <[string]> ftp-profile-names;
+    in property <int> ftp-profile-index;
+    in property <FtpProfileData> ftp-profile-data;
+    in property <int> ftp-profile-revision;
+    in property <string> ftp-profile-notice;
+    in property <[PluginRowData]> plugin-entries;
+    in-out property <int> plugin-selection: -1;
+    in property <bool> sync-has-selection;
+    in property <int> sync-archive-side: -1;
+    in property <bool> sync-archive-secret;
+    in property <bool> sync-ftp;
+    in property <[FtpRowData]> ftp-rows;
+    in-out property <int> ftp-cursor;
+    in property <string> ftp-url;
+    in property <bool> ftp-has-parent;
+    in property <bool> ftp-detailed;
+    in property <string> sync-notice;
+    in property <[SyncRowData]> sync-rows;
+    in property <string> sync-summary;
+    in property <bool> sync-has-actions;
+    in property <bool> sync-has-deletes;
+    in property <bool> sync-copy-only;
+    in property <image> viewer-image;
+    in property <bool> viewer-back;
+    in property <bool> viewer-next;
+    in property <string> viewer-mode;
+    callback action(string);
+    callback command-line(string) -> bool;
+    callback panel-action(int, string);
+    callback navigate(int, string);
+    callback select-crumb(int, int);
+    callback filter(int, string);
+    callback click-row(int, int, bool, bool, bool);
+    callback context-row(int, int, bool);
+    callback keyboard-context(float, float);
+    callback shortcut-filter(string);
+    callback select-shortcut-command(string);
+    callback edit-shortcut(string, string);
+    callback apply-settings(SettingsData, bool);
+    callback show-drives(int);
+    callback choose-drive(string);
+    callback drive-letter(string) -> bool;
+    callback drag-row(int, int);
+    callback select-tab(int, int);
+    callback submit(string, string, int);
+    callback directory-loaded();
+    callback sync-configure(SyncOptionsData, string, int);
+    callback sync-choose(int, int);
+    callback sync-filter(int);
+    callback sync-run(bool);
+    callback ftp-browse(string, int);
+    callback ftp-profile-select(int);
+    callback ftp-profile-operate(string, FtpProfileData, string);
+    callback plugin-operate(string, int);
+
+    public function focus-panels() { keyboard.focus(); }
+    public function file-list-focused() -> bool { return !root.modal-open && keyboard.has-focus; }
+    public function focus-active-path() { if (root.active-panel == 0) { left-view.focus-path(); } else { right-view.focus-path(); } }
+    public function focus-active-filter() { if (root.active-panel == 0) { left-view.focus-filter(); } else { right-view.focus-filter(); } }
+    public function focus-command-line() { if (root.settings.command-line) { command.focus(); } }
+    function button-label(label: string, key: string) -> string { return key == "" ? label : key + "  " + label; }
+    public function open-keyboard-context() {
+        let point = root.active-panel == 0 ? left-view.cursor-point() : right-view.cursor-point();
+        root.keyboard-context(point.x / 1px, point.y / 1px);
+    }
+    public function panel-at(x: float, y: float) -> int {
+        let px = x * 1px;
+        let py = y * 1px;
+        if (left-view.visible && px >= left-view.absolute-position.x && py >= left-view.absolute-position.y
+            && px < left-view.absolute-position.x + left-view.width && py < left-view.absolute-position.y + left-view.height) {
+            return 0;
+        }
+        if (right-view.visible && px >= right-view.absolute-position.x && py >= right-view.absolute-position.y
+            && px < right-view.absolute-position.x + right-view.width && py < right-view.absolute-position.y + right-view.height) {
+            return 1;
+        }
+        return root.active-panel;
+    }
+
+    MenuBar {
+        Menu {
+            title: "Dateien";
+            enabled: !root.modal-open;
+            MenuItem { title: "Anzeigen"; activated => { root.action("view"); } }
+            MenuItem { title: "Intern anzeigen"; activated => { root.action("view-internal"); } }
+            MenuItem { title: "Bearbeiten"; activated => { root.action("edit"); } }
+            MenuItem { title: "Kopieren"; activated => { root.action("copy"); } }
+            MenuItem { title: "Dateinamen als Text kopieren"; activated => { root.action("copy-names"); } }
+            MenuItem { title: "Dateidetails als TSV kopieren"; activated => { root.action("copy-details"); } }
+            MenuItem { title: "Verschieben"; activated => { root.action("move"); } }
+            MenuItem { title: "Neuer Ordner"; activated => { root.action("mkdir"); } }
+            MenuItem { title: "Papierkorb"; activated => { root.action("delete"); } }
+            MenuSeparator { }
+            MenuItem { title: "Windows-Kontextmenü"; activated => { root.open-keyboard-context(); } }
+            MenuItem { title: "Eigenschaften"; activated => { root.action("properties"); } }
+        }
+        Menu {
+            title: "Markieren";
+            enabled: !root.modal-open;
+            MenuItem { title: "Alles markieren"; activated => { root.action("select-all"); } }
+            MenuItem { title: "Nach Maske markieren"; activated => { root.action("mask"); } }
+            MenuItem { title: "Auswahl umkehren"; activated => { root.action("invert"); } }
+            MenuItem { title: "Auswahl wiederherstellen"; activated => { root.action("restore-selection"); } }
+            MenuItem { title: "Dateifenster vergleichen"; activated => { root.action("compare-dirs"); } }
+            MenuItem { title: "Dateifenster einschließlich Ordner vergleichen"; activated => { root.action("compare-dirs-folders"); } }
+            MenuItem { title: "Vergleichen und gleiche Dateien ausblenden"; activated => { root.action("dir-match"); } }
+        }
+        Menu {
+            title: "Befehle";
+            enabled: !root.modal-open;
+            MenuItem { title: "Suchen"; activated => { root.action("search"); } }
+            MenuItem { title: "Nach Plugin-Feld suchen"; activated => { root.action("search-wdx"); } }
+            MenuItem { title: "WDX-Suchprofile"; activated => { root.action("wdx-search-profiles"); } }
+            MenuItem { title: "Dateien vergleichen"; activated => { root.action("compare"); } }
+            MenuItem { title: "Verzeichnisse synchronisieren"; activated => { root.action("sync"); } }
+            MenuItem { title: "Mehrfach umbenennen"; activated => { root.action("multi-rename"); } }
+            MenuItem { title: "Ordnerfavoriten"; activated => { root.action("favorites"); } }
+            MenuItem { title: "Befehlspalette"; activated => { root.action("palette"); } }
+        }
+        Menu {
+            title: "Archive";
+            enabled: !root.modal-open;
+            MenuItem { title: "Öffnen"; activated => { root.action("zip-open"); } }
+            MenuItem { title: "Packen"; activated => { root.action("zip-pack"); } }
+            MenuItem { title: "Entpacken"; activated => { root.action("zip-extract"); } }
+            MenuItem { title: "Prüfen"; activated => { root.action("zip-test"); } }
+        }
+        Menu {
+            title: "Netz";
+            enabled: !root.modal-open;
+            MenuItem { title: "FTP-Verbindungen …"; activated => { root.action("ftp-profiles"); } }
+            MenuItem { title: "FTP-Schnellverbindung …"; activated => { root.action("ftp-connect"); } }
+            MenuItem { title: "FTP-Verzeichnis anzeigen"; activated => { root.action("ftp-list"); } }
+            MenuItem { title: "FTP-Ordner wechseln"; activated => { root.action("ftp-directory"); } }
+            MenuItem { title: "FTP herunterladen"; activated => { root.action("ftp-download"); } }
+            MenuItem { title: "FTP hochladen"; activated => { root.action("ftp-upload"); } }
+            MenuItem { title: "FTP-Unix-Rechte ändern …"; activated => { root.action("ftp-permissions"); } }
+            MenuItem { title: "Offene FTP-Bearbeitungen …"; activated => { root.action("ftp-edits"); } }
+            MenuItem { title: "FTP mit lokalem Ordner abgleichen"; activated => { root.action("ftp-sync"); } }
+            MenuItem { title: "FTP trennen"; activated => { root.action("ftp-close"); } }
+            MenuSeparator { }
+            MenuItem { title: "WFX-Dateisystem öffnen …"; activated => { root.action("wfx-inspect"); } }
+            MenuItem { title: "WFX verlassen"; activated => { root.action("wfx-local"); } }
+        }
+        Menu {
+            title: "Ansicht";
+            enabled: !root.modal-open;
+            MenuItem { title: "Kurz- und Detailansicht wechseln"; activated => { root.action("details"); } }
+            MenuItem { title: "Schnellansicht"; activated => { root.action("quick-view"); } }
+            MenuItem { title: "Ordnergrößen berechnen"; activated => { root.action("folder-sizes"); } }
+            MenuItem { title: "Zweigansicht"; activated => { root.action("branch"); } }
+            MenuItem { title: "Zweigansicht der Auswahl"; activated => { root.action("branch-selected"); } }
+            MenuItem { title: "Tab-Gruppen verwalten …"; activated => { root.action("tab-groups"); } }
+            MenuItem { title: "Ordner-Tabs als .tab exportieren …"; activated => { root.action("tab-export"); } }
+            MenuItem { title: "Kürzlich geschlossene Tabs …"; activated => { root.action("tab-reopen"); } }
+            MenuItem { title: "Markierte Ordner in Tabs öffnen"; activated => { root.action("tabs-open-folders"); } }
+            MenuItem { title: "Markierte Ordner auf Gegenseite in Tabs öffnen"; activated => { root.action("tabs-open-folders-other"); } }
+            MenuItem { title: "Versteckte Dateien umschalten"; activated => { root.action("hidden"); } }
+            MenuItem { title: "Fenster tauschen"; activated => { root.action("swap"); } }
+            MenuItem { title: "Fenster angleichen"; activated => { root.action("match"); } }
+            MenuItem { title: "Anordnung wechseln"; activated => { root.action("stacked"); } }
+            MenuItem { title: "Farbschema wechseln"; activated => { root.action("theme"); } }
+        }
+        Menu {
+            title: "Konfigurieren";
+            enabled: !root.modal-open;
+            MenuItem { title: "Einstellungen"; activated => { root.action("settings"); } }
+            MenuItem { title: "Plugin-Verwaltung …"; activated => { root.action("plugins"); } }
+            MenuItem { title: "WDX-Spalten verwalten …"; activated => { root.action("wdx-columns"); } }
+        }
+        Menu {
+            title: "Hilfe";
+            enabled: !root.modal-open;
+            MenuItem { title: "Tastatur und Befehle"; activated => { root.action("help"); } }
+        }
+    }
+
+    keyboard := FocusScope {
+        width: 100%; height: 100%;
+        focus-on-tab-navigation: false;
+        key-pressed(event) => {
+            if (root.drive-side >= 0) { return reject; }
+            if (root.settings-open) {
+                if (event.text == Key.Escape) { root.action("close-settings"); return accept; }
+                return reject;
+            }
+            if (root.dialog-kind != "") {
+                if (event.text == Key.Escape) { root.action("close-dialog"); return accept; }
+                return reject;
+            }
+            if (event.text == Key.Escape && (left-view.cancel-path() || right-view.cancel-path())) { return accept; }
+            if (event.text == Key.Escape && command.has-focus) { keyboard.focus(); return accept; }
+            if (event.text == Key.Escape && root.job-active) { root.action("cancel-job"); return accept; }
+            return reject;
+        }
+
+        VerticalLayout {
+            padding: 8px;
+            spacing: 5px;
+            if root.settings.toolbar : Rectangle {
+                height: 40px;
+                background: Colors.panel;
+                border-radius: 10px;
+                border-width: 1px;
+                border-color: Colors.edge;
+                HorizontalLayout {
+                    padding: 4px;
+                    padding-left: 8px;
+                    spacing: 5px;
+                    Image {
+                        source: @image-url("icons/mark.svg");
+                        width: 27px;
+                        height: 27px;
+                    }
+                    Text { text: "Arco Commander"; color: Colors.text; font-weight: 800; font-size: 14px; vertical-alignment: center; }
+                    Rectangle { width: 1px; background: Colors.edge; }
+                    NavButton { icon: @image-url("icons/refresh.svg"); label: "Aktualisieren"; clicked => { root.action("refresh"); } }
+                    NavButton { icon: @image-url("icons/folder.svg"); label: "Kurz- und Detailansicht wechseln"; clicked => { root.action("details"); } }
+                    NavButton { icon: @image-url("icons/eye.svg"); label: "Schnellansicht"; checkable: true; checked: root.quick-open; clicked => { root.action("quick-view"); } }
+                    NavButton { icon: @image-url("icons/move.svg"); label: "Fenster tauschen"; clicked => { root.action("swap"); } }
+                    Rectangle { width: 1px; background: Colors.edge; }
+                    NavButton { icon: @image-url("icons/archive.svg"); label: "Dateien packen"; clicked => { root.action("zip-pack"); } }
+                    NavButton { icon: @image-url("icons/archive-extract.svg"); label: "Archiv entpacken"; clicked => { root.action("zip-extract"); } }
+                    NavButton { icon: @image-url("icons/network.svg"); label: "FTP-Verbindungen"; clicked => { root.action("ftp-profiles"); } }
+                    Rectangle { width: 1px; background: Colors.edge; }
+                    NavButton { icon: @image-url("icons/search.svg"); label: "Dateien suchen"; clicked => { root.action("search"); } }
+                    NavButton { icon: @image-url("icons/compare.svg"); label: "Dateiinhalt vergleichen"; clicked => { root.action("compare"); } }
+                    NavButton { icon: @image-url("icons/sync.svg"); label: "Verzeichnisse synchronisieren"; clicked => { root.action("sync"); } }
+                    Rectangle { horizontal-stretch: 1; }
+                    NavButton { icon: Colors.light ? @image-url("icons/moon.svg") : @image-url("icons/sun.svg"); label: "Farbschema wechseln"; clicked => { root.action("theme"); } }
+                    NavButton { icon: @image-url("icons/settings.svg"); label: "Einstellungen"; clicked => { root.action("settings"); } }
+                    ComboBox {
+                        model: root.tools-menu;
+                        current-index: 0;
+                        width: 155px;
+                        accessible-label: "Werkzeuge";
+                        selected(value) => { root.action(value); self.current-index = 0; }
+                    }
+                }
+            }
+            panels := Rectangle {
+                vertical-stretch: 1;
+                property <length> gap: root.settings.panel-toolbar ? 42px : 8px;
+                left-view := FilePanel {
+                    wdx-headings: root.wdx-headings;
+                    visible: !root.quick-open || root.active-panel == 0;
+                    data: root.left;
+                    cursor: root.left-cursor;
+                    summary: root.left-summary;
+                    busy: root.left-busy;
+                    active: root.active-panel == 0;
+                    side: "LINKS";
+                    drives: root.drives;
+                    settings: root.settings;
+                    x: 0px; y: 0px;
+                    width: root.stacked ? parent.width : (parent.width - panels.gap) * root.split-ratio;
+                    height: root.stacked ? (parent.height - panels.gap) * root.split-ratio : parent.height;
+                    action(command) => { root.panel-action(0, command); }
+                    navigate(path) => { root.navigate(0, path); }
+                    select-crumb(index) => { root.select-crumb(0, index); }
+                    filter(value) => { root.filter(0, value); }
+                    click-row(index, toggle, range, open) => { root.click-row(0, index, toggle, range, open); }
+                    context-row(index, extended) => { root.context-row(0, index, extended); }
+                    drag-row(index) => { root.drag-row(0, index); }
+                    select-tab(index) => { root.select-tab(0, index); }
+                    return-to-list => { keyboard.focus(); }
+                }
+                right-view := FilePanel {
+                    wdx-headings: root.wdx-headings;
+                    visible: !root.quick-open || root.active-panel == 1;
+                    data: root.right;
+                    cursor: root.right-cursor;
+                    summary: root.right-summary;
+                    busy: root.right-busy;
+                    active: root.active-panel == 1;
+                    side: "RECHTS";
+                    drives: root.drives;
+                    settings: root.settings;
+                    x: root.stacked ? 0px : left-view.width + panels.gap;
+                    y: root.stacked ? left-view.height + panels.gap : 0px;
+                    width: root.stacked ? parent.width : parent.width - self.x;
+                    height: root.stacked ? parent.height - self.y : parent.height;
+                    action(command) => { root.panel-action(1, command); }
+                    navigate(path) => { root.navigate(1, path); }
+                    select-crumb(index) => { root.select-crumb(1, index); }
+                    filter(value) => { root.filter(1, value); }
+                    click-row(index, toggle, range, open) => { root.click-row(1, index, toggle, range, open); }
+                    context-row(index, extended) => { root.context-row(1, index, extended); }
+                    drag-row(index) => { root.drag-row(1, index); }
+                    select-tab(index) => { root.select-tab(1, index); }
+                    return-to-list => { keyboard.focus(); }
+                }
+                if root.quick-open : QuickView {
+                    x: root.active-panel == 0 ? right-view.x : left-view.x;
+                    y: root.active-panel == 0 ? right-view.y : left-view.y;
+                    width: root.active-panel == 0 ? right-view.width : left-view.width;
+                    height: root.active-panel == 0 ? right-view.height : left-view.height;
+                    title: root.quick-title;
+                    note: root.quick-note;
+                    body: root.quick-text;
+                    embedded: root.quick-embedded;
+                    bounds-changed(bounds) => { root.quick-bounds = bounds; }
+                    preview-image: root.quick-image;
+                    close => { root.action("quick-view"); }
+                }
+                TouchArea {
+                    x: root.stacked ? 0px : left-view.width;
+                    y: root.stacked ? left-view.height : 0px;
+                    width: root.stacked ? panels.width : panels.gap;
+                    height: root.stacked ? panels.gap : panels.height;
+                    mouse-cursor: root.stacked ? MouseCursor.row-resize : MouseCursor.col-resize;
+                    double-clicked => { root.split-ratio = 0.5; }
+                    moved => {
+                        if (self.pressed) {
+                            let position = root.stacked
+                                ? self.absolute-position.y + self.mouse-y - panels.absolute-position.y
+                                : self.absolute-position.x + self.mouse-x - panels.absolute-position.x;
+                            let span = root.stacked ? panels.height : panels.width;
+                            root.split-ratio = clamp((position - panels.gap / 2) / (span - panels.gap), 0.37, 0.63);
+                        }
+                    }
+                    if !root.settings.panel-toolbar : Rectangle {
+                        width: root.stacked ? 36px : 2px;
+                        height: root.stacked ? 2px : 36px;
+                        background: parent.has-hover || parent.pressed ? Colors.accent : Colors.edge;
+                        border-radius: 1px;
+                    }
+                }
+                if root.settings.panel-toolbar : Rectangle {
+                    property <[PanelAction]> actions: [
+                        { icon: @image-url("icons/eye.svg"), label: "Anzeigen", command: "view" },
+                        { icon: @image-url("icons/edit.svg"), label: "Bearbeiten", command: "edit" },
+                        { icon: @image-url("icons/copy.svg"), label: "Kopieren", command: "copy" },
+                        { icon: @image-url("icons/move.svg"), label: "Verschieben", command: "move" },
+                        { icon: @image-url("icons/archive.svg"), label: "Dateien packen", command: "zip-pack" },
+                        { icon: @image-url("icons/folderplus.svg"), label: "Neuer Ordner", command: "mkdir" },
+                    ];
+                    x: root.stacked ? (panels.width - self.width) / 2 : left-view.width + 4px;
+                    y: root.stacked ? left-view.height + 4px : (panels.height - self.height) / 2;
+                    width: root.stacked ? self.actions.length * 38px - 4px : 34px;
+                    height: root.stacked ? 34px : self.actions.length * 38px - 4px;
+                    for item[i] in self.actions : NavButton {
+                        x: root.stacked ? i * 38px : 0px;
+                        y: root.stacked ? 0px : i * 38px;
+                        icon: item.icon;
+                        label: item.label;
+                        clicked => { root.action(item.command); }
+                    }
+                }
+            }
+            Rectangle {
+                height: root.settings.command-line ? 32px : 0px;
+                visible: root.settings.command-line;
+                HorizontalLayout {
+                spacing: 6px;
+                DetailCell {
+                    text: (root.active-panel == 0 ? root.left.path : root.right.path) + " >";
+                    width: 220px;
+                    horizontal-alignment: TextHorizontalAlignment.right;
+                }
+                command := LineEdit {
+                    placeholder-text: "cd <Pfad> oder Arco-Befehl";
+                    accessible-label: "Arco-Befehlszeile";
+                    horizontal-stretch: 1;
+                    accepted(value) => {
+                        if (root.command-line(value)) { self.text = ""; }
+                    }
+                }
+                NavButton { icon: @image-url("icons/terminal.svg"); label: "Terminal im aktiven Ordner öffnen"; clicked => { root.action("terminal"); } }
+                }
+            }
+            if root.settings.function-keys : HorizontalLayout {
+                spacing: 6px;
+                ActionButton { icon: @image-url("icons/refresh.svg"); text: root.button-label("Neu laden", root.shortcut-labels.refresh); clicked => { root.action("refresh"); } }
+                ActionButton { icon: @image-url("icons/eye.svg"); text: root.button-label("Anzeigen", root.shortcut-labels.view); clicked => { root.action("view"); } }
+                ActionButton { icon: @image-url("icons/edit.svg"); text: root.button-label("Bearbeiten", root.shortcut-labels.edit); clicked => { root.action("edit"); } }
+                ActionButton { icon: @image-url("icons/copy.svg"); text: root.button-label("Kopieren", root.shortcut-labels.copy); clicked => { root.action("copy"); } }
+                ActionButton { icon: @image-url("icons/move.svg"); text: root.button-label("Verschieben", root.shortcut-labels.move-file); clicked => { root.action("move"); } }
+                ActionButton { icon: @image-url("icons/folderplus.svg"); text: root.button-label("Neuer Ordner", root.shortcut-labels.mkdir); clicked => { root.action("mkdir"); } }
+                ActionButton { icon: @image-url("icons/trash.svg"); text: root.button-label("Löschen", root.shortcut-labels.delete); clicked => { root.action("delete"); } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Image { source: root.job-active ? @image-url("icons/sync.svg") : @image-url("icons/check.svg"); width: 15px; height: 15px; colorize: Colors.accent; }
+                Text { text: root.job-active ? root.job-status : root.status; color: root.job-active ? Colors.accent : Colors.muted; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; font-size: 12px; min-height: 24px; }
+                if root.job-active : Button { text: "Abbrechen"; clicked => { root.action("cancel-job"); } }
+            }
+        }
+
+        if root.settings-open : Rectangle {
+            width: 100%; height: 100%;
+            background: #050a14a8;
+            TouchArea { }
+            SettingsCard {
+                width: min(800px, parent.width - 36px);
+                height: min(450px, parent.height - 26px);
+                current: root.settings;
+                shortcut-commands: root.shortcut-commands;
+                shortcut-assigned: root.shortcut-assigned;
+                shortcut-query: root.shortcut-query;
+                shortcut-command: root.shortcut-command;
+                shortcut-title: root.shortcut-title;
+                shortcut-candidate: root.shortcut-candidate;
+                shortcut-notice: root.shortcut-notice;
+                shortcut-recording: root.shortcut-recording;
+                shortcut-conflict: root.shortcut-conflict;
+                shortcut-filter(value) => { root.shortcut-filter(value); }
+                select-shortcut-command(id) => { root.select-shortcut-command(id); }
+                edit-shortcut(operation, key) => { root.edit-shortcut(operation, key); }
+                apply(value, close) => { root.apply-settings(value, close); }
+                close => { root.action("close-settings"); }
+            }
+        }
+        if root.drive-side >= 0 : Rectangle {
+            width: 100%; height: 100%;
+            background: #050a14a8;
+            TouchArea { clicked => { root.action("close-drives"); } }
+            DrivePicker {
+                x: root.drive-side == 0 ? left-view.absolute-position.x + 16px : min(parent.width - self.width - 12px, right-view.absolute-position.x + 16px);
+                y: root.drive-side == 0 ? left-view.absolute-position.y + 13px : min(parent.height - self.height - 12px, right-view.absolute-position.y + 13px);
+                width: 236px;
+                height: 87px + min(7, root.drives.length) * 34px;
+                title: root.drive-side == 0 ? "Linkes Laufwerk wählen" : "Rechtes Laufwerk wählen";
+                drives: root.drives;
+                initial: root.drive-selection;
+                choose(value) => { root.choose-drive(value); }
+                letter(value) => { return root.drive-letter(value); }
+                cancel => { root.action("close-drives"); }
+            }
+        }
+        if root.dialog-kind == "sync-options" || root.dialog-kind == "sync-review" : Rectangle {
+            background: #050a14a8;
+            width: 100%; height: 100%;
+            TouchArea { }
+            if root.dialog-kind == "sync-options" : SyncOptionsCard {
+                width: min(parent.width - 46px, 680px);
+                height: min(parent.height - 46px, 565px);
+                data: root.sync-draft;
+                revision: root.sync-draft-revision;
+                roots: root.sync-roots;
+                presets: root.sync-presets;
+                has-selection: root.sync-has-selection;
+                archive-side: root.sync-archive-side;
+                archive-secret: root.sync-archive-secret;
+                ftp: root.sync-ftp;
+                notice: root.sync-notice;
+                configure(data, preset, operation) => { root.sync-configure(data, preset, operation); }
+                close => { root.action("close-dialog"); }
+            }
+            if root.dialog-kind == "sync-review" : SyncReviewCard {
+                width: min(parent.width - 46px, 1100px);
+                height: parent.height - 46px;
+                roots: root.sync-roots;
+                rows: root.sync-rows;
+                summary: root.sync-summary;
+                has-actions: root.sync-has-actions;
+                has-deletes: root.sync-has-deletes;
+                copy-only: root.sync-copy-only;
+                filter(value) => { root.sync-filter(value); }
+                choose(index, action) => { root.sync-choose(index, action); }
+                run(confirm-deletes) => { root.sync-run(confirm-deletes); }
+                close => { root.action("close-dialog"); }
+            }
+        }
+        if root.dialog-kind == "ftp-browser" : Rectangle {
+            background: #050a14a8;
+            width: 100%; height: 100%;
+            TouchArea { }
+            FtpBrowserCard {
+                width: min(parent.width - 46px, 940px);
+                height: parent.height - 46px;
+                url: root.ftp-url;
+                rows: root.ftp-rows;
+                selection <=> root.ftp-cursor;
+                has-parent: root.ftp-has-parent;
+                detailed: root.ftp-detailed;
+                busy: root.job-active;
+                browse(operation, index) => { root.ftp-browse(operation, index); }
+                close => { root.action("close-dialog"); }
+            }
+        }
+        if root.dialog-kind == "ftp-profiles" : Rectangle {
+            background: #050a14a8;
+            width: 100%; height: 100%;
+            TouchArea { }
+            FtpProfilesCard {
+                width: min(parent.width - 30px, 730px);
+                height: min(parent.height - 30px, 560px);
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                profiles: root.ftp-profile-names;
+                selected: root.ftp-profile-index;
+                data: root.ftp-profile-data;
+                revision: root.ftp-profile-revision;
+                notice: root.ftp-profile-notice;
+                select(index) => { root.ftp-profile-select(index); }
+                operate(operation, data, password) => { root.ftp-profile-operate(operation, data, password); }
+                close => { root.action("close-dialog"); }
+            }
+        }
+        if root.dialog-kind == "plugins" : Rectangle {
+            background: #050a14a8;
+            width: 100%; height: 100%;
+            TouchArea { }
+            PluginManagerCard {
+                width: min(parent.width - 30px, 880px);
+                height: min(parent.height - 30px, 590px);
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                entries: root.plugin-entries;
+                selection <=> root.plugin-selection;
+                busy: root.job-active;
+                operate(action, index) => { root.plugin-operate(action, index); }
+                close => { root.action("close-dialog"); }
+            }
+        }
+        if root.dialog-kind != "" && root.dialog-kind != "sync-options" && root.dialog-kind != "sync-review" && root.dialog-kind != "ftp-browser" && root.dialog-kind != "ftp-profiles" && root.dialog-kind != "plugins" : Rectangle {
+            background: #050a14a8;
+            width: 100%; height: 100%;
+            TouchArea { }
+            Rectangle {
+                property <int> revision: root.dialog-revision;
+                width: min(parent.width - 46px, root.dialog-kind == "text" || root.dialog-kind == "viewer" || root.dialog-kind == "image" || root.dialog-kind == "review" ? 1000px : 650px);
+                height: root.dialog-kind == "text" || root.dialog-kind == "viewer" || root.dialog-kind == "image" || root.dialog-kind == "review" ? parent.height - 74px : 330px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                border-radius: 10px;
+                border-width: 1px;
+                border-color: Colors.accent;
+                background: Colors.panel;
+                card := VerticalLayout {
+                    padding: 16px;
+                    spacing: 10px;
+                    Text { text: root.dialog-title; color: Colors.text; font-size: 20px; font-weight: 700; overflow: elide; }
+                    Text { text: root.dialog-description; color: Colors.muted; wrap: word-wrap; }
+                    input := LineEdit {
+                        visible: root.dialog-kind == "input";
+                        text: root.dialog-value;
+                        placeholder-text: root.dialog-placeholder;
+                        accessible-label: root.dialog-placeholder;
+                        input-type: root.dialog-secret ? password : text;
+                        accepted => { root.submit(self.text, second.text, options.current-index); }
+                    }
+                    second := LineEdit {
+                        visible: root.dialog-kind == "input" && root.dialog-second-placeholder != "";
+                        text: root.dialog-second;
+                        placeholder-text: root.dialog-second-placeholder;
+                        accessible-label: root.dialog-second-placeholder;
+                        input-type: root.dialog-second-secret ? password : text;
+                        accepted => { root.submit(input.text, self.text, options.current-index); }
+                    }
+                    options := ComboBox {
+                        visible: root.dialog-options.length > 0;
+                        model: root.dialog-options;
+                        current-index: 0;
+                        accessible-label: "Option";
+                    }
+                    if root.dialog-kind == "text" || root.dialog-kind == "viewer" || root.dialog-kind == "review" : TextEdit {
+                        text: root.dialog-value;
+                        read-only: true;
+                        vertical-stretch: 1;
+                        font-family: "Consolas";
+                        accessible-label: "Inhalt";
+                    }
+                    if root.dialog-kind == "image" : Image {
+                        source: root.viewer-image;
+                        image-fit: contain;
+                        vertical-stretch: 1;
+                        accessible-label: root.dialog-title;
+                    }
+                    HorizontalLayout {
+                        spacing: 7px;
+                        if root.dialog-kind == "viewer" : Button { text: "Zurück"; enabled: root.viewer-back; clicked => { root.action("viewer-back"); } }
+                        if root.dialog-kind == "viewer" : Button { text: "Weiter"; enabled: root.viewer-next; clicked => { root.action("viewer-next"); } }
+                        if root.dialog-kind == "viewer" : Button { text: root.viewer-mode == "hex" ? "Text" : "Hex"; clicked => { root.action("viewer-toggle"); } }
+                        if root.dialog-kind == "text" || root.dialog-kind == "viewer" : Button { text: "Text kopieren"; clicked => { root.action("copy-result"); } }
+                        Rectangle { horizontal-stretch: 1; }
+                        Button { text: root.dialog-kind == "text" || root.dialog-kind == "viewer" || root.dialog-kind == "image" ? "Schließen" : "Abbrechen"; clicked => { root.action("close-dialog"); } }
+                        if root.dialog-kind == "input" || root.dialog-kind == "confirm" || root.dialog-kind == "review" : Button {
+                            text: "Ausführen";
+                            clicked => { root.submit(input.text, second.text, options.current-index); }
+                            init => { if (root.dialog-kind != "input") { self.focus(); } }
+                        }
+                    }
+                }
+                init => { if (root.dialog-kind == "input") { input.focus(); } }
+                changed revision => {
+                    input.text = root.dialog-value;
+                    second.text = root.dialog-second;
+                    options.current-index = 0;
+                    if (root.dialog-kind == "input") { input.focus(); }
+                }
+            }
+        }
+    }
+}
