@@ -1,7 +1,8 @@
 use super::App;
 use crate::{MainWindow, ShortcutLabels, ShortcutRow, shortcuts};
+use arco_core::profile::QuickFindStart;
 use slint::winit_030::winit::event::{ElementState, WindowEvent};
-use slint::winit_030::winit::keyboard::ModifiersState;
+use slint::winit_030::winit::keyboard::{Key, ModifiersState};
 use slint::{ModelRc, VecModel};
 use std::cell::RefCell;
 use std::fmt::Write as _;
@@ -276,7 +277,71 @@ pub(super) fn window_key(
         return false;
     }
     let chord = shortcuts::from_event(event, *modifiers);
-    route(&app, chord, event.repeat)
+    if route(&app, chord, event.repeat) {
+        return true;
+    }
+    let Key::Character(text) = &event.logical_key else {
+        return false;
+    };
+    let Ok(mut state) = app.try_borrow_mut() else {
+        return false;
+    };
+    if event.repeat || !quick_find_starts(state.profile.layout.quick_find_start, *modifiers, text) {
+        return false;
+    }
+    let ui = state.ui();
+    if state.context_menu_open
+        || ui.get_settings_open()
+        || !ui.get_dialog_kind().is_empty()
+        || ui.get_drive_side() >= 0
+        || !ui.invoke_file_list_focused()
+        || state.panels[state.active].loading
+    {
+        return false;
+    }
+    state.quick_find_with_text(text);
+    true
+}
+
+fn quick_find_starts(trigger: QuickFindStart, modifiers: ModifiersState, text: &str) -> bool {
+    if text.chars().count() != 1 || !text.chars().all(char::is_alphanumeric) {
+        return false;
+    }
+    let modifiers = modifiers - ModifiersState::SHIFT;
+    match trigger {
+        QuickFindStart::Shortcut => false,
+        QuickFindStart::Typing => modifiers.is_empty(),
+        QuickFindStart::Alt => modifiers == ModifiersState::ALT,
+        QuickFindStart::CtrlAlt => modifiers == (ModifiersState::CONTROL | ModifiersState::ALT),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn quick_find_only_accepts_printable_letters_and_the_configured_modifiers() {
+    use ModifiersState as Mods;
+    assert!(quick_find_starts(QuickFindStart::Typing, Mods::SHIFT, "Ä"));
+    assert!(quick_find_starts(QuickFindStart::Alt, Mods::ALT, "1"));
+    assert!(quick_find_starts(
+        QuickFindStart::CtrlAlt,
+        Mods::CONTROL | Mods::ALT,
+        "z"
+    ));
+    assert!(!quick_find_starts(
+        QuickFindStart::Typing,
+        Mods::CONTROL,
+        "a"
+    ));
+    assert!(!quick_find_starts(
+        QuickFindStart::Shortcut,
+        Mods::empty(),
+        "a"
+    ));
+    assert!(!quick_find_starts(
+        QuickFindStart::Typing,
+        Mods::empty(),
+        "\t"
+    ));
 }
 
 fn route(app: &Rc<RefCell<App>>, chord: Option<String>, repeat: bool) -> bool {

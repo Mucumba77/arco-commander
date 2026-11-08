@@ -1,5 +1,6 @@
 [package]
 name = "arco-app"
+default-run = "arco-commander"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,13 +10,23 @@ name = "arco-commander"
 path = "src/main.rs"
 
 [dependencies]
+ammonia = "4.2"
 arco-core.workspace = true
 arco-windows.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+encoding_rs = "0.8"
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 regex = "1"
+rtf-grimoire = "0.2"
 slint.workspace = true
 tempfile.workspace = true
+zeroize = "1"
+
+[target.'cfg(windows)'.dependencies]
+percent-encoding = "2.3"
+webview2-com = "0.39"
+windows-core = "0.62"
+wry = { version = "0.57.1", default-features = false }
 
 [build-dependencies]
 slint-build.workspace = true

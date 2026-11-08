@@ -1,12 +1,19 @@
 use super::plugins::{plugin_error, user_path};
-use super::{App, Outcome};
+use super::{
+    App, JobContext, Outcome,
+    transfer_queue::{
+        ConflictSide, VIRTUAL_CONFLICT_PREVIEW_LIMIT, ask_conflict, conflict_preview,
+    },
+};
 use crate::commands::{Dialog, Pending};
 use crate::display_path;
 use arco_core::files;
 use arco_core::plugin::{self, Interface, Operation, Registration, WcxOperation, WfxOperation};
+use std::cell::Cell;
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::ffi::OsStr;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy)]
 pub(crate) enum PluginFileAction {
@@ -476,9 +483,10 @@ impl App {
         archive: PathBuf,
         tasks: Vec<(String, Operation)>,
     ) {
-        self.start_job("Plugin-Mehrfachauftrag …", true, move |job| {
+        let label = format!("{} · {} Plugin-Aufträge", entry.name, tasks.len());
+        self.enqueue_virtual_transfer(&label, true, move |job| {
             if entry.interface == Interface::Wfx {
-                let operations = tasks
+                let mut operations: Vec<_> = tasks
                     .into_iter()
                     .filter_map(|(name, operation)| {
                         if let Operation::Wfx(operation) = operation {
@@ -488,14 +496,39 @@ impl App {
                         }
                     })
                     .collect();
-                let report = plugin::wfx_batch(
+                let skipped = resolve_wfx_destinations(&entry, &mut operations, &job)?;
+                let remaining = Cell::new(None);
+                let resolve = |remote: &str, conflict: files::FileConflict<'_>| {
+                    if let Some(rule) = remaining.get()
+                        && (conflict.source_metadata.is_file()
+                            && conflict.target_metadata.is_file()
+                            && !files::is_link(conflict.target_metadata)
+                            || matches!(rule, files::Conflict::Skip | files::Conflict::Rename))
+                    {
+                        return Ok(rule.into());
+                    }
+                    let label = format!("{} · {remote}", entry.name);
+                    let (decision, all) = super::transfer_queue::request_conflict(
+                        &job,
+                        conflict,
+                        files::Transfer::Move,
+                        Some(label),
+                    )?;
+                    if all && let files::ConflictDecision::Apply(rule) = decision {
+                        remaining.set(Some(rule));
+                    }
+                    Ok(decision)
+                };
+                let mut report = plugin::wfx_batch(
                     &entry.path,
                     operations,
                     &job.cancel,
                     |message| job.progress(format!("{} · {message}", entry.name)),
                     &mut |prompt| job.prompt(&entry.name, prompt),
                     arco_windows::rename_noreplace,
+                    Some(&resolve),
                 );
+                report.skipped += skipped;
                 return Ok(Outcome::Report(entry.name, report));
             }
             let mut report = files::TransferReport::default();
@@ -528,4 +561,371 @@ impl App {
 
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+enum WfxSource<'a> {
+    Local(&'a Path),
+    Remote(&'a str, bool),
+}
+
+fn wfx_destination(operation: &mut WfxOperation) -> Option<(&mut String, WfxSource<'_>)> {
+    Some(match operation {
+        WfxOperation::Upload { local, remote }
+        | WfxOperation::UploadTree { local, remote }
+        | WfxOperation::UploadMove { local, remote, .. } => (remote, WfxSource::Local(local)),
+        WfxOperation::Copy { from, to } => (to, WfxSource::Remote(from, false)),
+        WfxOperation::CopyTree { from, to } | WfxOperation::MoveTree { from, to } => {
+            (to, WfxSource::Remote(from, true))
+        }
+        WfxOperation::Rename { from, to } if !from.eq_ignore_ascii_case(to) => {
+            (to, WfxSource::Remote(from, false))
+        }
+        _ => return None,
+    })
+}
+
+fn wfx_remote_preview(
+    registration: &Registration,
+    remote: &str,
+    size: Option<u64>,
+    job: &JobContext,
+) -> io::Result<String> {
+    let Some(size) = size.filter(|size| *size <= VIRTUAL_CONFLICT_PREVIEW_LIMIT) else {
+        return Ok("WFX-Vorschau für Dateien bekannter Größe bis 64 KiB verfügbar.".into());
+    };
+    let load = || {
+        let storage = tempfile::tempdir()?;
+        let name = remote.rsplit('\\').next().unwrap_or("");
+        let path = storage.path().join(files::leaf_name(OsStr::new(name))?);
+        plugin::operate_interactive(
+            &registration.path,
+            WfxOperation::Download {
+                remote: remote.to_owned(),
+                local: path.clone(),
+            },
+            &job.cancel,
+            |message| job.progress(message),
+            &mut |prompt| job.prompt(&registration.name, prompt),
+        )?;
+        let metadata = files::regular_metadata(&path)?;
+        if metadata.len() != size {
+            return Err(io::Error::other("Der WFX-Eintrag hat sich geändert."));
+        }
+        Ok::<_, io::Error>(conflict_preview(&path, &metadata))
+    };
+    match load() {
+        Ok(preview) => Ok(preview),
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => Err(error),
+        Err(_) => Ok("Die WFX-Datei konnte für die Vorschau nicht gelesen werden.".into()),
+    }
+}
+
+fn wfx_file_size(value: &str) -> Option<u64> {
+    value.strip_suffix(" B")?.parse().ok()
+}
+
+fn wfx_alternate_name(
+    current: &str,
+    decision: files::ConflictDecision,
+    is_free: impl Fn(&str) -> bool,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> io::Result<Option<String>> {
+    match decision {
+        files::ConflictDecision::Apply(files::Conflict::Rename) => {
+            for index in 2..=10_000 {
+                files::check_cancel(cancel)?;
+                let name = files::numbered_copy_name(Path::new(current), index)?;
+                let name = name.to_string_lossy();
+                if is_free(&name) {
+                    return Ok(Some(name.into_owned()));
+                }
+            }
+            Err(invalid("Kein freier WFX-Zielname gefunden."))
+        }
+        files::ConflictDecision::RenameTo(name) => {
+            let name = files::leaf_name(&name)?.to_string_lossy();
+            if !is_free(&name) {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "Der gewählte WFX-Zielname ist bereits vorhanden oder vorgemerkt.",
+                ));
+            }
+            Ok(Some(name.into_owned()))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn resolve_wfx_destinations(
+    plugin: &Registration,
+    operations: &mut Vec<(String, WfxOperation)>,
+    job: &JobContext,
+) -> io::Result<usize> {
+    use files::{Conflict, ConflictDecision};
+    let mut directories = BTreeMap::<String, BTreeMap<String, plugin::Row>>::new();
+    let mut reserved = BTreeSet::new();
+    for (_, operation) in operations.iter_mut() {
+        if let Some((target, _)) = wfx_destination(operation) {
+            reserved.insert(target.to_lowercase());
+        }
+    }
+    let mut remaining = None;
+    let mut kept = Vec::with_capacity(operations.len());
+    let mut skipped = 0;
+    for (label, mut operation) in operations.drain(..) {
+        files::check_cancel(&job.cancel)?;
+        let file_destination = operation.file_destination().is_some();
+        let mut overwrite = None;
+        let Some((target, source)) = wfx_destination(&mut operation) else {
+            kept.push((label, operation));
+            continue;
+        };
+        let (parent, name) = target
+            .rsplit_once('\\')
+            .ok_or_else(|| invalid("Ungültiges WFX-Ziel."))?;
+        let parent = if parent.is_empty() { "\\" } else { parent };
+        files::leaf_name(OsStr::new(name))?;
+        let rows = match directories.entry(parent.to_lowercase()) {
+            Entry::Occupied(cached) => cached.into_mut(),
+            Entry::Vacant(slot) => {
+                let rows = plugin::list_wfx(
+                    &plugin.path,
+                    Path::new(parent),
+                    &job.cancel,
+                    &mut |prompt| job.prompt(&plugin.name, prompt),
+                )?;
+                let mut entries = BTreeMap::new();
+                for row in rows {
+                    if entries.insert(row.name.to_lowercase(), row).is_some() {
+                        return Err(invalid("Der WFX-Zielordner enthält mehrdeutige Einträge."));
+                    }
+                }
+                slot.insert(entries)
+            }
+        };
+        let mut name = name.to_owned();
+        let source = match source {
+            WfxSource::Local(path) => {
+                let metadata = files::regular_metadata(path)?;
+                (metadata.is_dir(), Some((path, metadata)), String::new())
+            }
+            WfxSource::Remote(path, directory) => (directory, None, path.to_owned()),
+        };
+        if let Some(existing) = rows.get(&name.to_lowercase()) {
+            let can_replace = file_destination && !source.0 && existing.wfx_version.is_some();
+            let existing_path = format!("{}\\{}", parent.trim_end_matches('\\'), existing.name);
+            let decision = if let Some(rule) = remaining
+                && (rule != Conflict::Replace || can_replace)
+            {
+                ConflictDecision::Apply(rule)
+            } else {
+                let source_side = if let Some((path, metadata)) = &source.1 {
+                    ConflictSide::local(path, metadata, None)
+                } else if source.0 {
+                    ConflictSide {
+                        path: format!("{} · {}", plugin.name, source.2),
+                        info: "Ordner".into(),
+                        preview: String::new(),
+                    }
+                } else {
+                    let (parent, name) = source.2.rsplit_once('\\').unwrap_or(("", &source.2));
+                    let parent = if parent.is_empty() { "\\" } else { parent };
+                    let rows = plugin::list_wfx(
+                        &plugin.path,
+                        Path::new(parent),
+                        &job.cancel,
+                        &mut |prompt| job.prompt(&plugin.name, prompt),
+                    );
+                    let size = match rows {
+                        Ok(rows) => rows
+                            .into_iter()
+                            .find(|row| row.name == name)
+                            .and_then(|row| wfx_file_size(&row.value)),
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                            return Err(error);
+                        }
+                        Err(_) => None,
+                    };
+                    let mut side = ConflictSide::virtual_entry(
+                        format!("{} · {}", plugin.name, source.2),
+                        size,
+                        None,
+                    );
+                    if size.is_none() {
+                        side.info = "WFX-Datei · Größe unbekannt".into();
+                    }
+                    side.preview = wfx_remote_preview(plugin, &source.2, size, job)?;
+                    side
+                };
+                let target_preview = if existing.value == "Ordner" {
+                    String::new()
+                } else {
+                    wfx_remote_preview(plugin, &existing_path, wfx_file_size(&existing.value), job)?
+                };
+                let mut actions = vec![
+                    (Conflict::Skip, "Überspringen"),
+                    (Conflict::Rename, "Unter freiem Namen speichern"),
+                ];
+                if can_replace {
+                    actions.push((Conflict::Replace, "Überschreiben"));
+                }
+                let (decision, all) = ask_conflict(
+                    job,
+                    source_side,
+                    ConflictSide {
+                        path: format!("{} · {existing_path}", plugin.name),
+                        info: existing.value.clone(),
+                        preview: target_preview,
+                    },
+                    actions,
+                )?;
+                if all && let ConflictDecision::Apply(rule) = decision {
+                    remaining = Some(rule);
+                }
+                decision
+            };
+            if matches!(decision, ConflictDecision::Apply(Conflict::Replace)) && can_replace {
+                overwrite = existing.wfx_version;
+                name = existing.name.clone();
+                *target = existing_path;
+            } else {
+                let parent = parent.trim_end_matches('\\');
+                let is_free = |name: &str| {
+                    !rows.contains_key(&name.to_lowercase())
+                        && !reserved.contains(&format!("{parent}\\{name}").to_lowercase())
+                };
+                let Some(alternate) = wfx_alternate_name(&name, decision, is_free, &job.cancel)?
+                else {
+                    skipped += 1;
+                    continue;
+                };
+                name = alternate;
+                *target = format!("{parent}\\{name}");
+                reserved.insert(target.to_lowercase());
+            }
+        }
+        rows.insert(
+            name.to_lowercase(),
+            plugin::Row {
+                name,
+                value: if source.0 {
+                    "Ordner".into()
+                } else {
+                    "Datei aus demselben Auftrag".into()
+                },
+                ..Default::default()
+            },
+        );
+        if let Some(expected) = overwrite {
+            operation = WfxOperation::Overwrite {
+                operation: Box::new(operation),
+                expected,
+            };
+        }
+        kept.push((label, operation));
+    }
+    *operations = kept;
+    Ok(skipped)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arco_core::files::{Conflict, ConflictDecision};
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn wfx_rename_preserves_existing_and_reserved_names() {
+        let cancel = AtomicBool::new(false);
+        let first = files::numbered_copy_name(Path::new("Text.txt"), 2).unwrap();
+        let next = files::numbered_copy_name(Path::new("Text.txt"), 3).unwrap();
+        let is_free = |name: &str| Path::new(name) != first;
+        let auto = wfx_alternate_name("Text.txt", Conflict::Rename.into(), is_free, &cancel)
+            .unwrap()
+            .unwrap();
+        assert_eq!(Path::new(&auto), next);
+        let occupied = wfx_alternate_name(
+            "Text.txt",
+            ConflictDecision::RenameTo(first.into_os_string()),
+            |_| false,
+            &cancel,
+        )
+        .unwrap_err();
+        assert_eq!(occupied.kind(), io::ErrorKind::AlreadyExists);
+        let invalid = wfx_alternate_name(
+            "Text.txt",
+            ConflictDecision::RenameTo("../Datei.txt".into()),
+            |_| true,
+            &cancel,
+        );
+        assert!(invalid.is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires the Ghisler sample WFX fixture in ARCO_TEST_WFX_SAMPLE"]
+    fn wfx_overwrite_preserves_changed_targets_and_stages_file_transfers() {
+        let plugin_path = PathBuf::from(std::env::var_os("ARCO_TEST_WFX_SAMPLE").unwrap());
+        let fixture = tempfile::tempdir().unwrap();
+        let cancel = AtomicBool::new(false);
+        let remote = |path: &Path| format!("\\{}", display_path(path));
+        let directory = remote(fixture.path());
+        let source = fixture.path().join("source.txt");
+        let target = fixture.path().join("target.txt");
+        let remote_target = remote(&target);
+        std::fs::write(&source, b"new source").unwrap();
+        std::fs::write(&target, b"old").unwrap();
+        let version = || {
+            plugin::list_wfx(&plugin_path, Path::new(&directory), &cancel, &mut |_| {
+                panic!("the sample plugin does not ask for input")
+            })
+            .unwrap()
+            .into_iter()
+            .find(|row| row.name == "target.txt")
+            .unwrap()
+            .wfx_version
+            .unwrap()
+        };
+        let run = |operation, expected| {
+            plugin::wfx_batch(
+                &plugin_path,
+                vec![(
+                    "target.txt".into(),
+                    WfxOperation::Overwrite {
+                        operation: Box::new(operation),
+                        expected,
+                    },
+                )],
+                &cancel,
+                |_| (),
+                &mut |_| panic!("the sample plugin does not ask for input"),
+                arco_windows::rename_noreplace,
+                None,
+            )
+        };
+        let upload = || WfxOperation::Upload {
+            local: source.clone(),
+            remote: remote_target.clone(),
+        };
+        let old = version();
+        std::fs::write(&target, b"concurrent change").unwrap();
+        let report = run(upload(), old);
+        assert_eq!(report.errors.len(), 1);
+        assert_eq!(std::fs::read(&target).unwrap(), b"concurrent change");
+        let report = run(upload(), version());
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(std::fs::read(&target).unwrap(), b"new source");
+        std::fs::write(&source, b"move contents").unwrap();
+        let report = run(
+            WfxOperation::Rename {
+                from: remote(&source),
+                to: remote_target,
+            },
+            version(),
+        );
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(std::fs::read(&target).unwrap(), b"move contents");
+        assert!(!source.exists());
+        assert_eq!(std::fs::read_dir(fixture.path()).unwrap().count(), 1);
+    }
 }

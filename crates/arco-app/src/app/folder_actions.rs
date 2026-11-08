@@ -30,12 +30,13 @@ impl App {
         }
         let root = tab.path.clone();
         let request = panel.request;
+        let ignore = self.ignore_list();
         self.start_job("Berechne Dateigrößen …", false, move |job| {
             if !show_in_list {
                 let mut allocation = 0u64;
                 let mut allocation_errors = Vec::new();
                 let mut seen_links = HashSet::new();
-                let usage = files::measure_with(&paths, &job.cancel, |path| {
+                let usage = files::measure_ignoring(&paths, &job.cancel, ignore.as_deref(), |path| {
                     match arco_windows::file_allocation(path) {
                         Ok(file) if file.hardlink_id.is_none_or(|id| seen_links.insert(id)) => {
                             if let Some(total) = allocation.checked_add(file.bytes) {
@@ -75,7 +76,7 @@ impl App {
                     last = Instant::now();
                     job.progress(format!("Berechne {}", display_path(&path)));
                 }
-                let usage = files::measure(std::slice::from_ref(&path), &job.cancel)?;
+                let usage = files::measure_ignoring(std::slice::from_ref(&path), &job.cancel, ignore.as_deref(), |_| {})?;
                 if usage.directories > 0 && usage.errors.is_empty() {
                     sizes.insert(path, usage.bytes);
                 } else {

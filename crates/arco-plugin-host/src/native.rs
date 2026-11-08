@@ -1,4 +1,6 @@
-use arco_core::plugin::{Interface, Operation, Request, Row, WcxOperation, WdxKey, WdxValue};
+use arco_core::plugin::{
+    Interface, Operation, Request, Row, WcxOperation, WdxField, WdxKey, WdxValue,
+};
 use libloading::os::windows::{
     LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32, Library,
 };
@@ -17,7 +19,9 @@ use windows_sys::Win32::Globalization::{
     CP_ACP, GetACP, MultiByteToWideChar, WC_NO_BEST_FIT_CHARS, WideCharToMultiByte,
 };
 use windows_sys::Win32::System::Time::FileTimeToSystemTime;
+use zeroize::Zeroizing;
 
+mod wdx_edit;
 mod wfx;
 mod wlx;
 
@@ -39,9 +43,30 @@ pub fn inspect(request: Request) -> io::Result<Vec<Row>> {
         (Interface::Wdx, Operation::WdxFields) => wdx_fields(&library).map(|fields| {
             fields
                 .into_iter()
-                .map(|(_, name, units)| Row { name, value: units })
+                .map(|field| Row {
+                    value: field.units().into(),
+                    name: field.name,
+                    ..Default::default()
+                })
                 .collect()
         }),
+        (Interface::Wdx, Operation::WdxEditableFields) => wdx_edit::editable_fields(&library),
+        (
+            Interface::Wdx,
+            Operation::WdxSet {
+                field,
+                value,
+                files,
+            },
+        ) => wdx_edit::set_values(&library, field, wdx_edit::Input::Text(value), files),
+        (
+            Interface::Wdx,
+            Operation::WdxEdit {
+                field,
+                files,
+                parent,
+            },
+        ) => wdx_edit::set_values(&library, field, wdx_edit::Input::Editor(*parent), files),
         (Interface::Wdx, Operation::WdxValues { field, files }) => {
             wdx_column_values(&library, field, files)
         }
@@ -93,14 +118,17 @@ fn probe(library: &Library, interface: Interface) -> io::Result<Vec<Row>> {
         Row {
             name: "Schnittstelle".into(),
             value: interface.label().into(),
+            ..Default::default()
         },
         Row {
             name: "Unicode".into(),
             value: if wide { "ja" } else { "nein" }.into(),
+            ..Default::default()
         },
         Row {
             name: "ANSI".into(),
             value: if ansi { "ja" } else { "nein" }.into(),
+            ..Default::default()
         },
     ];
     let detect = match interface {
@@ -117,6 +145,7 @@ fn probe(library: &Library, interface: Interface) -> io::Result<Vec<Row>> {
             rows.push(Row {
                 name: "TC-Erkennung".into(),
                 value,
+                ..Default::default()
             });
         }
     }
@@ -182,8 +211,8 @@ fn ansi(value: &OsStr) -> io::Result<Vec<u8>> {
             .map(|text| text.bytes().chain(Some(0)).collect())
             .ok_or_else(|| io::Error::other("Pfad ist für das ANSI-Plugin nicht darstellbar"));
     }
-    let wide = wide(value);
-    let mut bytes = vec![0; wide.len() * 4];
+    let wide = Zeroizing::new(wide(value));
+    let mut bytes = Zeroizing::new(vec![0; wide.len() * 4]);
     let mut used_default = 0;
     // The source and destination buffers are sized explicitly in their respective units.
     let count = unsafe {
@@ -204,7 +233,7 @@ fn ansi(value: &OsStr) -> io::Result<Vec<u8>> {
         ));
     }
     bytes.truncate(count as usize);
-    Ok(bytes)
+    Ok(std::mem::take(&mut *bytes))
 }
 
 fn ansi_text(value: &[u8]) -> String {
@@ -212,7 +241,7 @@ fn ansi_text(value: &[u8]) -> String {
         .iter()
         .position(|&byte| byte == 0)
         .unwrap_or(value.len());
-    let mut wide = vec![0; length];
+    let mut wide = Zeroizing::new(vec![0; length]);
     // An ANSI string can produce at most one UTF-16 code unit per input byte.
     let count = unsafe {
         MultiByteToWideChar(
@@ -488,6 +517,7 @@ fn scan_wcx(
                     Some(WcxOperation::Test) => Ok(vec![Row {
                         name: "Dateien geprüft".into(),
                         value: tested.to_string(),
+                        ..Default::default()
                     }]),
                     _ => Ok(result),
                 };
@@ -523,6 +553,7 @@ fn scan_wcx(
             return Ok(vec![Row {
                 name,
                 value: format!("{size} B"),
+                ..Default::default()
             }]);
         }
         let action = if matches!(operation, Some(WcxOperation::Test)) && !directory {
@@ -539,6 +570,7 @@ fn scan_wcx(
                 } else {
                     format!("{size} B")
                 },
+                ..Default::default()
             });
         }
         wcx_status("ProcessFile", unsafe {
@@ -726,7 +758,34 @@ fn combine(low: u32, high: u32) -> u64 {
 type GetField = unsafe extern "system" fn(i32, *mut u8, *mut u8, i32) -> i32;
 type GetValue = unsafe extern "system" fn(*mut c_void, i32, i32, *mut c_void, i32, i32) -> i32;
 
-fn wdx_fields(library: &Library) -> io::Result<Vec<(i32, String, String)>> {
+struct NativeWdxField {
+    index: i32,
+    kind: i32,
+    name: String,
+    units_or_choices: String,
+}
+
+impl NativeWdxField {
+    fn units(&self) -> &str {
+        // The SDK uses this buffer for the possible values of a choice field.
+        if self.kind == 7 {
+            ""
+        } else {
+            &self.units_or_choices
+        }
+    }
+
+    fn unit_index(&self, unit: Option<&str>) -> io::Result<i32> {
+        let Some(unit) = unit else { return Ok(0) };
+        self.units()
+            .split('|')
+            .position(|candidate| !candidate.is_empty() && candidate == unit)
+            .map(|index| index as i32)
+            .ok_or_else(|| io::Error::other(format!("Die WDX-Einheit „{unit}“ fehlt.")))
+    }
+}
+
+fn wdx_fields(library: &Library) -> io::Result<Vec<NativeWdxField>> {
     let fields: GetField = required(library, b"ContentGetSupportedField")?;
     let mut result = Vec::new();
     for index in 0..256 {
@@ -744,17 +803,28 @@ fn wdx_fields(library: &Library) -> io::Result<Vec<(i32, String, String)>> {
             return Ok(result);
         }
         if matches!(kind, 1..=8 | 10 | 11) {
-            result.push((index, ansi_text(&name), ansi_text(&units)));
+            result.push(NativeWdxField {
+                index,
+                kind,
+                name: ansi_text(&name),
+                units_or_choices: ansi_text(&units),
+            });
         }
     }
     Err(io::Error::other("WDX überschreitet das Feld-Limit"))
 }
 
-fn wdx_column_values(library: &Library, field: &str, files: &[PathBuf]) -> io::Result<Vec<Row>> {
-    let index = wdx_fields(library)?
+fn wdx_column_values(
+    library: &Library,
+    field: &WdxField,
+    files: &[PathBuf],
+) -> io::Result<Vec<Row>> {
+    let native = wdx_fields(library)?
         .into_iter()
-        .find_map(|(index, name, _)| (name == field).then_some(index))
+        .find(|native| native.name == field.field)
         .ok_or_else(|| io::Error::other("Das gewählte WDX-Feld fehlt."))?;
+    let unit = native.unit_index(field.unit.as_deref())?;
+    let index = native.index;
     if files.len() > 128 || files.iter().any(|file| !file.is_absolute()) {
         return Err(io::Error::other("Ungültige WDX-Dateiliste."));
     }
@@ -764,30 +834,31 @@ fn wdx_column_values(library: &Library, field: &str, files: &[PathBuf]) -> io::R
     for (row, file) in files.iter().enumerate() {
         let filename = sdk_path(file);
         let value = if unicode.is_some() {
-            read_wdx_value(get, wide(&filename).as_mut_ptr().cast(), index)
+            read_wdx_value(get, wide(&filename).as_mut_ptr().cast(), index, unit)
         } else {
-            ansi(&filename)
-                .ok()
-                .and_then(|mut filename| read_wdx_value(get, filename.as_mut_ptr().cast(), index))
+            ansi(&filename).ok().and_then(|mut filename| {
+                read_wdx_value(get, filename.as_mut_ptr().cast(), index, unit)
+            })
         };
         if let Some(value) = value {
             result.push(Row {
                 name: row.to_string(),
                 value: serde_json::to_string(&value).map_err(io::Error::other)?,
+                ..Default::default()
             });
         }
     }
     Ok(result)
 }
 
-fn read_wdx_value(get: GetValue, filename: *mut c_void, index: i32) -> Option<WdxValue> {
+fn read_wdx_value(get: GetValue, filename: *mut c_void, index: i32, unit: i32) -> Option<WdxValue> {
     // Native values require alignment for integers and floating-point values.
     let mut value = [0u64; 512];
     let code = unsafe {
         get(
             filename,
             index,
-            0,
+            unit,
             value.as_mut_ptr().cast(),
             std::mem::size_of_val(&value) as i32,
             0,
@@ -842,10 +913,11 @@ fn scan_wdx(fields: GetField, get: GetValue, filename: *mut c_void) -> io::Resul
         if !(1..=12).contains(&field) {
             continue;
         }
-        if let Some(value) = read_wdx_value(get, filename, index) {
+        if let Some(value) = read_wdx_value(get, filename, index, 0) {
             result.push(Row {
                 name: ansi_text(&name),
                 value: value.display,
+                ..Default::default()
             });
         }
     }

@@ -23,6 +23,7 @@ fn main() -> io::Result<()> {
                 .map(|hwnd| Row {
                     name: "hwnd".into(),
                     value: hwnd.to_string(),
+                    ..Default::default()
                 })
                 .collect();
             send_reply(Ok(rows))?;

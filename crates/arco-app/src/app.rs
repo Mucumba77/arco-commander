@@ -1,17 +1,19 @@
-use crate::commands::{COMMANDS, Pending};
-use crate::panel::{ArchiveTab, FtpTab, Location, Panel, Tab};
+use crate::commands::{COMMANDS, Dialog, Pending};
+use crate::panel::{ArchiveTab, FtpTab, Location, Panel, ShellLocation, Tab};
 use crate::preview;
 use crate::shortcuts;
 use crate::{Colors, MainWindow, SettingsData, display_path, human_size};
 use arco_core::archive_view::{self, Catalog};
 use arco_core::files::{self, Directory, Kind, Transfer, TransferReport};
-use arco_core::profile::{LayoutSettings, ListFont, Profile, TabLock, TcImport};
+use arco_core::profile::{self, LayoutSettings, ListFont, Profile, TabLock, TcImport};
 use arco_core::rename;
-use arco_core::tools::PreviewMode;
+use arco_core::tools::{PreviewEncoding, PreviewMode};
 use arco_windows::DiskSpace;
 use arco_windows::ftp;
-use slint::winit_030::{EventResult, WinitWindowAccessor, winit::event::WindowEvent};
-use slint::{ComponentHandle, ModelRc, SharedString, Timer, TimerMode, VecModel};
+use slint::winit_030::{
+    EventResult, WinitWindowAccessor, winit::event::WindowEvent, winit::window::Theme,
+};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, Timer, TimerMode, VecModel};
 use std::cell::RefCell;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -21,28 +23,56 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime};
 
+mod administration;
+mod advanced_search;
 mod archive_actions;
+mod associations;
+mod buttonbars;
+mod directory_tree;
+mod favorites;
 mod folder_actions;
 mod ftp_edit;
 mod ftp_panel;
 mod ftp_profiles;
 mod ftp_sync;
+mod ignore;
 mod keyboard;
+mod lister;
+mod metadata_actions;
+mod packer_profiles;
 mod plugin_files;
 mod plugins;
+mod print_actions;
+mod rename_setup;
+mod selection_tools;
+mod shell_panel;
 mod sync_actions;
 mod tabs;
+mod text_compare;
+mod thumbnails;
+mod transfer_queue;
+mod view_setup;
 mod wdx;
 mod wfx_panel;
 mod wfx_prompts;
 mod wlx;
+pub(crate) use administration::Setup as AdministrationSetup;
+pub(crate) use advanced_search::{Review as AdvancedSearchReview, Setup as AdvancedSearchSetup};
 pub(crate) use archive_actions::{ArchiveInput, StagedPreview};
+pub(crate) use associations::Setup as AssociationSetup;
+pub(crate) use favorites::{Setup as FavoriteSetup, label as favorite_label, tc_profile};
 pub(crate) use ftp_edit::Draft as FtpDraft;
 pub(crate) use ftp_panel::FtpEdit;
 pub(crate) use ftp_sync::modified as ftp_modified;
+pub(crate) use lister::ViewerRequest;
 pub(crate) use plugin_files::PluginFileAction;
+pub(crate) use rename_setup::Setup as RenameSetup;
 pub(crate) use sync_actions::{SyncReview, SyncSetup};
+pub(crate) use transfer_queue::ConflictTicket;
+pub(crate) use transfer_queue::TransferTask;
+pub(crate) use view_setup::Setup as ViewSetup;
 pub(crate) use wdx::SearchTarget as WdxSearchTarget;
+pub(crate) use wdx::{EditInput as WdxEditInput, EditTarget as WdxEditTarget};
 pub(crate) use wfx_prompts::PromptTicket;
 
 const FILE_FONT_SIZES: [u8; 4] = [12, 14, 16, 18];
@@ -62,6 +92,10 @@ pub enum Navigation {
 pub enum Outcome {
     Notice(String),
     Text(String, String),
+    SearchReview(Box<AdvancedSearchReview>),
+    FileComment(PathBuf, Option<String>),
+    PrintPreview(String, String),
+    TransferFinished(TransferReport),
     ClipboardText(String),
     Entries {
         side: usize,
@@ -69,9 +103,11 @@ pub enum Outcome {
         request: u64,
         entries: Directory,
         label: String,
+        scope: arco_core::view_settings::Scope,
     },
     Report(String, TransferReport),
     RenamePreview(rename::Plan),
+    RenameNameList(rename_setup::NameList, Option<tempfile::TempDir>),
     Renamed(rename::Plan),
     Sync(Box<SyncReview>),
     ComparedPanels {
@@ -103,12 +139,24 @@ pub enum Outcome {
         Option<WdxSearchTarget>,
     ),
     WdxSorted(Vec<files::Entry>),
+    WdxEditable(wdx::EditTarget, Vec<arco_core::plugin::WdxEditableField>),
+    IgnoreImported(String),
     Preview {
         path: PathBuf,
         mode: PreviewMode,
         page: arco_core::tools::Preview,
     },
+    ViewerPage(Viewer, arco_core::tools::Preview),
+    TextCompared(Arc<arco_core::text_compare::Session>, usize, bool),
+    BinaryCompared(
+        Arc<arco_core::tools::BinaryComparison>,
+        arco_core::tools::BinaryPage,
+        bool,
+    ),
+    LocalShares(Vec<arco_windows::LocalShare>),
+    VolumeLabel(arco_windows::Volume),
     Image(PathBuf, image::RgbaImage),
+    RichPreview(PathBuf, preview::Rich),
     StagedPreview(StagedPreview, preview::Content),
 }
 
@@ -122,7 +170,10 @@ enum Event {
     },
     Progress(String),
     PluginPrompt(PromptTicket),
+    TransferConflict(ConflictTicket),
     WdxValues(wdx::Values),
+    Thumbnails(thumbnails::Loaded),
+    TreeLoaded(directory_tree::Loaded),
     QuickPreview(QuickTarget, wlx::QuickResult),
     Finished {
         outcome: Result<Outcome, String>,
@@ -135,6 +186,9 @@ struct DirectoryRequest {
     target: Location,
     navigation: Navigation,
     cached: Option<Arc<Catalog>>,
+    password: Option<crate::panel::ArchivePassword>,
+    comments: bool,
+    hidden: bool,
 }
 
 struct LoadedDirectory {
@@ -142,18 +196,34 @@ struct LoadedDirectory {
     space: Option<DiskSpace>,
     archive: Option<ArchiveTab>,
     ftp: Option<FtpTab>,
+    shell: std::collections::BTreeMap<PathBuf, arco_windows::ShellFolder>,
 }
 
 fn load_directory(
     target: &mut Location,
     cached: Option<Arc<Catalog>>,
+    password: Option<crate::panel::ArchivePassword>,
+    comments: bool,
+    hidden: bool,
     job: &JobContext,
 ) -> io::Result<LoadedDirectory> {
     let cancel = &job.cancel;
     match target {
         Location::Local(path) => {
             *path = std::path::absolute(&*path)?;
-            let directory = files::list_cancellable(path, cancel)?;
+            let mut directory = files::list_cancellable(path, cancel)?;
+            if comments {
+                match arco_core::descriptions::read(path) {
+                    Ok(comments) => {
+                        for entry in &mut directory.entries {
+                            entry.comment = comments
+                                .get(&arco_core::descriptions::key(&entry.name))
+                                .map(|text| Arc::from(text.as_str()));
+                        }
+                    }
+                    Err(error) => directory.errors.push(error.to_string()),
+                }
+            }
             if cancel.load(Ordering::Relaxed) {
                 return Err(io::ErrorKind::Interrupted.into());
             }
@@ -163,13 +233,18 @@ fn load_directory(
                 space,
                 archive: None,
                 ftp: None,
+                shell: Default::default(),
             })
         }
         Location::Archive { file, folder } => {
             *file = std::path::absolute(&*file)?;
             let catalog = match cached {
                 Some(catalog) if catalog.unchanged(file) => catalog,
-                _ => Arc::new(Catalog::read(file, cancel)?),
+                _ => Arc::new(Catalog::read_with_password(
+                    file,
+                    password.as_ref().map(|password| password.as_str()),
+                    cancel,
+                )?),
             };
             let entries = catalog.rows(folder)?;
             Ok(LoadedDirectory {
@@ -182,12 +257,15 @@ fn load_directory(
                     file: file.clone(),
                     folder: folder.clone(),
                     catalog,
+                    password,
                 }),
                 ftp: None,
+                shell: Default::default(),
             })
         }
         Location::Ftp(location) => ftp_panel::read_panel(location, cancel),
         Location::Wfx(location) => wfx_panel::read_panel(location, job),
+        Location::Shell(location) => shell_panel::read_panel(location, hidden, cancel),
     }
 }
 
@@ -211,12 +289,16 @@ impl JobContext {
     }
 }
 
+#[derive(Clone)]
 pub struct Viewer {
     pub path: PathBuf,
     pub mode: PreviewMode,
     pub offset: u64,
     pub next: u64,
     pub previous: Vec<u64>,
+    pub length: u64,
+    pub encoding: PreviewEncoding,
+    pub last_hit: Option<(String, u64)>,
 }
 
 pub struct FtpView {
@@ -233,6 +315,9 @@ pub struct App {
     closed_tabs: Vec<tabs::ClosedTab>,
     pub active: usize,
     pub profile: Profile,
+    system_light: Option<bool>,
+    file_colors: Rc<Vec<arco_core::view_settings::CompiledColor>>,
+    ignore: Option<Arc<arco_core::ignore::IgnoreList>>,
     profile_path: PathBuf,
     save_profile: bool,
     pub pending: Option<Pending>,
@@ -240,9 +325,14 @@ pub struct App {
     wdx_pending: Option<wdx::Running>,
     wdx_sort_request: Option<wdx::SortRequest>,
     wdx_next_side: usize,
+    thumbnail_jobs: [Option<Rc<crate::panel::FileModel>>; 2],
+    trees: [Option<directory_tree::Tree>; 2],
+    tree_loading: [bool; 2],
     pub undo: Option<rename::Plan>,
     pub viewer: Option<Viewer>,
     pub staged_preview: Option<StagedPreview>,
+    listers: Vec<crate::ListerWindow>,
+    pub(crate) preview_image_path: Option<PathBuf>,
     quick_open: bool,
     quick_requested: Option<QuickTarget>,
     quick_running: bool,
@@ -257,6 +347,7 @@ pub struct App {
     sender: Sender<Event>,
     receiver: Receiver<Event>,
     pub job: Option<Arc<AtomicBool>>,
+    transfers: transfer_queue::Queue,
     next_request: u64,
     loader_cancel: [Option<Arc<AtomicBool>>; 2],
     waiting_loads: [Option<DirectoryRequest>; 2],
@@ -268,6 +359,7 @@ pub struct App {
     #[cfg(windows)]
     shortcut_hook: Option<arco_windows::ShortcutHook>,
     timer: Timer,
+    drive_timer: Timer,
 }
 
 pub fn run(
@@ -284,12 +376,24 @@ pub fn run(
         .map(|panel| Panel::from_saved(panel, &fallback));
     let active = profile.active_panel.min(1);
     let bindings = shortcuts::effective(&profile.shortcuts);
+    let file_colors = Rc::new(profile.views.compile_colors());
+    let ignored = profile
+        .ignore_enabled
+        .then(|| arco_core::ignore::IgnoreList::parse(&profile.ignore_rules))
+        .transpose();
+    let (ignore, ignore_error) = match ignored {
+        Ok(ignore) => (ignore.map(Arc::new), None),
+        Err(error) => (None, Some(error)),
+    };
     let app = Rc::new(RefCell::new(App {
         window: window.as_weak(),
         panels,
         closed_tabs: Vec::new(),
         active,
         profile,
+        system_light: None,
+        file_colors,
+        ignore,
         profile_path,
         save_profile: profile_error.is_none(),
         pending: None,
@@ -297,9 +401,14 @@ pub fn run(
         wdx_pending: None,
         wdx_sort_request: None,
         wdx_next_side: 0,
+        thumbnail_jobs: [None, None],
+        trees: [None, None],
+        tree_loading: [false; 2],
         undo: None,
         viewer: None,
         staged_preview: None,
+        listers: Vec::new(),
+        preview_image_path: None,
         quick_open: false,
         quick_requested: None,
         quick_running: false,
@@ -314,6 +423,7 @@ pub fn run(
         sender,
         receiver,
         job: None,
+        transfers: Default::default(),
         next_request: 0,
         loader_cancel: [None, None],
         waiting_loads: [None, None],
@@ -325,6 +435,7 @@ pub fn run(
         #[cfg(windows)]
         shortcut_hook: None,
         timer: Timer::default(),
+        drive_timer: Timer::default(),
     }));
     let weak = Rc::downgrade(&app);
     window.on_action(move |name| {
@@ -398,6 +509,7 @@ pub fn run(
                 return;
             }
             app.set_active(side);
+            app.leave_tree_focus(side);
             app.current_mut().select_row(row, toggle, range);
             app.publish(side);
             if open {
@@ -482,10 +594,48 @@ pub fn run(
             }
         });
     });
+    let weak = Rc::downgrade(&app);
+    window.on_tree_row(move |side, index, operation| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut()
+                .select_tree_row(side as usize, index as usize, operation);
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_custom_button(move |bar, index| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut().run_button(bar as usize, index as usize);
+        }
+    });
     keyboard::connect_editor(window, &app);
+    let weak = Rc::downgrade(&app);
+    window.on_search_configure(move |data, name, operation| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut()
+                .configure_search(data, name.as_str(), operation);
+        }
+    });
     let weak = Rc::downgrade(&app);
     let mut modifiers = Default::default();
     window.window().on_winit_window_event(move |window, event| {
+        let theme = match event {
+            WindowEvent::ThemeChanged(theme) => Some(*theme),
+            WindowEvent::Focused(true) | WindowEvent::Resized(_) => {
+                window.with_winit_window(|native| native.theme()).flatten()
+            }
+            _ => None,
+        };
+        if let Some(theme) = theme
+            && let Some(app) = weak.upgrade()
+            && let Ok(mut app) = app.try_borrow_mut()
+        {
+            app.system_light = Some(theme == Theme::Light);
+            if app.profile.system_theme {
+                app.ui()
+                    .global::<Colors>()
+                    .set_light(app.effective_light_theme());
+            }
+        }
         #[cfg(windows)]
         if matches!(event, WindowEvent::Resized(_) | WindowEvent::Focused(true)) {
             keyboard::ensure_native_hook(window, &weak);
@@ -521,6 +671,45 @@ pub fn run(
         }
     });
     let weak = Rc::downgrade(&app);
+    window.on_ntfs_apply(move |options| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut().apply_ntfs_options(options);
+        }
+    });
+    {
+        let app = Rc::downgrade(&app);
+        window.on_viewer_control(move |operation, value, option| {
+            if let Some(app) = app.upgrade() {
+                app.borrow_mut()
+                    .viewer_control(operation, value.as_str(), option);
+            }
+        });
+    }
+    let weak = Rc::downgrade(&app);
+    window.on_diff_navigate(move |delta| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut().navigate_comparison(delta);
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_diff_options(move |ignore_case, ignore_whitespace, ignore_line_endings| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut()
+                .update_comparison(arco_core::text_compare::Options {
+                    ignore_case,
+                    ignore_whitespace,
+                    ignore_line_endings,
+                });
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_diff_save(move |side, edited, text| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut()
+                .save_comparison_change(side, edited, text.to_string());
+        }
+    });
+    let weak = Rc::downgrade(&app);
     window.on_directory_loaded(move || {
         if let Some(app) = weak.upgrade() {
             app.borrow_mut().drain();
@@ -552,10 +741,14 @@ pub fn run(
         }
     });
     let weak = Rc::downgrade(&app);
-    window.on_sync_configure(move |data, preset, operation| {
+    window.on_sync_configure(move |data, preset, operation, left, right| {
         if let Some(app) = weak.upgrade() {
-            app.borrow_mut()
-                .configure_sync(data, preset.as_str(), operation);
+            app.borrow_mut().configure_sync(
+                data,
+                preset.as_str(),
+                operation,
+                [left.as_str(), right.as_str()],
+            );
         }
     });
     let weak = Rc::downgrade(&app);
@@ -587,6 +780,9 @@ pub fn run(
                 return slint::CloseRequestResponse::KeepWindowShown;
             }
             app.save();
+            for lister in app.listers.drain(..) {
+                lister.invoke_close_lister();
+            }
         }
         slint::CloseRequestResponse::HideWindow
     });
@@ -603,9 +799,14 @@ pub fn run(
         state.invalidate_wdx_columns();
         window.set_split_ratio(state.profile.split_ratio.clamp(0.37, 0.63));
         state.set_active(active);
+        window.set_separate_tree_mode(i32::from(state.profile.separate_tree_mode.min(2)));
         state.refresh_both();
         if let Some(error) = profile_error {
             state.status(format!("Profil konnte nicht gelesen werden: {error}"));
+        } else if let Some(error) = ignore_error {
+            state.status(format!(
+                "Ignorierliste konnte nicht gelesen werden: {error}"
+            ));
         }
         let weak = Rc::downgrade(&app);
         state
@@ -613,6 +814,20 @@ pub fn run(
             .start(TimerMode::Repeated, Duration::from_millis(30), move || {
                 if let Some(app) = weak.upgrade() {
                     app.borrow_mut().drain();
+                }
+            });
+        let window = window.as_weak();
+        state
+            .drive_timer
+            .start(TimerMode::Repeated, Duration::from_secs(2), move || {
+                if let Some(window) = window.upgrade() {
+                    let drives: Vec<_> = arco_windows::drives()
+                        .iter()
+                        .map(|path| SharedString::from(display_path(path)))
+                        .collect();
+                    if !window.get_drives().iter().eq(drives.iter().cloned()) {
+                        window.set_drives(ModelRc::new(VecModel::from(drives)));
+                    }
                 }
             });
     }
@@ -640,7 +855,7 @@ fn queue_context_menu(
         if app.context_menu_open || app.panels[side].loading {
             return;
         }
-        if !app.panels[side].current().is_local() {
+        if !app.panels[side].current().is_local() && app.panels[side].current().shell.is_none() {
             if app.panels[side].current().display_row(row).is_none() {
                 return;
             }
@@ -656,7 +871,17 @@ fn queue_context_menu(
             }
             return;
         }
-        let paths = app.panels[side].current_mut().context_paths(row);
+        let tab = app.panels[side].current_mut();
+        let paths = if tab.shell.is_some() {
+            let Some(entry) = tab.display_row(row) else {
+                return;
+            };
+            let paths = vec![entry.path.clone()];
+            tab.focus_context_row(row);
+            paths
+        } else {
+            tab.context_paths(row)
+        };
         if paths.is_empty() {
             return;
         }
@@ -683,6 +908,14 @@ fn queue_context_menu(
 }
 
 impl App {
+    pub(crate) fn effective_light_theme(&self) -> bool {
+        if self.profile.system_theme {
+            self.system_light.unwrap_or(self.profile.light_mode)
+        } else {
+            self.profile.light_mode
+        }
+    }
+
     pub fn sync_ui_settings(&self) {
         let profile = &self.profile;
         let layout = &profile.layout;
@@ -701,8 +934,15 @@ impl App {
             command_line: layout.command_line,
             function_keys: layout.function_keys,
             numpad_folders: layout.numpad_folders,
+            quick_find_start: match layout.quick_find_start {
+                profile::QuickFindStart::Shortcut => 0,
+                profile::QuickFindStart::Typing => 1,
+                profile::QuickFindStart::Alt => 2,
+                profile::QuickFindStart::CtrlAlt => 3,
+            },
             stacked: profile.stacked,
             light: profile.light_mode,
+            system_theme: profile.system_theme,
             show_hidden: profile.show_hidden,
             list_font: match profile.list_font {
                 ListFont::SegoeUi => 0,
@@ -714,8 +954,11 @@ impl App {
                 .position(|&size| size == profile.list_font_size)
                 .unwrap_or(1) as i32,
         });
-        ui.global::<Colors>().set_light(profile.light_mode);
+        ui.global::<Colors>()
+            .set_light(self.effective_light_theme());
+        self.apply_color_settings();
         ui.set_stacked(profile.stacked);
+        self.publish_buttonbars();
     }
 
     pub fn set_hidden(&mut self, show: bool) {
@@ -730,6 +973,11 @@ impl App {
                 }
             }
             self.publish(side);
+            if self.panels[side].current().shell.is_some() {
+                self.refresh(side);
+            } else {
+                self.invalidate_tree(side);
+            }
         }
     }
 
@@ -749,9 +997,16 @@ impl App {
             command_line: value.command_line,
             function_keys: value.function_keys,
             numpad_folders: value.numpad_folders,
+            quick_find_start: match value.quick_find_start {
+                1 => profile::QuickFindStart::Typing,
+                2 => profile::QuickFindStart::Alt,
+                3 => profile::QuickFindStart::CtrlAlt,
+                _ => profile::QuickFindStart::Shortcut,
+            },
         };
         self.profile.stacked = value.stacked;
         self.profile.light_mode = value.light;
+        self.profile.system_theme = value.system_theme;
         self.profile.list_font = match value.list_font {
             1 => ListFont::Arial,
             2 => ListFont::Verdana,
@@ -845,7 +1100,8 @@ impl App {
     }
 
     pub fn publish(&self, side: usize) {
-        let data = self.panels[side].snapshot();
+        let mut data = self.panels[side].snapshot();
+        self.publish_columns(side, &mut data);
         if side == 0 {
             self.ui().set_left(data);
         } else {
@@ -853,6 +1109,7 @@ impl App {
         }
         self.publish_cursor(side, true);
         self.publish_busy(side);
+        self.publish_tree(side);
     }
 
     pub fn publish_cursor(&self, side: usize, selection_changed: bool) {
@@ -928,6 +1185,10 @@ impl App {
         if value.is_empty() {
             return;
         }
+        if cfg!(windows) && ShellLocation::is_address(value) {
+            self.open_shell_panel(self.active, value);
+            return;
+        }
         if let Some(wfx) = self.current().wfx.clone()
             && !Path::new(value).is_absolute()
             && !(value.len() == 2 && value.as_bytes().get(1) == Some(&b':'))
@@ -946,7 +1207,7 @@ impl App {
         if let Some((archive, folder)) = value.split_once("::") {
             let archive = self.current().path.join(archive);
             let folder = PathBuf::from(folder.trim_start_matches(['/', '\\']));
-            if archive_view::is_supported(&archive) && !folder.has_root() {
+            if archive_view::is_openable(&archive) && !folder.has_root() {
                 self.load_location(
                     self.active,
                     Location::Archive {
@@ -982,7 +1243,7 @@ impl App {
                         std::path::Component::Normal(name) => match &mut location {
                             Location::Local(path) => path.push(name),
                             Location::Archive { folder, .. } => folder.push(name),
-                            Location::Ftp(_) | Location::Wfx(_) => return,
+                            Location::Ftp(_) | Location::Wfx(_) | Location::Shell(_) => return,
                         },
                         _ => return,
                     }
@@ -998,6 +1259,8 @@ impl App {
     pub fn open_path(&mut self, path: &Path) {
         if path.is_dir() {
             self.load(self.active, path.to_path_buf(), Navigation::Jump);
+        } else if let Some(result) = self.open_internal_association(path) {
+            self.report(result);
         } else if archive_view::is_supported(path) {
             self.open_archive(path.to_path_buf());
         } else if let Err(error) = arco_windows::open(path) {
@@ -1018,6 +1281,8 @@ impl App {
         let tab = self.current();
         if tab.parent_row(row) {
             self.go_up();
+        } else if tab.shell.is_some() {
+            self.open_shell_panel_row(row);
         } else if tab.wfx.is_some() {
             self.open_wfx_row(row);
         } else if let Some(ftp) = &tab.ftp {
@@ -1041,7 +1306,7 @@ impl App {
                         Navigation::Jump,
                     );
                 } else {
-                    self.archive_preview_dialog(member);
+                    self.archive_preview_dialog(member, false);
                 }
             }
         } else if let Some(entry) = tab.row(row) {
@@ -1055,6 +1320,7 @@ impl App {
     }
 
     pub fn refresh(&mut self, side: usize) {
+        self.invalidate_tree(side);
         self.load_location(
             side,
             self.panels[side].current().location(),
@@ -1071,7 +1337,17 @@ impl App {
         self.load_location(side, Location::Local(target), navigation);
     }
 
-    pub fn load_location(&mut self, side: usize, target: Location, mut navigation: Navigation) {
+    pub fn load_location(&mut self, side: usize, target: Location, navigation: Navigation) {
+        self.load_location_with_password(side, target, navigation, None);
+    }
+
+    pub(crate) fn load_location_with_password(
+        &mut self,
+        side: usize,
+        target: Location,
+        mut navigation: Navigation,
+        password: Option<crate::panel::ArchivePassword>,
+    ) {
         if let Location::Wfx(location) = &target
             && !self.wfx_enabled(&location.plugin)
         {
@@ -1079,6 +1355,12 @@ impl App {
             return;
         }
         let panel = &mut self.panels[side];
+        let password = password.or_else(|| match (&target, &panel.current().archive) {
+            (Location::Archive { file, .. }, Some(archive)) if file == &archive.file => {
+                archive.password.clone()
+            }
+            _ => None,
+        });
         let cached = match (&target, &panel.current().archive, &navigation) {
             (Location::Archive { file, .. }, Some(archive), mode)
                 if file == &archive.file && !matches!(mode, Navigation::Refresh) =>
@@ -1106,6 +1388,9 @@ impl App {
             target,
             navigation,
             cached,
+            password,
+            comments: panel.current().shows_comments() || self.profile.views.needs_comments(),
+            hidden: self.profile.show_hidden,
         };
         if panel.current().loaded {
             self.publish_busy(side);
@@ -1131,12 +1416,16 @@ impl App {
                 mut target,
                 navigation,
                 cached,
+                password,
+                comments,
+                hidden,
             } = request;
             let job = JobContext {
                 cancel,
                 sender: sender.clone(),
             };
-            let directory = load_directory(&mut target, cached, &job).map(Box::new);
+            let directory =
+                load_directory(&mut target, cached, password, comments, hidden, &job).map(Box::new);
             if sender
                 .send(Event::Load {
                     side,
@@ -1184,6 +1473,7 @@ impl App {
     }
 
     fn drain(&mut self) {
+        self.listers.retain(|lister| lister.window().is_visible());
         let mut preview_failed = None;
         self.plugin_previews
             .retain_mut(|(name, host)| match host.try_wait() {
@@ -1215,7 +1505,10 @@ impl App {
                 }
                 Event::Progress(text) => self.ui().set_job_status(text.into()),
                 Event::PluginPrompt(ticket) => self.plugin_prompts.push_back(ticket),
+                Event::TransferConflict(ticket) => self.transfers.prompt = Some(ticket),
                 Event::WdxValues(values) => self.apply_wdx_values(values),
+                Event::Thumbnails(loaded) => self.apply_thumbnails(loaded),
+                Event::TreeLoaded(loaded) => self.tree_loaded(loaded),
                 Event::QuickPreview(target, result) => {
                     self.quick_running = false;
                     let cancelled = self
@@ -1232,6 +1525,7 @@ impl App {
                 }
                 Event::Finished { outcome, refresh } => {
                     self.job = None;
+                    self.finish_virtual_transfer();
                     self.ui().set_job_active(false);
                     if refresh {
                         self.refresh_both();
@@ -1240,12 +1534,16 @@ impl App {
                         Ok(outcome) => self.completed(outcome),
                         Err(error) => self.status(error),
                     }
-                    self.wdx_sort_request = None;
+                    self.finish_wdx_sort_attempt();
                 }
             }
         }
         self.open_next_plugin_prompt();
+        self.open_next_transfer_conflict();
+        self.advance_transfers();
         self.update_wdx_columns();
+        self.update_thumbnails();
+        self.update_trees();
         self.update_quick_preview();
         if let Some((side, paths)) = self.drops.take() {
             if self.ui().get_dialog_kind().is_empty()
@@ -1265,6 +1563,7 @@ impl App {
                 );
             }
         }
+        self.update_wdx_sort();
     }
 
     pub fn toggle_quick_preview(&mut self) {
@@ -1373,7 +1672,7 @@ impl App {
                     Some((archive, _, false)) => {
                         archive_actions::read_archive_preview(archive, &target.path)
                     }
-                    None => preview::read(&target.path),
+                    None => preview::read_raw(&target.path),
                 };
                 let _ = sender.send(Event::QuickPreview(
                     target,
@@ -1405,6 +1704,12 @@ impl App {
                 ui.set_quick_text("".into());
                 ui.set_quick_note("Bild · F3 für die Vollansicht".into());
                 ui.set_quick_image(preview::to_slint(&image));
+            }
+            Ok(preview::Content::Rich(content)) => {
+                ui.set_quick_text("".into());
+                ui.set_quick_note(
+                    format!("{} · F3 für die formatierte Vorschau", content.label()).into(),
+                );
             }
             Err(error) => ui.set_quick_text(format!("Vorschau: {error}").into()),
         }
@@ -1442,6 +1747,7 @@ impl App {
                     space,
                     archive,
                     ftp,
+                    shell,
                 } = *loaded;
                 let tab = panel.current_mut();
                 let previous = tab.location();
@@ -1474,10 +1780,24 @@ impl App {
                         Navigation::Refresh => (),
                     }
                     tab.change_location(&target, archive);
+                    tab.manual_view = false;
                 } else {
                     tab.archive = archive;
+                    if let Location::Shell(shell) = &target {
+                        tab.shell = Some(shell.clone());
+                    }
                 }
                 tab.ftp = ftp;
+                tab.shell_entries = shell;
+                tab.view_scope = None;
+                if !tab.manual_view {
+                    tab.view_override = view_setup::automatic_view(
+                        &self.profile.views,
+                        &target,
+                        None,
+                        &directory.entries,
+                    );
+                }
                 tab.volume = space
                     .map(|space| {
                         format!(
@@ -1498,11 +1818,15 @@ impl App {
                             "Archiv".into()
                         } else if let Some(wfx) = &tab.wfx {
                             format!("WFX · {}", wfx.plugin.name)
+                        } else if tab.shell.is_some() {
+                            "Windows-Shell".into()
                         } else {
                             String::new()
                         }
                     });
                 tab.clear_comparison_filter();
+                tab.ignore = self.ignore.clone();
+                tab.colors = self.file_colors.clone();
                 tab.populate_with_focus(
                     directory.entries,
                     self.profile.show_hidden,
@@ -1525,6 +1849,20 @@ impl App {
                 }
             }
             Err(error) => {
+                if archive_view::needs_header_password(&error)
+                    && side == self.active
+                    && self.pending.is_none()
+                {
+                    self.dialog("input", Pending::ArchiveUnlock(side, target, navigation), Dialog {
+                        title: "Verschlüsseltes 7z-Archiv öffnen",
+                        description: "Gib das Passwort ein, um die Dateinamen im Archiv anzuzeigen.",
+                        placeholder: "Archivpasswort",
+                        secret: true,
+                        ..Dialog::default()
+                    });
+                    self.publish(side);
+                    return;
+                }
                 self.status(format!("{}: {error}", target.display()));
                 if matches!(navigation, Navigation::Refresh)
                     && error.kind() == io::ErrorKind::NotFound
@@ -1550,6 +1888,10 @@ impl App {
 
     fn completed(&mut self, outcome: Outcome) {
         match outcome {
+            Outcome::SearchReview(review) => self.show_search_review(review),
+            Outcome::FileComment(path, comment) => self.show_comment(path, comment),
+            Outcome::PrintPreview(title, body) => self.show_print_preview(title, body),
+            Outcome::TransferFinished(report) => self.complete_transfer(report),
             Outcome::Notice(message) => self.status(message),
             Outcome::Text(title, body) => self.text(&title, &body),
             Outcome::ClipboardText(body) => self.report(arco_windows::copy_text(&body)),
@@ -1559,6 +1901,7 @@ impl App {
                 request,
                 entries,
                 label,
+                scope,
             } => {
                 if self.panels[side].request == request
                     && self.panels[side].current().location() == location
@@ -1568,7 +1911,17 @@ impl App {
                     } else {
                         format!(" · {} Lesefehler", entries.errors.len())
                     };
-                    self.panels[side].current_mut().populate(
+                    let tab = self.panels[side].current_mut();
+                    tab.clear_selected_filter();
+                    tab.manual_view = false;
+                    tab.view_scope = Some(scope);
+                    tab.view_override = view_setup::automatic_view(
+                        &self.profile.views,
+                        &location,
+                        Some(scope),
+                        &entries.entries,
+                    );
+                    tab.populate(
                         entries.entries,
                         self.profile.show_hidden,
                         format!(" · {label}{warnings}"),
@@ -1586,6 +1939,12 @@ impl App {
                     "{label} · {} abgeschlossen, {} übersprungen",
                     report.completed, report.skipped
                 );
+                if report.ignored > 0 {
+                    summary.push_str(&format!(
+                        " · {} laut Ignorierliste ausgelassen",
+                        report.ignored
+                    ));
+                }
                 if report.cancelled {
                     summary.push_str(" · abgebrochen");
                 }
@@ -1596,6 +1955,7 @@ impl App {
                 }
             }
             Outcome::RenamePreview(plan) => self.rename_review(plan),
+            Outcome::RenameNameList(list, directory) => self.show_rename_names(list, directory),
             Outcome::Renamed(plan) => {
                 self.status(format!("{} Einträge umbenannt.", plan.entries().len()));
                 self.undo = plan.inverse().ok();
@@ -1635,15 +1995,45 @@ impl App {
                 self.choose_wdx_field(*entry, fields, search)
             }
             Outcome::WdxSorted(entries) => self.apply_wdx_order(entries),
+            Outcome::WdxEditable(target, fields) => self.choose_wdx_edit_field(target, fields),
+            Outcome::IgnoreImported(rules) => self.edit_ignore_rules(
+                &rules,
+                Some(
+                    "Importierte Liste prüfen und speichern, um die bisherigen Regeln zu ersetzen.",
+                ),
+            ),
             Outcome::Preview { path, mode, page } => self.show_preview(path, mode, page),
+            Outcome::ViewerPage(viewer, page) => {
+                if self
+                    .viewer
+                    .as_ref()
+                    .is_some_and(|open| open.path == viewer.path)
+                {
+                    self.show_viewer_page(viewer, page);
+                }
+            }
+            Outcome::TextCompared(session, index, must_be_open) => {
+                if !must_be_open || matches!(self.pending, Some(Pending::TextCompare(_, _))) {
+                    self.show_text_comparison(session, index);
+                }
+            }
+            Outcome::BinaryCompared(session, page, must_be_open) => {
+                if !must_be_open || matches!(self.pending, Some(Pending::BinaryCompare(_, _))) {
+                    self.show_binary_comparison(session, page);
+                }
+            }
+            Outcome::LocalShares(shares) => self.show_shares(shares),
+            Outcome::VolumeLabel(volume) => self.show_volume_label(volume),
             Outcome::Image(path, image) => {
                 let ui = self.ui();
                 ui.set_dialog_title(display_path(&path).into());
                 ui.set_dialog_description("".into());
                 ui.set_dialog_options(strings(std::iter::empty::<&str>()));
                 ui.set_viewer_image(preview::to_slint(&image));
+                self.preview_image_path = Some(path);
                 ui.set_dialog_kind("image".into());
             }
+            Outcome::RichPreview(path, content) => self.open_rich_lister(path, content),
             Outcome::StagedPreview(file, content) => self.show_staged_preview(file, content),
         }
     }

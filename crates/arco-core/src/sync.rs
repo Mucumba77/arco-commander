@@ -131,6 +131,11 @@ impl Entry {
 pub struct Tree(BTreeMap<PathBuf, Entry>);
 
 impl Tree {
+    pub fn discard_subtrees(&mut self, paths: &BTreeSet<PathBuf>) {
+        let paths: BTreeSet<_> = paths.iter().map(|path| key(path)).collect();
+        self.0
+            .retain(|path, _| !path.ancestors().any(|parent| paths.contains(parent)));
+    }
     pub fn insert_remote(&mut self, path: PathBuf, info: EntryInfo) -> io::Result<()> {
         if !relative_path(&path) {
             return Err(io::Error::other("Ungültiger Pfad im entfernten Ordner."));
@@ -183,6 +188,13 @@ pub struct Row {
 }
 
 impl Row {
+    pub fn prevent_delete(&mut self) {
+        self.allowed[2] = false;
+        if self.action == Action::DeleteRight {
+            self.action = Action::Skip;
+            self.suggested = Action::Skip;
+        }
+    }
     pub fn can(&self, action: Action) -> bool {
         match action {
             Action::Skip => true,
@@ -263,7 +275,17 @@ impl LocalRoot {
     }
 
     pub fn scan(&self, options: &Options, scope: &Scope, cancel: &AtomicBool) -> io::Result<Tree> {
-        scan(&self.path, options.recursive, scope, cancel)
+        self.scan_ignoring(options, scope, |_, _| false, cancel)
+    }
+
+    pub fn scan_ignoring(
+        &self,
+        options: &Options,
+        scope: &Scope,
+        ignored: impl Fn(&Path, bool) -> bool,
+        cancel: &AtomicBool,
+    ) -> io::Result<Tree> {
+        scan(&self.path, options.recursive, scope, ignored, cancel)
     }
 }
 
@@ -283,6 +305,16 @@ pub fn compare(
     selected: &[PathBuf],
     cancel: &AtomicBool,
 ) -> io::Result<Plan> {
+    compare_ignoring(roots, options, selected, None, cancel)
+}
+
+pub fn compare_ignoring(
+    roots: [&Path; 2],
+    options: &Options,
+    selected: &[PathBuf],
+    ignore: Option<&crate::ignore::IgnoreList>,
+    cancel: &AtomicBool,
+) -> io::Result<Plan> {
     let roots = [fs::canonicalize(roots[0])?, fs::canonicalize(roots[1])?];
     let [left_key, right_key] = roots.each_ref().map(|root| key(root));
     if left_key.starts_with(&right_key) || right_key.starts_with(&left_key) {
@@ -293,10 +325,26 @@ pub fn compare(
         directory_metadata(&roots[1])?,
     ];
     let scope = Scope::new(options.selected_only, selected)?;
-    let [left, right] = [
-        scan(&roots[0], options.recursive, &scope, cancel)?,
-        scan(&roots[1], options.recursive, &scope, cancel)?,
-    ];
+    // Exclude a matched relative path on both sides. Otherwise a rule for an
+    // absolute path could make an existing file look like a mirror deletion.
+    let read = |side: usize| {
+        scan(
+            &roots[side],
+            options.recursive,
+            &scope,
+            |path, directory| {
+                ignore.is_some_and(|ignore| {
+                    let current = roots[side].join(path);
+                    let other = roots[1 - side].join(path);
+                    ignore.local(&current, directory)
+                        || ignore.local(&other, false)
+                        || (ignore.local(&other, true) && other.is_dir())
+                })
+            },
+            cancel,
+        )
+    };
+    let [left, right] = [read(0)?, read(1)?];
     let rows = compare_trees([&left, &right], options, &scope, cancel, |a, b| {
         let left = roots[0].join(&a.path);
         let right = roots[1].join(&b.path);
@@ -451,20 +499,27 @@ impl Scope {
     }
 }
 
-fn scan(root: &Path, recursive: bool, scope: &Scope, cancel: &AtomicBool) -> io::Result<Tree> {
+fn scan(
+    root: &Path,
+    recursive: bool,
+    scope: &Scope,
+    ignored: impl Fn(&Path, bool) -> bool,
+    cancel: &AtomicBool,
+) -> io::Result<Tree> {
     let mut entries = Tree::default();
     let walker = WalkDir::new(root)
         .min_depth(1)
         .max_depth(if recursive { usize::MAX } else { 1 })
         .follow_links(false);
     for item in walker.into_iter().filter_entry(|entry| {
-        entry.depth() == 0
-            || scope.visits(
-                entry
-                    .path()
-                    .strip_prefix(root)
-                    .expect("WalkDir path under root"),
-            )
+        if entry.depth() == 0 {
+            return true;
+        }
+        let path = entry
+            .path()
+            .strip_prefix(root)
+            .expect("WalkDir path under root");
+        scope.visits(path) && !ignored(path, entry.file_type().is_dir())
     }) {
         files::check_cancel(cancel)?;
         let item = item?;
@@ -673,6 +728,14 @@ impl Plan {
         &self.roots
     }
 
+    pub fn disable_actions(&mut self) {
+        for row in &mut self.rows {
+            row.suggested = Action::Skip;
+            row.action = Action::Skip;
+            row.allowed = [false; 3];
+        }
+    }
+
     pub fn protect_path(&mut self, side: usize, file: &Path) -> io::Result<()> {
         let file = key(&fs::canonicalize(file)?);
         let root = key(&self.roots[side]);
@@ -844,6 +907,32 @@ mod tests {
             cancel,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn mirror_excludes_ignored_paths_on_both_sides() {
+        let (_fixture, roots, cancel) = setup();
+        let left = file(&roots[0], "private/data.txt", b"private", 1000);
+        let right = file(&roots[1], "private/data.txt", b"copy", 1000);
+        file(&roots[0], "public.txt", b"public", 1000);
+        let ignore =
+            crate::ignore::IgnoreList::parse(&format!("{}\\", left.parent().unwrap().display()))
+                .unwrap();
+        let plan = compare_ignoring(
+            roots.each_ref().map(PathBuf::as_path),
+            &Options {
+                recursive: true,
+                mode: Mode::Mirror,
+                ..Options::default()
+            },
+            &[],
+            Some(&ignore),
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(plan.rows.len(), 1);
+        assert_eq!(plan.rows[0].relative, Path::new("public.txt"));
+        assert_eq!(fs::read(right).unwrap(), b"copy");
     }
 
     #[test]

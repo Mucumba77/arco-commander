@@ -96,6 +96,10 @@ fn next_path(
         .ok_or_else(|| format!("Pfad für {name} fehlt"))
 }
 
+fn file_color(rgb: u32) -> slint::Color {
+    slint::Color::from_rgb_u8((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
+}
+
 fn human_size(bytes: u64) -> String {
     if bytes < 1024 {
         return format!("{bytes} B");

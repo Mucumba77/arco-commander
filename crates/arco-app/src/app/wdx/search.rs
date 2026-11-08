@@ -2,7 +2,7 @@ use super::scan_paths;
 use crate::app::{App, Outcome};
 use crate::commands::{Dialog, Pending};
 use crate::panel::Location;
-use arco_core::plugin::{Interface, Registration, WdxMatcher};
+use arco_core::plugin::{Interface, Registration, WdxField, WdxMatcher};
 use arco_core::profile::{WdxSearchField, WdxSearchProfile};
 use arco_core::{files, tools};
 use std::collections::{BTreeMap, HashSet};
@@ -24,7 +24,7 @@ pub(crate) struct SearchTarget {
 
 struct SearchCondition {
     plugin: Registration,
-    field: String,
+    field: WdxField,
     expression: String,
     matcher: WdxMatcher,
 }
@@ -91,7 +91,7 @@ impl App {
         &mut self,
         target: SearchTarget,
         plugin: Box<Registration>,
-        field: String,
+        field: WdxField,
     ) {
         if !self.wdx_search_is_current(&target) {
             return;
@@ -104,13 +104,14 @@ impl App {
         &mut self,
         target: SearchTarget,
         plugin: Box<Registration>,
-        field: String,
+        field: WdxField,
         values: (&str, &str),
         error: Option<&io::Error>,
     ) {
         let mut description = format!(
-            "{} · {field}\nSuche in Unterordnern. Text sucht Teiltreffer. Verwende =, !=, <, <=, >, >= oder ~ für einen regulären Ausdruck.",
-            plugin.name
+            "{} · {}\nSuche in Unterordnern. Text sucht Teiltreffer. Verwende =, !=, <, <=, >, >= oder ~ für einen regulären Ausdruck.",
+            plugin.name,
+            field.label()
         );
         if let Some(error) = error {
             let _ = write!(description, "\n{error}");
@@ -142,7 +143,7 @@ impl App {
         &mut self,
         mut target: SearchTarget,
         plugin: Registration,
-        field: String,
+        field: WdxField,
         masks: &str,
         expression: &str,
     ) {
@@ -196,7 +197,7 @@ impl App {
                 "\n{}. {} · {} · {expression}",
                 index + 1,
                 condition.plugin.name,
-                condition.field
+                condition.field.label()
             );
         }
         self.dialog(
@@ -273,6 +274,7 @@ impl App {
             max_size: None,
             max_depth: None,
             show_hidden: self.profile.show_hidden,
+            ignore: self.ignore_list(),
         };
         self.start_job("Suche nach WDX-Feldern …", false, move |job| {
             let mut directory =
@@ -304,6 +306,7 @@ impl App {
                 request: target.request,
                 entries: directory,
                 label: format!("WDX-Suchtreffer · {count} Bedingungen"),
+                scope: arco_core::view_settings::Scope::Search,
             })
         });
         Ok(())
@@ -344,7 +347,7 @@ impl App {
                 .iter()
                 .map(|condition| WdxSearchField {
                     plugin: condition.plugin.path.clone(),
-                    field: condition.field.clone(),
+                    selection: condition.field.clone(),
                     expression: condition.expression.clone(),
                 })
                 .collect(),
@@ -433,7 +436,7 @@ impl App {
                 })?;
             target.conditions.push(SearchCondition {
                 plugin: plugin.clone(),
-                field: field.field.clone(),
+                field: field.selection.clone(),
                 expression: field.expression.clone(),
                 matcher: WdxMatcher::parse(&field.expression)?,
             });

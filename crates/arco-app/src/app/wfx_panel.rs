@@ -51,6 +51,7 @@ pub(super) fn read_panel(location: &WfxLocation, job: &JobContext) -> io::Result
         space: None,
         archive: None,
         ftp: None,
+        shell: Default::default(),
     })
 }
 
@@ -120,11 +121,11 @@ impl App {
                 Navigation::Jump,
             );
         } else {
-            self.view_wfx_entry(row);
+            self.view_wfx_entry(row, false);
         }
     }
 
-    fn view_wfx_entry(&mut self, row: usize) {
+    fn view_wfx_entry(&mut self, row: usize, separate: bool) {
         let tab = self.current();
         let Some((location, entry)) = tab.wfx.as_ref().zip(tab.display_row(row)) else {
             return;
@@ -164,6 +165,7 @@ impl App {
                     storage,
                     path,
                     title: remote,
+                    separate,
                 },
                 content,
             ))
@@ -186,7 +188,13 @@ impl App {
         if self.panels[self.active].loading
             && matches!(
                 command,
-                "view" | "rename" | "mkdir" | "delete" | "delete-permanent" | "properties"
+                "view"
+                    | "view-separate"
+                    | "rename"
+                    | "mkdir"
+                    | "delete"
+                    | "delete-permanent"
+                    | "properties"
             )
         {
             self.status("Warte, bis das WFX-Dateifenster geladen ist.");
@@ -203,7 +211,9 @@ impl App {
                     );
                 }
             }
-            "view" => self.view_wfx_entry(self.current().cursor),
+            "view" | "view-separate" => {
+                self.view_wfx_entry(self.current().cursor, command == "view-separate")
+            }
             "properties" => {
                 if let Some(entry) = self.current().display_row(self.current().cursor) {
                     let path = location.child(&entry.name.to_string_lossy());

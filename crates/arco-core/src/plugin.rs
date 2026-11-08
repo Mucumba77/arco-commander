@@ -13,13 +13,13 @@ mod operations;
 mod registry;
 mod wdx;
 pub use operations::{
-    WFX_TREE_DEPTH, WFX_TREE_ENTRIES, WcxOperation, WfxOperation, operate, operate_interactive,
-    wfx_batch,
+    DownloadConflict, WFX_TREE_DEPTH, WFX_TREE_ENTRIES, WcxOperation, WfxOperation, WfxVersion,
+    operate, operate_interactive, wfx_batch,
 };
 pub use registry::*;
 pub use wdx::{WdxKey, WdxMatcher, WdxValue, wdx_order};
 
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 9;
 pub const MAX_REQUEST: u64 = 128 * 1024;
 const MAX_REPLY: u64 = 24 * 1024 * 1024;
 const HOST_TIMEOUT: Duration = Duration::from_secs(90);
@@ -41,8 +41,19 @@ pub enum Operation {
     Wfx(WfxOperation),
     WfxBatch(Vec<WfxOperation>),
     WdxFields,
+    WdxEditableFields,
+    WdxSet {
+        field: WdxField,
+        value: String,
+        files: Vec<PathBuf>,
+    },
+    WdxEdit {
+        field: WdxField,
+        files: Vec<PathBuf>,
+        parent: usize,
+    },
     WdxValues {
-        field: String,
+        field: WdxField,
         files: Vec<PathBuf>,
     },
     WlxEmbedded {
@@ -68,16 +79,105 @@ pub struct Reply {
     pub result: Result<Vec<Row>, String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Row {
     pub name: String,
     pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wfx_version: Option<WfxVersion>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct WdxColumn {
     pub plugin: PathBuf,
+    #[serde(flatten)]
+    pub selection: WdxField,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct WdxField {
     pub field: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct WdxEditableField {
+    pub selection: WdxField,
+    pub kind: i32,
+    pub choices: Vec<String>,
+    #[serde(default)]
+    pub editor: bool,
+}
+
+pub fn wdx_editable_fields(
+    plugin: &Path,
+    cancel: &AtomicBool,
+) -> io::Result<Vec<WdxEditableField>> {
+    inspect_host(
+        Interface::Wdx,
+        plugin,
+        Path::new(""),
+        Operation::WdxEditableFields,
+        cancel,
+        |_| (),
+    )?
+    .into_iter()
+    .map(|row| serde_json::from_str(&row.value).map_err(io::Error::other))
+    .collect()
+}
+
+pub fn wdx_set(
+    plugin: &Path,
+    field: WdxField,
+    value: String,
+    files: Vec<PathBuf>,
+    cancel: &AtomicBool,
+    progress: impl FnMut(String),
+) -> io::Result<Vec<Row>> {
+    inspect_host(
+        Interface::Wdx,
+        plugin,
+        Path::new(""),
+        Operation::WdxSet {
+            field,
+            value,
+            files,
+        },
+        cancel,
+        progress,
+    )
+}
+
+pub fn wdx_edit(
+    plugin: &Path,
+    field: WdxField,
+    files: Vec<PathBuf>,
+    parent: usize,
+    cancel: &AtomicBool,
+    progress: impl FnMut(String),
+) -> io::Result<Vec<Row>> {
+    inspect_host(
+        Interface::Wdx,
+        plugin,
+        Path::new(""),
+        Operation::WdxEdit {
+            field,
+            files,
+            parent,
+        },
+        cancel,
+        progress,
+    )
+}
+
+impl WdxField {
+    pub fn label(&self) -> String {
+        match &self.unit {
+            Some(unit) => format!("{} ({unit})", self.field),
+            None => self.field.clone(),
+        }
+    }
 }
 
 pub fn wdx_fields(plugin: &Path, cancel: &AtomicBool) -> io::Result<Vec<Row>> {
@@ -103,6 +203,7 @@ pub fn wdx_values(
             .map(|(index, value)| Row {
                 name: index.to_string(),
                 value: value.display,
+                ..Default::default()
             })
             .collect()
     })
@@ -111,6 +212,15 @@ pub fn wdx_values(
 pub fn wdx_typed_values(
     plugin: &Path,
     field: String,
+    files: Vec<PathBuf>,
+    cancel: &AtomicBool,
+) -> io::Result<Vec<(usize, WdxValue)>> {
+    wdx_typed_field_values(plugin, WdxField { field, unit: None }, files, cancel)
+}
+
+pub fn wdx_typed_field_values(
+    plugin: &Path,
+    field: WdxField,
     files: Vec<PathBuf>,
     cancel: &AtomicBool,
 ) -> io::Result<Vec<(usize, WdxValue)>> {
@@ -246,10 +356,14 @@ fn inspect_interactive(
     mut progress: impl FnMut(String),
     mut prompt: Option<&mut PromptHandler<'_>>,
 ) -> io::Result<Vec<Row>> {
+    let report_after_cancel = matches!(
+        operation,
+        Operation::WdxSet { .. } | Operation::WdxEdit { .. }
+    );
     let file_operation = matches!(
         operation,
         Operation::Wcx(_) | Operation::Wfx(_) | Operation::WfxBatch(_)
-    );
+    ) || report_after_cancel;
     let timeout = if file_operation {
         Duration::from_secs(3600)
     } else {
@@ -290,16 +404,29 @@ fn inspect_interactive(
     let mut last_report = String::new();
     let mut last_poll = started;
     let mut result = None;
+    let mut cancelling = None;
     loop {
         if file_operation && cancel.load(std::sync::atomic::Ordering::Relaxed) {
-            let _ = std::fs::write(host.workspace.path().join("cancel"), []);
-            let grace = Instant::now();
-            while grace.elapsed() < Duration::from_millis(500) && host.try_wait()?.is_none() {
-                std::thread::sleep(Duration::from_millis(25));
+            if cancelling.is_none() {
+                let _ = std::fs::write(host.workspace.path().join("cancel"), []);
+                cancelling = Some(Instant::now());
             }
-            return Err(io::ErrorKind::Interrupted.into());
+            if report_after_cancel {
+                if cancelling.is_some_and(|since| since.elapsed() >= Duration::from_secs(1)) {
+                    return Err(io::Error::other(
+                        "WDX-Schreibauftrag abgebrochen. Bereits geschriebene Werte können erhalten sein.",
+                    ));
+                }
+            } else {
+                let grace = Instant::now();
+                while grace.elapsed() < Duration::from_millis(500) && host.try_wait()?.is_none() {
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+        } else {
+            check_host_timeout(started, timeout, cancel)?;
         }
-        check_host_timeout(started, timeout, cancel)?;
         if file_operation && last_poll.elapsed() >= Duration::from_millis(100) {
             last_poll = Instant::now();
             let mut report = String::new();
@@ -475,7 +602,12 @@ fn start_host(
     let workspace = tempfile::tempdir()?;
     let file = if matches!(
         operation,
-        Operation::Probe | Operation::WdxFields | Operation::WdxValues { .. }
+        Operation::Probe
+            | Operation::WdxFields
+            | Operation::WdxValues { .. }
+            | Operation::WdxEditableFields
+            | Operation::WdxSet { .. }
+            | Operation::WdxEdit { .. }
     ) || interface == Interface::Wfx
     {
         file.to_path_buf()

@@ -4,7 +4,7 @@ use super::{
 };
 use arco_core::plugin::{
     PROTOCOL_VERSION, Prompt, PromptAnswer, PromptKind, PromptMessage, Row, WFX_TREE_DEPTH,
-    WFX_TREE_ENTRIES, WfxOperation,
+    WFX_TREE_ENTRIES, WfxOperation, WfxVersion,
 };
 use arco_core::{files, tools};
 use libloading::os::windows::Library;
@@ -21,6 +21,8 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Storage::FileSystem::{WIN32_FIND_DATAA, WIN32_FIND_DATAW};
 use zeroize::{Zeroize, Zeroizing};
+
+mod credentials;
 
 type Progress<T> = unsafe extern "system" fn(i32, *mut T, *mut T, i32) -> i32;
 type Log<T> = unsafe extern "system" fn(i32, i32, *mut T);
@@ -55,6 +57,17 @@ impl Entry {
             || (self.info.attributes as u32 & 0x8000_0000 != 0
                 && self.unix_mode & 0o170000 == 0o120000)
     }
+
+    fn version(&self) -> Option<WfxVersion> {
+        (!self.directory() && !self.link()).then(|| WfxVersion {
+            size: combine(self.info.low, self.info.high),
+            modified: combine(
+                self.info.modified.dwLowDateTime,
+                self.info.modified.dwHighDateTime,
+            ),
+            attributes: self.info.attributes as u32,
+        })
+    }
 }
 
 impl RemoteInfo {
@@ -80,9 +93,11 @@ pub fn inspect(library: &Library, plugin: &Path, directory: &OsStr) -> io::Resul
             } else {
                 format!("{} B", combine(entry.info.low, entry.info.high))
             };
+            let wfx_version = entry.version();
             Row {
                 name: entry.name,
                 value,
+                wfx_version,
             }
         })
         .collect())
@@ -110,12 +125,13 @@ fn initialize(library: &Library, plugin: &Path, unicode: bool) -> io::Result<()>
             "WFX FsInit meldet Status {status}."
         )));
     }
+    let stem = plugin.file_stem().ok_or(io::ErrorKind::InvalidInput)?;
+    let dir = plugin.with_file_name("arco-wfx").join(stem);
     set_defaults(library, b"FsSetDefaultParams", || {
-        let stem = plugin.file_stem().ok_or(io::ErrorKind::InvalidInput)?;
-        let dir = plugin.with_file_name("arco-wfx").join(stem);
         fs::create_dir_all(&dir)?;
         Ok(dir.join("fsplugin.ini"))
-    })
+    })?;
+    credentials::initialize(library, dir, unicode)
 }
 
 fn entries(library: &Library, directory: &OsStr, unicode: bool) -> io::Result<Vec<Entry>> {
@@ -214,6 +230,7 @@ pub fn batch(
         result.push(Row {
             name: index.to_string(),
             value,
+            ..Default::default()
         });
     }
     Ok(result)
@@ -225,6 +242,12 @@ fn operate_initialized(
     initialized_unicode: bool,
 ) -> io::Result<()> {
     match operation {
+        WfxOperation::Overwrite {
+            operation,
+            expected,
+        } => {
+            return overwrite_file(library, operation, *expected, initialized_unicode);
+        }
         WfxOperation::DeleteTree { path } => {
             verify_delete_path(library, path, true, initialized_unicode)?;
             let plan = tree_plan(library, path, true, initialized_unicode)?;
@@ -306,6 +329,158 @@ fn operate_initialized(
         _ => (),
     }
     single(library, operation, initialized_unicode, None)
+}
+
+fn expect_file_version(
+    library: &Library,
+    path: &str,
+    version: WfxVersion,
+    unicode: bool,
+) -> io::Result<()> {
+    if find_entry(library, path, unicode)?.version() != Some(version) {
+        return Err(io::Error::other(
+            "Eine WFX-Datei hat sich seit der Bestätigung geändert.",
+        ));
+    }
+    Ok(())
+}
+
+fn overwrite_file(
+    library: &Library,
+    operation: &WfxOperation,
+    expected: WfxVersion,
+    unicode: bool,
+) -> io::Result<()> {
+    let target = operation
+        .file_destination()
+        .ok_or_else(|| io::Error::other("WFX-Zieldatei fehlt."))?;
+    expect_file_version(library, target, expected, unicode)?;
+    let (parent, _) = parent_and_name(target)?;
+    let reservation = tempfile::Builder::new()
+        .prefix("arco-wfx-")
+        .tempfile_in(workspace_file(""))?;
+    let name = reservation
+        .path()
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| io::Error::other("WFX-Zwischenname fehlt."))?;
+    let part = tree_path(parent.trim_end_matches('\\'), &format!("{name}.part"))?;
+    let backup = tree_path(parent.trim_end_matches('\\'), &format!("{name}.backup"))?;
+    prepare_target(library, &part, unicode)?;
+    prepare_target(library, &backup, unicode)?;
+
+    let (source_version, local) = match operation {
+        WfxOperation::Upload { local, .. } | WfxOperation::UploadMove { local, .. } => {
+            (None, Some(local))
+        }
+        WfxOperation::Copy { from, .. } | WfxOperation::Rename { from, .. }
+            if !from.eq_ignore_ascii_case(target) =>
+        {
+            let version = find_entry(library, from, unicode)?
+                .version()
+                .ok_or_else(|| io::Error::other("WFX-Quelle ist keine reguläre Datei."))?;
+            (Some((from, version)), None)
+        }
+        _ => return Err(io::Error::other("Ungültige WFX-Dateiersetzung.")),
+    };
+    let (stage, size) = if let Some((from, version)) = source_version {
+        (
+            WfxOperation::Copy {
+                from: from.clone(),
+                to: part.clone(),
+            },
+            version.size,
+        )
+    } else {
+        let local = local.expect("local WFX replacement source");
+        let metadata = files::regular_metadata(local)?;
+        if !metadata.is_file() {
+            return Err(io::Error::other("WFX-Quelle ist keine reguläre Datei."));
+        }
+        (
+            WfxOperation::Upload {
+                local: local.clone(),
+                remote: part.clone(),
+            },
+            metadata.len(),
+        )
+    };
+    let rename = |from: &str, to: &str| {
+        single(
+            library,
+            &WfxOperation::Rename {
+                from: from.into(),
+                to: to.into(),
+            },
+            unicode,
+            None,
+        )
+    };
+    let delete = |path: &str| {
+        single(
+            library,
+            &WfxOperation::Delete { path: path.into() },
+            unicode,
+            None,
+        )
+    };
+    let staged = (|| {
+        operate_initialized(library, &stage, unicode)?;
+        let version = find_entry(library, &part, unicode)?
+            .version()
+            .filter(|version| version.size == size)
+            .ok_or_else(|| {
+                io::Error::other("WFX hat die Größe der Zwischendatei nicht bestätigt.")
+            })?;
+        if let Some((from, before)) = source_version {
+            expect_file_version(library, from, before, unicode)?;
+        }
+        expect_file_version(library, target, expected, unicode)?;
+        if cancelled() {
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        Ok::<_, io::Error>(version)
+    })()
+    .map_err(|error| io::Error::other(format!("{error}. Prüfe den WFX-Zwischenpfad „{part}“.")))?;
+    rename(target, &backup).map_err(|error| {
+        io::Error::other(format!(
+            "{error}. Prüfe die WFX-Zwischenpfade „{part}“ und „{backup}“."
+        ))
+    })?;
+    let publication = (|| {
+        expect_file_version(library, &backup, expected, unicode)?;
+        expect_file_version(library, &part, staged, unicode)?;
+        prepare_target(library, target, unicode)?;
+        rename(&part, target)?;
+        expect_file_version(library, target, staged, unicode)
+    })();
+    if let Err(error) = publication {
+        let recovery = prepare_target(library, target, unicode)
+            .and_then(|()| rename(&backup, target))
+            .and_then(|()| expect_file_version(library, target, expected, unicode));
+        return Err(io::Error::other(if recovery.is_ok() {
+            format!("{error}. Die WFX-Zieldatei wurde wiederhergestellt. Prüfe „{part}“.")
+        } else {
+            format!("{error}. Prüfe die WFX-Sicherung „{backup}“ und „{part}“.")
+        }));
+    }
+    let finish = (|| {
+        if let WfxOperation::UploadMove { local, .. } = operation {
+            verify_remote_copy(library, target, local, false, unicode)?;
+        } else if matches!(operation, WfxOperation::Rename { .. }) {
+            let (from, version) = source_version.expect("remote WFX move source");
+            expect_file_version(library, from, version, unicode)?;
+            expect_file_version(library, target, staged, unicode)?;
+            delete(from)?;
+        }
+        expect_file_version(library, &backup, expected, unicode)?;
+        delete(&backup)
+    })();
+    finish.map_err(|error| {
+        io::Error::other(format!(
+            "{error}. Das WFX-Ziel wurde geschrieben. Prüfe die Sicherung „{backup}“."
+        ))
+    })
 }
 
 fn single(

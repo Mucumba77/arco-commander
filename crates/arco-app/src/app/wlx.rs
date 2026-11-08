@@ -78,8 +78,11 @@ impl App {
             self.profile.plugins.iter().find(|entry| {
                 !entry.masks.is_empty() && entry.matches(Interface::Wlx, &target.path)
             })?;
-        let parent = self
-            .ui()
+        Some((entry.clone(), self.native_window_handle()?))
+    }
+
+    pub(super) fn native_window_handle(&self) -> Option<usize> {
+        self.ui()
             .window()
             .with_winit_window(|window| {
                 use slint::winit_030::winit::raw_window_handle::{
@@ -90,8 +93,7 @@ impl App {
                 };
                 Some(handle.hwnd.get() as usize)
             })
-            .flatten()?;
-        Some((entry.clone(), parent))
+            .flatten()
     }
 
     pub(super) fn accept_quick_result(&mut self, result: QuickResult) {

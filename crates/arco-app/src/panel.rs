@@ -1,7 +1,10 @@
+use crate::preview::{self, ThumbnailRequest};
 use crate::{FileRow, PanelData, PathItem, display_path, human_size};
 use arco_core::archive_view::Catalog;
-use arco_core::files::{self, Entry, Kind, SortKey};
-use arco_core::profile::{SavedPanel, SavedTab, TabLock};
+use arco_core::files::{self, Entry, Kind, SortKey, SortOrder};
+use arco_core::ignore::{IgnoreList, Source as IgnoreSource};
+use arco_core::profile::{SavedPanel, SavedTab, TabLock, TabView};
+use arco_core::view_settings::{CompiledColor, Mode, Scope};
 use arco_windows::ftp;
 use chrono::{DateTime, Local};
 use slint::{Model, ModelNotify, ModelRc, ModelTracker, VecModel};
@@ -10,6 +13,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use zeroize::Zeroizing;
+
+pub(crate) type ArchivePassword = Arc<Zeroizing<String>>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Location {
@@ -17,6 +23,45 @@ pub enum Location {
     Archive { file: PathBuf, folder: PathBuf },
     Ftp(FtpLocation),
     Wfx(WfxLocation),
+    Shell(ShellLocation),
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ShellLocation(pub Vec<(String, String)>);
+
+impl PartialEq for ShellLocation {
+    fn eq(&self, other: &Self) -> bool {
+        self.address().eq_ignore_ascii_case(other.address())
+    }
+}
+
+impl Eq for ShellLocation {}
+
+impl ShellLocation {
+    pub fn is_address(value: &str) -> bool {
+        value.starts_with("::{")
+            || value
+                .get(..6)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("shell:"))
+    }
+
+    pub fn from_address(address: &str) -> Self {
+        if address.eq_ignore_ascii_case(arco_windows::SHELL_DESKTOP) {
+            Self::default()
+        } else {
+            Self(vec![(address.to_owned(), address.to_owned())])
+        }
+    }
+
+    pub fn address(&self) -> &str {
+        self.0
+            .last()
+            .map_or(arco_windows::SHELL_DESKTOP, |(address, _)| address)
+    }
+
+    fn label(&self) -> &str {
+        self.0.last().map_or("Windows-Desktop", |(_, title)| title)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -58,6 +103,7 @@ impl WfxLocation {
 pub struct FtpLocation {
     pub session: Arc<ftp::Session>,
     pub directory: ftp::Url,
+    pub profile: Option<String>,
 }
 
 impl PartialEq for FtpLocation {
@@ -82,6 +128,7 @@ impl FtpLocation {
         Self {
             session: self.session.clone(),
             directory,
+            profile: self.profile.clone(),
         }
     }
 
@@ -104,6 +151,10 @@ impl Location {
             }),
             Self::Ftp(ftp) => ftp.parent().map(Self::Ftp),
             Self::Wfx(wfx) => wfx.parent().map(Self::Wfx),
+            Self::Shell(shell) if !shell.0.is_empty() => Some(Self::Shell(ShellLocation(
+                shell.0[..shell.0.len() - 1].to_vec(),
+            ))),
+            Self::Shell(_) => None,
         }
     }
 
@@ -115,6 +166,7 @@ impl Location {
             Self::Ftp(ftp) => ftp::Session::directory_name(&ftp.directory)
                 .map_or_else(PathBuf::new, PathBuf::from),
             Self::Wfx(wfx) => PathBuf::from(wfx.directory.rsplit('\\').next().unwrap_or_default()),
+            Self::Shell(shell) => PathBuf::from(shell.address()),
         }
     }
 
@@ -126,6 +178,7 @@ impl Location {
             }
             Self::Ftp(ftp) => ftp.directory.as_str().to_owned(),
             Self::Wfx(wfx) => format!("{}::{}", wfx.plugin.name, wfx.directory),
+            Self::Shell(shell) => shell.address().to_owned(),
         }
     }
 }
@@ -135,6 +188,13 @@ pub struct ArchiveTab {
     pub file: PathBuf,
     pub folder: PathBuf,
     pub catalog: Arc<Catalog>,
+    pub(crate) password: Option<ArchivePassword>,
+}
+
+impl ArchiveTab {
+    pub(crate) fn password(&self) -> Option<&str> {
+        self.password.as_ref().map(|password| password.as_str())
+    }
 }
 
 pub struct FtpTab {
@@ -172,8 +232,16 @@ impl Panel {
                 }
                 let mut tab = Tab::new(path);
                 if let Some(options) = saved.tab_options.get(index) {
+                    tab.options = options.clone();
+                    let shell = tab.options.shell.take();
+                    if cfg!(windows)
+                        && let Some(address) = shell.as_deref()
+                        && !address.contains('\0')
+                        && (ShellLocation::is_address(address) || Path::new(address).is_absolute())
+                    {
+                        tab.shell = Some(ShellLocation::from_address(address));
+                    }
                     tab.set_lock(options.lock);
-                    tab.options.title.clone_from(&options.title);
                 }
                 tab
             })
@@ -212,12 +280,10 @@ impl Panel {
             .iter()
             .map(|tab| {
                 let mut options = tab.options.clone();
-                if !tab
-                    .lock_base
-                    .as_ref()
-                    .map_or_else(|| tab.is_local(), |base| matches!(base, Location::Local(_)))
-                {
-                    options.lock = TabLock::Unlocked;
+                match tab.lock_base.clone().unwrap_or_else(|| tab.location()) {
+                    Location::Shell(shell) => options.shell = Some(shell.address().into()),
+                    Location::Local(_) => (),
+                    _ => options.lock = TabLock::Unlocked,
                 }
                 options
             })
@@ -271,22 +337,17 @@ impl Panel {
             crumbs: ModelRc::new(VecModel::from(crumbs)),
             tab: self.tab as i32,
             filter: tab.filter.as_str().into(),
-            detailed: tab.detailed,
-            sort_column: match (tab.wdx_sort, tab.sort) {
-                (Some(_), _) => "",
-                (_, SortKey::Name) => "name",
-                (_, SortKey::Extension) => "extension",
-                (_, SortKey::Size) => "size",
-                (_, SortKey::Modified) => "time",
-                (_, SortKey::Attributes) => "attributes",
-            }
-            .into(),
-            wdx_sort_index: tab.wdx_sort.map_or(-1, |(index, _)| index as i32),
-            descending: tab
-                .wdx_sort
-                .map_or(tab.descending, |(_, descending)| descending),
+            detailed: tab.detailed(),
+            thumbnails: tab.shows_thumbnails(),
+            comments: tab.shows_comments(),
+            sort_column: tab.sort_order().key.column().into(),
+            wdx_sort_index: match tab.sort_order().key {
+                SortKey::Wdx(index) => i32::from(index),
+                _ => -1,
+            },
+            descending: tab.sort_order().descending,
             volume: tab.volume.as_str().into(),
-            drive: if tab.ftp.is_some() || tab.wfx.is_some() {
+            drive: if tab.ftp.is_some() || tab.wfx.is_some() || tab.shell.is_some() {
                 "".into()
             } else {
                 tab.path
@@ -297,6 +358,7 @@ impl Panel {
                     .into()
             },
             local: tab.is_local(),
+            ..PanelData::default()
         }
     }
 }
@@ -305,7 +367,10 @@ fn path_item(path: &Location, label_width: usize) -> PathItem {
     let full = path.display();
     let key = path.row_key();
     let label = key.file_name().map(|name| name.to_string_lossy());
-    let label = label.as_deref().unwrap_or(&full);
+    let label = match path {
+        Location::Shell(shell) => shell.label(),
+        _ => label.as_deref().unwrap_or(&full),
+    };
     PathItem {
         label: short_label(label, label_width),
         path: full.into(),
@@ -329,15 +394,17 @@ pub struct Tab {
     pub archive: Option<ArchiveTab>,
     pub ftp: Option<FtpTab>,
     pub wfx: Option<WfxLocation>,
+    pub shell: Option<ShellLocation>,
+    pub shell_entries: BTreeMap<PathBuf, arco_windows::ShellFolder>,
     pub back: Vec<Location>,
     pub forward: Vec<Location>,
     pub filter: String,
-    pub detailed: bool,
     pub cursor: usize,
     pub anchor: usize,
-    pub sort: SortKey,
-    pub descending: bool,
-    pub(crate) wdx_sort: Option<(usize, bool)>,
+    pub(crate) view_override: Option<Mode>,
+    pub(crate) view_scope: Option<Scope>,
+    pub(crate) manual_view: bool,
+    pub(crate) wdx_sorted: bool,
     pub extra: String,
     pub loaded: bool,
     pub volume: String,
@@ -346,6 +413,10 @@ pub struct Tab {
     selection: Rc<RefCell<BTreeSet<PathBuf>>>,
     previous_selection: BTreeSet<PathBuf>,
     equal_filter: Option<BTreeSet<PathBuf>>,
+    selected_filter: Option<BTreeSet<PathBuf>>,
+    programs_only: bool,
+    pub(crate) ignore: Option<Arc<IgnoreList>>,
+    pub(crate) colors: Rc<Vec<CompiledColor>>,
     selected_size: u64,
     visible_size: u64,
     visible_folders: usize,
@@ -368,7 +439,7 @@ impl Tab {
     pub fn summary(&self) -> String {
         let count = self.selection.borrow().len();
         format!(
-            "{} / {} · {count} / {} markiert · {} Ordner{}{}",
+            "{} / {} · {count} / {} markiert · {} Ordner{}{}{}{}",
             human_size(self.selected_size),
             human_size(self.visible_size),
             self.model.visible.len(),
@@ -376,6 +447,16 @@ impl Tab {
             self.extra,
             if self.has_comparison_filter() {
                 " · Gleiche ausgeblendet"
+            } else {
+                ""
+            },
+            if self.selected_filter.is_some() {
+                " · Auswahlansicht"
+            } else {
+                ""
+            },
+            if self.programs_only {
+                " · Nur Programme"
             } else {
                 ""
             },
@@ -391,6 +472,7 @@ impl Tab {
             Vec::new(),
             selection.clone(),
             false,
+            Rc::default(),
         ));
         Self {
             path,
@@ -399,15 +481,17 @@ impl Tab {
             archive: None,
             ftp: None,
             wfx: None,
+            shell: None,
+            shell_entries: BTreeMap::new(),
             back: Vec::new(),
             forward: Vec::new(),
             filter: String::new(),
-            detailed: true,
             cursor,
             anchor: cursor,
-            sort: SortKey::Name,
-            descending: false,
-            wdx_sort: None,
+            view_override: None,
+            view_scope: None,
+            manual_view: false,
+            wdx_sorted: false,
             extra: String::new(),
             loaded: false,
             volume: String::new(),
@@ -416,6 +500,10 @@ impl Tab {
             selection,
             previous_selection: BTreeSet::new(),
             equal_filter: None,
+            selected_filter: None,
+            programs_only: false,
+            ignore: None,
+            colors: Rc::default(),
             selected_size: 0,
             visible_size: 0,
             visible_folders: 0,
@@ -423,6 +511,9 @@ impl Tab {
     }
 
     pub fn location(&self) -> Location {
+        if let Some(shell) = &self.shell {
+            return Location::Shell(shell.clone());
+        }
         if let Some(wfx) = &self.wfx {
             return Location::Wfx(wfx.clone());
         }
@@ -439,7 +530,65 @@ impl Tab {
     }
 
     pub fn is_local(&self) -> bool {
-        self.archive.is_none() && self.ftp.is_none() && self.wfx.is_none()
+        self.archive.is_none() && self.ftp.is_none() && self.wfx.is_none() && self.shell.is_none()
+    }
+
+    pub fn detailed(&self) -> bool {
+        !self.shows_thumbnails() && !self.shows_comments() && self.view() != TabView::Short
+    }
+
+    pub fn shows_thumbnails(&self) -> bool {
+        self.is_local() && self.view() == TabView::Thumbnails
+    }
+
+    pub fn shows_comments(&self) -> bool {
+        self.is_local() && self.view() == TabView::Comments
+    }
+
+    fn view(&self) -> TabView {
+        self.view_override
+            .as_ref()
+            .map_or(self.options.view, |mode| mode.view)
+    }
+
+    pub(crate) fn column_set(&self) -> Option<&str> {
+        if let Some(mode) = &self.view_override {
+            mode.columns.as_deref()
+        } else {
+            self.options.column_set.as_deref()
+        }
+    }
+
+    pub(crate) fn set_view(
+        &mut self,
+        view: TabView,
+        columns: Option<String>,
+        sort: Option<Vec<SortOrder>>,
+        show_hidden: bool,
+    ) {
+        self.options.view = view;
+        self.options.column_set = columns;
+        if let Some(sort) = sort {
+            self.options.sort = sort;
+        }
+        self.view_override = None;
+        self.manual_view = true;
+        self.resort(show_hidden);
+    }
+
+    fn sort_orders(&self) -> &[SortOrder] {
+        self.view_override
+            .as_ref()
+            .filter(|mode| !mode.sort.is_empty())
+            .map_or(self.options.sort.as_slice(), |mode| &mode.sort)
+    }
+
+    pub(crate) fn current_sort_orders(&self) -> &[SortOrder] {
+        self.sort_orders()
+    }
+
+    fn sort_order(&self) -> SortOrder {
+        self.sort_orders().first().copied().unwrap_or_default()
     }
 
     pub fn crumbs(&self) -> Vec<Location> {
@@ -457,10 +606,16 @@ impl Tab {
         self.path = match location {
             Location::Local(path) => path.clone(),
             Location::Archive { file, .. } => file.parent().unwrap_or(&self.path).to_path_buf(),
-            Location::Ftp(_) | Location::Wfx(_) => self.path.clone(),
+            Location::Ftp(_) | Location::Wfx(_) | Location::Shell(_) => self.path.clone(),
         };
         self.archive = archive;
         self.ftp = None;
+        self.shell = if let Location::Shell(shell) = location {
+            Some(shell.clone())
+        } else {
+            None
+        };
+        self.shell_entries.clear();
         self.wfx = if let Location::Wfx(wfx) = location {
             Some(wfx.clone())
         } else {
@@ -469,6 +624,7 @@ impl Tab {
         self.cursor = usize::from(location.parent().is_some());
         self.anchor = self.cursor;
         self.filter.clear();
+        self.clear_selected_filter();
         self.selection.borrow_mut().clear();
         self.previous_selection.clear();
         self.selected_size = 0;
@@ -489,8 +645,21 @@ impl Tab {
         extra: String,
         focus: Option<&Path>,
     ) {
-        self.wdx_sort = None;
-        files::sort(&mut entries, self.sort, self.descending);
+        for (index, entry) in entries.iter_mut().enumerate() {
+            entry.list_order = index;
+        }
+        self.replace_sorted(entries, show_hidden, extra, focus);
+    }
+
+    fn replace_sorted(
+        &mut self,
+        mut entries: Vec<Entry>,
+        show_hidden: bool,
+        extra: String,
+        focus: Option<&Path>,
+    ) {
+        self.wdx_sorted = false;
+        files::sort_by_columns(&mut entries, self.sort_orders());
         self.entries = Rc::new(entries);
         self.extra = extra;
         self.loaded = true;
@@ -507,16 +676,29 @@ impl Tab {
     }
 
     pub fn set_sort(&mut self, key: SortKey, show_hidden: bool) {
-        if self.sort == key && self.wdx_sort.is_none() {
-            self.descending = !self.descending;
-        } else {
-            self.sort = key;
-            self.descending = false;
+        let current = self.sort_order();
+        let descending = current.key == key && !current.descending;
+        self.set_sort_orders(vec![SortOrder { key, descending }], show_hidden);
+    }
+
+    pub(crate) fn set_sort_orders(&mut self, orders: Vec<SortOrder>, show_hidden: bool) {
+        if let Some(mode) = &mut self.view_override {
+            mode.sort.clear();
         }
-        self.populate(
+        self.options.sort = orders;
+        self.resort(show_hidden);
+    }
+
+    pub(crate) fn resort(&mut self, show_hidden: bool) {
+        let focus = self
+            .model
+            .entry(self.cursor)
+            .map(|entry| entry.path.clone());
+        self.replace_sorted(
             self.entries.as_ref().clone(),
             show_hidden,
             self.extra.clone(),
+            focus.as_deref(),
         );
     }
 
@@ -524,28 +706,18 @@ impl Tab {
         self.entries.clone()
     }
 
-    pub(crate) fn apply_wdx_sort(
-        &mut self,
-        index: usize,
-        descending: bool,
-        entries: Vec<Entry>,
-        show_hidden: bool,
-    ) {
+    pub(crate) fn apply_wdx_sort(&mut self, entries: Vec<Entry>, show_hidden: bool) {
         let current = self
             .display_row(self.cursor)
             .map(|entry| entry.path.clone());
-        self.wdx_sort = Some((index, descending));
+        self.wdx_sorted = true;
         self.entries = Rc::new(entries);
         self.rebuild(show_hidden, current.as_deref());
     }
 
     pub(crate) fn reset_wdx_sort(&mut self, show_hidden: bool) {
-        if self.wdx_sort.is_some() {
-            self.populate(
-                self.entries.as_ref().clone(),
-                show_hidden,
-                self.extra.clone(),
-            );
+        if self.wdx_sorted {
+            self.resort(show_hidden);
         }
     }
 
@@ -555,6 +727,31 @@ impl Tab {
 
     pub fn clear_comparison_filter(&mut self) {
         self.equal_filter = None;
+    }
+
+    pub fn clear_selected_filter(&mut self) {
+        self.selected_filter = None;
+    }
+
+    pub fn set_programs_only(&mut self, enabled: bool, show_hidden: bool) {
+        self.programs_only = enabled;
+        self.clear_selected_filter();
+        self.filter(String::new(), show_hidden);
+    }
+
+    pub fn toggle_selected_filter(&mut self, show_hidden: bool) -> bool {
+        if self.selected_filter.take().is_none() {
+            let selection = self.selection.borrow();
+            if selection.is_empty() {
+                return false;
+            }
+            self.selected_filter = Some(selection.clone());
+        }
+        let focus = self
+            .display_row(self.cursor)
+            .map(|entry| entry.path.clone());
+        self.rebuild(show_hidden, focus.as_deref());
+        true
     }
 
     pub fn set_comparison_filter(&mut self, paths: Option<BTreeSet<PathBuf>>, show_hidden: bool) {
@@ -567,16 +764,41 @@ impl Tab {
 
     fn rebuild(&mut self, show_hidden: bool, current: Option<&Path>) {
         let filter = self.filter.to_lowercase();
-        let masks = filter
-            .contains(['*', '?', ';'])
+        let expression = self.filter.strip_prefix('~');
+        let regex = expression.and_then(|pattern| {
+            regex::RegexBuilder::new(pattern)
+                .case_insensitive(true)
+                .build()
+                .ok()
+        });
+        let masks = (expression.is_none() && filter.contains(['*', '?', ';']))
             .then(|| files::compile_masks(&filter).ok())
             .flatten();
+        let remote_ignore = self.ignore.as_ref().and_then(|_| {
+            if let Some(ftp) = &self.ftp {
+                Some((
+                    IgnoreSource::Ftp {
+                        server: ftp.location.directory.host_str().unwrap_or_default(),
+                        profile: ftp.location.profile.as_deref(),
+                    },
+                    ftp::Session::directory_path(&ftp.location.directory),
+                ))
+            } else {
+                self.wfx
+                    .as_ref()
+                    .map(|wfx| (IgnoreSource::Wfx(&wfx.plugin.name), wfx.directory.clone()))
+            }
+        });
         let visible: Vec<_> = self
             .entries
             .iter()
             .enumerate()
             .filter_map(|(index, entry)| {
-                let matched = if let Some(masks) = &masks {
+                let matched = if expression.is_some() {
+                    regex
+                        .as_ref()
+                        .is_some_and(|regex| regex.is_match(&entry.name.to_string_lossy()))
+                } else if let Some(masks) = &masks {
                     masks.is_match(&entry.name)
                 } else {
                     filter.is_empty()
@@ -588,10 +810,44 @@ impl Tab {
                 };
                 (matched
                     && (show_hidden || !entry.hidden)
+                    && (!self.programs_only
+                        || entry.kind == Kind::Directory
+                        || entry.path.extension().is_some_and(|ext| {
+                            ["exe", "com", "bat", "pif", "cmd"]
+                                .iter()
+                                .any(|program| ext.eq_ignore_ascii_case(program))
+                        }))
+                    && self.ignore.as_ref().is_none_or(|ignore| {
+                        let directory = entry.kind == Kind::Directory;
+                        if let Some((source, parent)) = &remote_ignore {
+                            let parent = parent.trim_end_matches(['/', '\\']);
+                            !ignore.matches(
+                                *source,
+                                &format!("{parent}/{}", entry.name.to_string_lossy()),
+                                directory,
+                            )
+                        } else if self.is_local() {
+                            !ignore.local(&entry.path, directory)
+                                && !entry
+                                    .path
+                                    .ancestors()
+                                    .skip(1)
+                                    .take_while(|path| {
+                                        *path != self.path && path.starts_with(&self.path)
+                                    })
+                                    .any(|path| ignore.local(path, true))
+                        } else {
+                            true
+                        }
+                    })
                     && self
                         .equal_filter
                         .as_ref()
-                        .is_none_or(|paths| !paths.contains(&entry.path)))
+                        .is_none_or(|paths| !paths.contains(&entry.path))
+                    && self
+                        .selected_filter
+                        .as_ref()
+                        .is_none_or(|paths| paths.contains(&entry.path)))
                 .then_some(index)
             })
             .collect();
@@ -627,7 +883,16 @@ impl Tab {
             visible,
             self.selection.clone(),
             parent,
+            self.colors.clone(),
         ));
+    }
+
+    pub(crate) fn update_ignore(&mut self, ignore: Option<Arc<IgnoreList>>, show_hidden: bool) {
+        self.ignore = ignore;
+        let focus = self
+            .display_row(self.cursor)
+            .map(|entry| entry.path.clone());
+        self.rebuild(show_hidden, focus.as_deref());
     }
 
     pub fn current(&self) -> Option<&Entry> {
@@ -704,8 +969,7 @@ impl Tab {
     }
 
     pub fn selected_directories(&self) -> Vec<PathBuf> {
-        let marked = self.selection.borrow();
-        if marked.is_empty() {
+        if self.selection.borrow().is_empty() {
             return self
                 .display_row(self.cursor)
                 .filter(|entry| entry.kind == Kind::Directory)
@@ -713,11 +977,33 @@ impl Tab {
                 .into_iter()
                 .collect();
         }
+        self.marked_directories()
+    }
+
+    pub fn marked_directories(&self) -> Vec<PathBuf> {
+        let marked = self.selection.borrow();
         self.model
             .visible
             .iter()
             .filter_map(|&index| self.entries.get(index))
             .filter(|entry| entry.kind == Kind::Directory && marked.contains(&entry.path))
+            .map(|entry| entry.path.clone())
+            .collect()
+    }
+
+    pub fn marked_transfer_targets(&self) -> Vec<PathBuf> {
+        let marked = self.selection.borrow();
+        self.display_rows()
+            .filter(|entry| {
+                marked.contains(&entry.path)
+                    && (entry.kind == Kind::Directory
+                        || (entry.kind == Kind::Link
+                            && if cfg!(windows) {
+                                entry.attributes & 0x10 != 0
+                            } else {
+                                entry.path.is_dir()
+                            }))
+            })
             .map(|entry| entry.path.clone())
             .collect()
     }
@@ -735,6 +1021,19 @@ impl Tab {
 
     pub fn remember_selection(&mut self) {
         self.previous_selection = self.selection.borrow().clone();
+    }
+
+    pub(crate) fn find_visible(&mut self, mut matches: impl FnMut(&Entry) -> bool) -> bool {
+        let count = self.model.row_count();
+        if let Some(row) = (1..=count)
+            .map(|offset| (self.cursor + offset) % count)
+            .find(|&row| self.model.entry(row).is_some_and(&mut matches))
+        {
+            self.cursor = row;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn visible_directories(&self) -> Vec<PathBuf> {
@@ -757,7 +1056,11 @@ impl Tab {
                 entry.size = Some(*size);
             }
         }
-        self.populate(entries, show_hidden, self.extra.clone());
+        let focus = self
+            .model
+            .entry(self.cursor)
+            .map(|entry| entry.path.clone());
+        self.replace_sorted(entries, show_hidden, self.extra.clone(), focus.as_deref());
     }
 
     pub fn restore_selection(&mut self) {
@@ -876,8 +1179,10 @@ pub(crate) struct FileModel {
     visible: Vec<usize>,
     selected: Rc<RefCell<BTreeSet<PathBuf>>>,
     parent: bool,
+    colors: Rc<Vec<CompiledColor>>,
     notify: ModelNotify,
-    wdx: RefCell<BTreeMap<usize, [slint::SharedString; 3]>>,
+    wdx: RefCell<BTreeMap<usize, ModelRc<slint::SharedString>>>,
+    thumbnails: RefCell<BTreeMap<usize, Option<slint::Image>>>,
 }
 
 impl FileModel {
@@ -886,14 +1191,17 @@ impl FileModel {
         visible: Vec<usize>,
         selected: Rc<RefCell<BTreeSet<PathBuf>>>,
         parent: bool,
+        colors: Rc<Vec<CompiledColor>>,
     ) -> Self {
         Self {
             entries,
             visible,
             selected,
             parent,
+            colors,
             notify: ModelNotify::default(),
             wdx: RefCell::new(BTreeMap::new()),
+            thumbnails: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -916,13 +1224,58 @@ impl FileModel {
             .collect()
     }
 
-    pub(crate) fn apply_wdx(&self, values: Vec<(usize, [String; 3])>) {
+    pub(crate) fn thumbnail_requests(
+        &self,
+        visible: std::ops::Range<usize>,
+    ) -> Vec<(usize, ThumbnailRequest)> {
+        let cached = self.thumbnails.borrow();
+        visible
+            .filter(|row| !cached.contains_key(row))
+            .filter_map(|row| Some((row, ThumbnailRequest::for_entry(self.entry(row)?)?)))
+            .take(8)
+            .collect()
+    }
+
+    pub(crate) fn apply_thumbnails(
+        &self,
+        visible: std::ops::Range<usize>,
+        results: Vec<(usize, Option<image::RgbaImage>)>,
+    ) {
+        let keep = visible.start.saturating_sub(16)..visible.end.saturating_add(16);
+        let mut thumbnails = self.thumbnails.borrow_mut();
+        let mut changed = Vec::new();
+        thumbnails.retain(|row, image| {
+            if !keep.contains(row) {
+                if image.is_some() {
+                    changed.push(*row);
+                }
+                false
+            } else {
+                true
+            }
+        });
+        for (row, image) in results {
+            if let Some(image) = &image {
+                changed.push(row);
+                thumbnails.insert(row, Some(preview::to_slint(image)));
+            } else {
+                thumbnails.insert(row, None);
+            }
+        }
+        drop(thumbnails);
+        for row in changed {
+            self.notify.row_changed(row);
+        }
+    }
+
+    pub(crate) fn apply_wdx(&self, values: Vec<(usize, Vec<String>)>) {
         let rows: Vec<_> = values.iter().map(|(row, _)| *row).collect();
-        self.wdx.borrow_mut().extend(
-            values
-                .into_iter()
-                .map(|(row, values)| (row, values.map(Into::into))),
-        );
+        self.wdx
+            .borrow_mut()
+            .extend(values.into_iter().map(|(row, values)| {
+                let values: Vec<_> = values.into_iter().map(slint::SharedString::from).collect();
+                (row, ModelRc::new(VecModel::from(values)))
+            }));
         for row in rows {
             self.notify.row_changed(row);
         }
@@ -969,9 +1322,22 @@ impl Model for FileModel {
                 .map(|parent| parent.join(stem).into_os_string())
                 .unwrap_or_else(|| stem.to_os_string())
         });
-        let [wdx_first, wdx_second, wdx_third] =
-            self.wdx.borrow().get(&row).cloned().unwrap_or_default();
+        let wdx_values = self.wdx.borrow().get(&row).cloned().unwrap_or_default();
+        let thumbnail = self.thumbnails.borrow().get(&row).cloned().flatten();
+        let color = self
+            .colors
+            .iter()
+            .find(|rule| rule.matches(&entry.name))
+            .map(|rule| rule.color);
         Some(FileRow {
+            comment: entry
+                .comment
+                .as_deref()
+                .unwrap_or("")
+                .replace('\n', " · ")
+                .into(),
+            has_thumbnail: thumbnail.is_some(),
+            thumbnail: thumbnail.unwrap_or_default(),
             name: stem
                 .as_deref()
                 .unwrap_or(&entry.name)
@@ -1025,9 +1391,12 @@ impl Model for FileModel {
                 .into(),
             icon: icon.into(),
             selected: self.selected.borrow().contains(&entry.path),
-            wdx_first,
-            wdx_second,
-            wdx_third,
+            custom_color: color.is_some(),
+            light_color: color
+                .map_or_else(slint::Color::default, |pair| crate::file_color(pair.light)),
+            dark_color: color
+                .map_or_else(slint::Color::default, |pair| crate::file_color(pair.dark)),
+            wdx_values,
         })
     }
 
@@ -1082,6 +1451,7 @@ mod tests {
         let ftp = FtpLocation {
             directory: session.initial_directory(),
             session,
+            profile: None,
         };
         let location = Location::Ftp(ftp.clone());
         assert_eq!(location.row_key(), Path::new("Test ordner"));
@@ -1138,6 +1508,7 @@ mod tests {
         tab.change_location(
             &location,
             Some(ArchiveTab {
+                password: None,
                 file,
                 folder,
                 catalog,
@@ -1185,6 +1556,57 @@ mod tests {
         assert_eq!(tab.model.row_count(), 2);
         assert_eq!(tab.paths(), [first]);
         assert_eq!(tab.model.row_data(1).unwrap().extension.as_str(), "TXT");
+    }
+
+    #[test]
+    fn selected_filter_keeps_parent_and_restores_other_rows() {
+        let fixture = tempfile::tempdir().unwrap();
+        let first = fixture.path().join("A.txt");
+        let second = fixture.path().join("B.txt");
+        std::fs::write(&first, b"a").unwrap();
+        std::fs::write(&second, b"b").unwrap();
+        let mut tab = Tab::new(fixture.path().to_path_buf());
+        tab.populate(
+            files::list(fixture.path()).unwrap().entries,
+            true,
+            String::new(),
+        );
+        assert!(!tab.toggle_selected_filter(true));
+        tab.replace_selection(|entry| entry.path == second);
+        assert!(tab.toggle_selected_filter(true));
+        assert!(tab.parent_row(0));
+        assert_eq!(
+            tab.display_rows()
+                .map(|entry| &entry.path)
+                .collect::<Vec<_>>(),
+            [&second]
+        );
+        assert_eq!(tab.marked_paths(), [second]);
+        tab.replace_selection(|_| false);
+        assert_eq!(tab.display_rows().count(), 1);
+        assert!(tab.toggle_selected_filter(true));
+        assert_eq!(tab.display_rows().count(), 2);
+    }
+
+    #[test]
+    fn programs_filter_keeps_directories_and_can_be_cleared() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        std::fs::create_dir(root.join("scripts")).unwrap();
+        std::fs::write(root.join("start.CMD"), "").unwrap();
+        std::fs::write(root.join("readme.txt"), "").unwrap();
+        let mut tab = Tab::new(root.to_path_buf());
+        tab.populate(files::list(root).unwrap().entries, true, String::new());
+        tab.set_programs_only(true, true);
+        assert!(tab.parent_row(0));
+        assert_eq!(
+            tab.display_rows()
+                .map(|entry| entry.name.to_string_lossy())
+                .collect::<Vec<_>>(),
+            ["scripts", "start.CMD"]
+        );
+        tab.set_programs_only(false, true);
+        assert_eq!(tab.display_rows().count(), 3);
     }
 
     #[test]
@@ -1252,14 +1674,19 @@ mod tests {
         );
         let model = tab.file_model();
         assert_eq!(model.wdx_missing(0, 20), [(1, path.clone())]);
-        model.apply_wdx(vec![(1, ["4 bytes".into(), String::new(), String::new()])]);
-        assert_eq!(model.row_data(1).unwrap().wdx_first.as_str(), "4 bytes");
-        assert!(model.wdx_missing(0, 20).is_empty());
-        tab.populate(
-            files::list(fixture.path()).unwrap().entries,
-            false,
-            String::new(),
+        model.apply_wdx(vec![(1, vec!["4 bytes".into()])]);
+        assert_eq!(
+            model
+                .row_data(1)
+                .unwrap()
+                .wdx_values
+                .row_data(0)
+                .unwrap()
+                .as_str(),
+            "4 bytes"
         );
+        assert!(model.wdx_missing(0, 20).is_empty());
+        tab.set_view(TabView::Details, Some("Andere Spalten".into()), None, false);
         assert!(!Rc::ptr_eq(&model, &tab.file_model()));
         assert_eq!(tab.file_model().wdx_missing(0, 20), [(1, path)]);
     }

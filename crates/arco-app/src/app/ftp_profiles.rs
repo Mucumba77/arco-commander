@@ -192,7 +192,7 @@ impl App {
             .map(|(name, profile)| (name.to_owned(), profile.clone()));
         let result = match (operation, selected) {
             ("save", selected) => self.save_ftp_profile(selected, data, password),
-            ("connect", Some((_, profile))) => self.connect_ftp_profile(profile),
+            ("connect", Some((name, profile))) => self.connect_ftp_profile(name, profile),
             ("delete", Some((name, _))) => {
                 let description =
                     format!("Das Profil „{name}“ und sein gespeichertes Passwort entfernen?");
@@ -321,7 +321,7 @@ impl App {
         Ok(())
     }
 
-    fn connect_ftp_profile(&mut self, profile: FtpProfile) -> io::Result<()> {
+    fn connect_ftp_profile(&mut self, name: String, profile: FtpProfile) -> io::Result<()> {
         let connection = connection(&profile)?;
         let password = profile
             .credential
@@ -333,9 +333,15 @@ impl App {
             && let Some(password) = password
         {
             self.close_dialog();
-            return self.mount_ftp(self.active, connection, &password, profile.local_directory);
+            return self.mount_ftp(
+                self.active,
+                connection,
+                &password,
+                profile.local_directory,
+                Some(name),
+            );
         }
-        self.dialog("input", Pending::FtpProfilePassword(self.active, connection, profile.local_directory), Dialog {
+        self.dialog("input", Pending::FtpProfilePassword(self.active, connection, profile.local_directory, name), Dialog {
             title: "FTP-Anmeldung",
             description: if profile.security == FtpSecurity::Plain {
                 "Klartext-FTP überträgt Anmeldung und Dateien unverschlüsselt."
@@ -358,6 +364,7 @@ impl App {
         connection: Connection,
         password: &str,
         local: Option<PathBuf>,
+        profile: Option<String>,
     ) -> io::Result<()> {
         let session = Arc::new(connection.authenticate(password)?);
         let directory = session.initial_directory();
@@ -367,7 +374,11 @@ impl App {
         });
         self.load_location(
             side,
-            Location::Ftp(FtpLocation { session, directory }),
+            Location::Ftp(FtpLocation {
+                session,
+                directory,
+                profile,
+            }),
             navigation,
         );
         Ok(())

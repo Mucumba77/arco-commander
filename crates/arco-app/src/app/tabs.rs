@@ -2,7 +2,6 @@ use super::{App, Navigation, Outcome};
 use crate::commands::{Dialog, Pending};
 use crate::display_path;
 use crate::panel::{FtpTab, Location, Panel, Tab};
-use arco_core::files::SortKey;
 use arco_core::profile::{self, Profile, SavedTab, TabLock, TcTabs};
 use arco_windows::ftp::Listing;
 use std::fmt::Write as _;
@@ -16,9 +15,6 @@ pub(super) struct ClosedTab {
     fallback: PathBuf,
     options: SavedTab,
     base: Option<Location>,
-    sort: SortKey,
-    descending: bool,
-    detailed: bool,
 }
 
 impl App {
@@ -29,9 +25,6 @@ impl App {
             fallback: tab.path,
             options: tab.options,
             base: tab.lock_base,
-            sort: tab.sort,
-            descending: tab.descending,
-            detailed: tab.detailed,
         });
         if self.closed_tabs.len() > 20 {
             self.closed_tabs.remove(0);
@@ -87,9 +80,6 @@ impl App {
         let mut tab = Tab::new(closed.fallback);
         tab.options = closed.options;
         tab.lock_base = closed.base;
-        tab.sort = closed.sort;
-        tab.descending = closed.descending;
-        tab.detailed = closed.detailed;
         let panel = &mut self.panels[closed.side];
         panel.tabs.push(tab);
         panel.tab = panel.tabs.len() - 1;
@@ -653,10 +643,8 @@ impl App {
             },
         });
         tab.wfx = source.wfx.clone();
-        tab.options.title.clone_from(&source.options.title);
-        tab.sort = source.sort;
-        tab.descending = source.descending;
-        tab.detailed = source.detailed;
+        tab.options = source.options.clone();
+        tab.options.lock = TabLock::Unlocked;
         let panel = &mut self.panels[side];
         panel.tabs.push(tab);
         if activate {

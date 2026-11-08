@@ -1,6 +1,7 @@
 use crate::app::{
     App, ArchiveInput, FtpEdit, FtpEndpoint, FtpView, Navigation, Outcome, PluginFileAction,
-    PromptTicket, SyncReview, SyncSetup, Viewer, WdxSearchTarget, ftp_modified, strings,
+    PromptTicket, SyncReview, SyncSetup, Viewer, ViewerRequest, WdxSearchTarget, ftp_modified,
+    strings,
 };
 use crate::panel::{ArchiveTab, FtpLocation, Location, Tab, WfxLocation};
 use crate::preview;
@@ -8,13 +9,13 @@ use crate::shortcuts;
 use crate::{FtpRowData, display_path, human_size};
 use arco_core::archive_view::{self, Selection, is_zip};
 use arco_core::archives;
-use arco_core::external_archives::{self, ExternalArchiver, Format as ExternalFormat};
+use arco_core::external_archives::{ExternalArchiver, Format as ExternalFormat};
 use arco_core::files::{self, Conflict, Kind, SortKey, Transfer, TransferReport};
 use arco_core::plugin::{self, Interface};
-use arco_core::profile::{self, TcImport};
+use arco_core::profile::{self, TabView, TcImport};
 use arco_core::sync::MarkRule;
 use arco_core::tools::{Hash, Preview, PreviewMode};
-use arco_core::{rename, tools};
+use arco_core::{rename, tc_split, tools, transport_encoding};
 use arco_windows::ftp;
 use regex::Regex;
 use std::fmt::Write as _;
@@ -23,17 +24,65 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use zeroize::Zeroizing;
 
 pub enum Pending {
+    KnownFolder,
+    QuickFind,
+    SelectionFile(PathBuf, Option<Vec<PathBuf>>),
+    DuplicateSearch(PathBuf),
+    HashClipboard(PathBuf, String, Vec<Hash>),
+    AdvancedSearch(crate::app::AdvancedSearchSetup),
+    EverythingPath,
+    SearchReview(Box<crate::app::AdvancedSearchReview>),
+    EditComment(PathBuf, Option<String>),
+    EditMetadata(Vec<PathBuf>),
+    PrintDirectory(PathBuf, Vec<PathBuf>),
+    PrintText(String, String),
+    TransferManager,
+    TransferQueueChoose(Vec<u64>),
+    TransferQueueOrder(u64),
+    TransferSettings,
+    NtfsOptions,
+    TransferConflict(crate::app::ConflictTicket),
+    ViewSetup(crate::app::ViewSetup),
+    Associations(crate::app::AssociationSetup),
+    Administration(crate::app::AdministrationSetup),
+    TextCompare(Arc<arco_core::text_compare::Session>, usize),
+    BinaryCompare(Arc<tools::BinaryComparison>, Option<(u64, u64)>),
     WfxPrompt(PromptTicket),
     WfxPanelEdit(WfxLocation, Option<String>),
     WfxPanelBatch(WfxLocation, Vec<(String, plugin::Operation)>),
     WfxContext,
-    WdxChoose(PathBuf, Vec<String>),
+    WdxChoose(PathBuf, Vec<plugin::WdxField>),
+    WdxEditPlugin(Vec<plugin::Registration>, Vec<PathBuf>),
+    WdxEditField(crate::app::WdxEditTarget, Vec<plugin::WdxEditableField>),
+    WdxEditMode(crate::app::WdxEditTarget, plugin::WdxEditableField),
+    WdxEditValue(crate::app::WdxEditTarget, plugin::WdxEditableField),
+    WdxEditApply(
+        crate::app::WdxEditTarget,
+        plugin::WdxField,
+        crate::app::WdxEditInput,
+    ),
+    IgnoreList,
+    IgnoreImport,
+    Buttonbar,
+    Starter,
+    ButtonbarTemplates(Vec<String>),
+    ButtonbarTemplate(String),
+    ButtonbarTemplateSave,
+    ButtonbarList(usize),
+    ButtonbarAction(usize, usize),
+    ButtonbarEdit(usize, Option<usize>),
+    ButtonbarFile(usize, bool),
+    ButtonbarImport(usize, Vec<arco_core::profile::ButtonbarButton>),
     WdxSearchPlugin(WdxSearchTarget, Vec<plugin::Registration>),
-    WdxSearchField(WdxSearchTarget, Box<plugin::Registration>, Vec<String>),
-    WdxSearchCriteria(WdxSearchTarget, Box<plugin::Registration>, String),
+    WdxSearchField(
+        WdxSearchTarget,
+        Box<plugin::Registration>,
+        Vec<plugin::WdxField>,
+    ),
+    WdxSearchCriteria(WdxSearchTarget, Box<plugin::Registration>, plugin::WdxField),
     WdxSearchReview(WdxSearchTarget),
     WdxSearchSave(WdxSearchTarget),
     WdxSearchReplace(WdxSearchTarget, String),
@@ -43,27 +92,46 @@ pub enum Pending {
     WdxRemove(Vec<plugin::WdxColumn>),
     Create(PathBuf, bool),
     Rename(Vec<PathBuf>, bool),
+    RenameSetup(crate::app::RenameSetup),
     ApplyRename(rename::Plan),
-    Transfer(Vec<PathBuf>, PathBuf, Transfer),
+    Transfer(Vec<PathBuf>, TransferDestination, Transfer),
     Delete(Vec<PathBuf>, bool),
     Search(usize, u64, Location, Option<ArchiveTab>),
     ArchiveSearchPassword(usize, u64, ArchiveTab, tools::Search),
     SyncSetup(SyncSetup),
+    SyncProfilePicker(Vec<String>),
     SyncReview(Box<SyncReview>),
     Hash(Vec<PathBuf>, PathBuf, bool),
     Split(PathBuf, PathBuf),
-    Join(Vec<PathBuf>, PathBuf),
+    Join(Vec<PathBuf>, PathBuf, Option<tc_split::Manifest>),
+    TransportEncoding {
+        paths: Vec<PathBuf>,
+        directory: PathBuf,
+        decode: bool,
+    },
     ZipPack(Vec<PathBuf>, PathBuf, PathBuf),
+    PackerProfiles(Vec<String>),
+    PackerProfileAction(String),
+    PackerProfileEdit(Option<String>),
+    ExternalPack(Vec<PathBuf>, PathBuf, PathBuf, Vec<String>),
+    ArchiveVolumes(
+        Vec<PathBuf>,
+        PathBuf,
+        PathBuf,
+        VolumePacking,
+        Option<Zeroizing<String>>,
+    ),
     ZipRead(PathBuf, PathBuf, bool),
+    ArchiveUnlock(usize, Location, Navigation),
     ArchiveExtract(ArchiveTab, PathBuf, Selection),
     ArchiveInsert(ArchiveInput, ArchiveTab),
-    ArchivePreview(ArchiveTab, PathBuf),
+    ArchivePreview(ArchiveTab, PathBuf, bool),
     ArchiveRemove(ArchiveTab, Vec<PathBuf>),
     ArchiveRename(ArchiveTab, PathBuf),
     ArchiveContext,
     FtpConnect(usize),
     FtpPassword(usize, ftp::Connection),
-    FtpProfilePassword(usize, ftp::Connection, Option<PathBuf>),
+    FtpProfilePassword(usize, ftp::Connection, Option<PathBuf>, String),
     FtpProfileDelete(String),
     FtpProfileImport,
     ApplyFtpImport(std::collections::BTreeMap<String, profile::FtpProfile>),
@@ -90,7 +158,7 @@ pub enum Pending {
     ApplyTabImport(String, Box<profile::TcTabs>),
     FtpFxp(FtpEndpoint, FtpEndpoint),
     Mask(MaskEdit),
-    Favorite,
+    Favorites(crate::app::FavoriteSetup),
     Editor,
     Palette,
     ImportTc,
@@ -112,10 +180,23 @@ pub enum Pending {
     ApplyPluginImport(Vec<plugin::Registration>),
 }
 
+#[derive(Clone)]
+pub enum TransferDestination {
+    Folder(PathBuf),
+    Marked(Vec<PathBuf>),
+}
+
 pub enum MaskEdit {
     Replace,
     Add { folders: bool },
     Remove { folders: bool },
+}
+
+pub enum VolumePacking {
+    Sas,
+    Sea,
+    Zip,
+    SevenZip,
 }
 
 #[derive(Default)]
@@ -136,10 +217,31 @@ const HASHES: &[&str] = &[
     "SHA3_256", "SHA3_384", "SHA3_512",
 ];
 
+const KNOWN_FOLDERS: &[(&str, arco_windows::KnownFolder)] = &[
+    ("Desktop", arco_windows::KnownFolder::Desktop),
+    ("Dokumente", arco_windows::KnownFolder::Documents),
+    ("Downloads", arco_windows::KnownFolder::Downloads),
+    ("Bilder", arco_windows::KnownFolder::Pictures),
+    ("Musik", arco_windows::KnownFolder::Music),
+    ("Videos", arco_windows::KnownFolder::Videos),
+    ("Benutzerordner", arco_windows::KnownFolder::Profile),
+];
+
+fn asks_target_password(archive: &ArchiveTab) -> bool {
+    is_zip(&archive.file)
+        || (archive.catalog.contains_encrypted_entries() && archive.password().is_none())
+}
+
 pub const COMMANDS: &[(&str, &str)] = &[
     ("Suchen", "search"),
     ("Nach Plugin-Feld suchen", "search-wdx"),
     ("WDX-Suchprofile", "wdx-search-profiles"),
+    ("WDX-Feld ändern", "wdx-edit"),
+    ("Ignorierliste bearbeiten", "ignore-edit"),
+    ("Externe Packerprofile", "packer-profiles"),
+    ("Mit Packerprofil packen", "external-pack"),
+    ("Ignorierliste importieren", "ignore-import"),
+    ("Ignorierliste umschalten", "ignore-toggle"),
     ("Vergleichen", "compare"),
     ("Binär vergleichen", "compare-binary"),
     ("Dateifenster vergleichen", "compare-dirs"),
@@ -165,24 +267,54 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "dir-match",
     ),
     ("Synchronisieren", "sync"),
+    ("Synchronisierungsprofile", "sync-profiles"),
     ("Größe der Auswahl berechnen", "space-usage"),
     ("Ordnergrößen in der Dateiliste anzeigen", "folder-sizes"),
     ("Favoriten", "favorites"),
+    ("Ordnerfavoriten verwalten", "favorites-manage"),
     ("Befehlspalette", "palette"),
     ("Zweigansicht", "branch"),
     ("Zweigansicht der Auswahl", "branch-selected"),
+    ("Nur markierte Einträge umschalten", "only-marked"),
+    ("Nur Programme anzeigen", "only-programs"),
+    ("Alle Dateien anzeigen", "clear-filter"),
     ("Mehrfach umbenennen", "multi-rename"),
+    ("Umbenennvorlagen", "rename-templates"),
+    ("Namensliste bearbeiten", "rename-names"),
+    (
+        "Namensliste im externen Editor bearbeiten",
+        "rename-external",
+    ),
     ("Umbenennung zurücknehmen", "undo-rename"),
     ("Prüfsummen erzeugen", "hash"),
     ("Prüfsummen prüfen", "verify"),
     ("Duplikate suchen", "duplicates"),
+    ("Prüfsumme aus Zwischenablage prüfen", "verify-clipboard"),
+    ("Auswahl in Dateiliste speichern", "selection-save"),
+    ("Auswahl aus Dateiliste laden", "selection-load"),
+    ("Auswahl aus Zwischenablage laden", "selection-paste"),
+    ("Schnellsuche", "quick-find"),
+    ("Everything konfigurieren", "everything-configure"),
+    ("Transfermanager", "transfer-manager"),
+    ("NTFS-Kopieroptionen", "ntfs-options"),
     ("Datei teilen", "split"),
     ("Dateien verbinden", "join"),
+    ("Dateien kodieren (MIME, UUE, XXE)", "encode-files"),
+    (
+        "Dateien dekodieren (MIME, UUE, XXE, BinHex)",
+        "decode-files",
+    ),
     ("Archiv öffnen", "zip-open"),
     ("Dateien packen", "zip-pack"),
     ("Archiv entpacken", "zip-extract"),
     ("Archiv prüfen", "zip-test"),
     ("FTP verbinden", "ftp-connect"),
+    ("Windows-Ordner öffnen", "known-folder"),
+    ("Netzlaufwerk verbinden", "map-drive"),
+    ("Netzlaufwerk trennen", "unmap-drive"),
+    ("Lokale Windows-Freigaben", "shares"),
+    ("Windows-Freigabe erstellen", "share-create"),
+    ("Datenträgerbezeichnung ändern", "volume-label"),
     ("FTP-Verbindungsprofile", "ftp-profiles"),
     ("FTP-Unix-Rechte ändern", "ftp-permissions"),
     ("Offene FTP-Bearbeitungen", "ftp-edits"),
@@ -213,6 +345,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("WCX-Archiv auflisten", "wcx-inspect"),
     ("Plugin-Verwaltung", "plugins"),
     ("Datei intern anzeigen", "view-internal"),
+    ("Lister in eigenem Fenster", "view-separate"),
+    ("Windows-Desktop im Dateifenster", "shell-desktop"),
+    ("Dieser PC im Dateifenster", "shell-computer"),
+    ("Letzten lokalen Ordner öffnen", "shell-local"),
     ("WDX-Metadaten abfragen", "wdx-inspect"),
     ("WDX-Spalten verwalten", "wdx-columns"),
     ("WFX-Verzeichnis auflisten", "wfx-inspect"),
@@ -222,30 +358,101 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("Dateipfade kopieren", "copy-paths"),
     ("Dateinamen als Text kopieren", "copy-names"),
     ("Dateidetails als TSV kopieren", "copy-details"),
+    ("In markierte Zielordner kopieren", "copy-to-marked"),
     ("Pfad des aktiven Fensters kopieren", "copy-source-path"),
     ("Pfad des anderen Fensters kopieren", "copy-target-path"),
     ("Auswahl nach Maske", "mask"),
     ("Auswahl umkehren", "invert"),
     ("Auswahl wiederherstellen", "restore-selection"),
     ("Detailansicht umschalten", "details"),
+    ("Miniaturansicht", "thumbnail-view"),
+    ("Kommentaransicht", "comment-view"),
+    ("Dateikommentar bearbeiten", "edit-comment"),
+    ("Attribute und Zeitstempel ändern", "edit-metadata"),
+    ("Textdatei drucken", "print-file"),
+    ("Dateiliste drucken", "print-directory"),
+    (
+        "Dateiliste mit Unterordnern drucken",
+        "print-directory-recursive",
+    ),
+    ("Ordnerbaum umschalten", "directory-tree"),
+    ("Spaltensatz auswählen", "column-sets"),
+    ("Ansichtsmodus auswählen", "view-modes"),
+    ("Automatische Ansichtsregeln", "auto-view-rules"),
+    ("Datei- und Auswahlfarben", "file-colors"),
+    ("Automatische Ansichten umschalten", "auto-view-toggle"),
+    ("Mehrfachsortierung", "multi-sort"),
+    ("Unsortierte Dateiliste", "sort-unsorted"),
+    ("Separaten Ordnerbaum umschalten", "separate-tree-cycle"),
+    ("Gemeinsamen Ordnerbaum anzeigen", "separate-tree-one"),
+    ("Ordnerbaum je Fenster anzeigen", "separate-tree-two"),
+    ("Separate Ordnerbäume ausblenden", "separate-tree-off"),
+    ("Eigene Buttonbars", "buttonbars"),
+    ("Starter", "starter"),
+    ("Starter bearbeiten", "starter-edit"),
+    ("Buttonbar- und Startervorlagen", "buttonbar-templates"),
     ("Schnellansicht umschalten", "quick-view"),
     ("Versteckte Dateien umschalten", "hidden"),
     ("Fenster tauschen", "swap"),
     ("Fenster angleichen", "match"),
     ("Anordnung wechseln", "stacked"),
     ("Helles/Dunkles Thema", "theme"),
+    ("Windows-Farbschema verwenden", "system-theme"),
     ("Terminal öffnen", "terminal"),
     ("Editor einstellen", "configure-editor"),
     ("Einstellungen", "settings"),
     ("Explorer öffnen", "explorer"),
     ("Eigenschaften", "properties"),
+    ("Interne Dateizuordnungen", "associations"),
+    ("Interne Dateiaktionen", "internal-verbs"),
+    ("Mit Windows öffnen", "system-open"),
+    ("Öffnen mit", "open-with"),
+    ("Als Administrator starten", "run-admin"),
+    ("Als anderer Benutzer starten", "run-other-user"),
+    ("Windows-Verknüpfung erstellen", "create-shortcut"),
     ("Hilfe", "help"),
+    ("Systeminformationen", "system-information"),
+    ("Windows-Version", "windows-version"),
 ];
 
 impl App {
     pub fn command_line(&mut self, line: &str) -> bool {
         let line = line.trim();
         let command = line.split_once(char::is_whitespace);
+        if let Some((verb, name)) = command
+            && verb.eq_ignore_ascii_case("MULTIRENAME")
+        {
+            if let Err(error) = self.open_rename_template(name.trim().trim_matches('"')) {
+                self.status(error.to_string());
+            }
+            return true;
+        }
+        if let Some((verb, name)) = command
+            && (verb.eq_ignore_ascii_case("cm_SrcViewModeList")
+                || verb.eq_ignore_ascii_case("view-mode"))
+        {
+            if let Err(error) = self.apply_named_view(name.trim().trim_matches('"'), true) {
+                self.status(error.to_string());
+            }
+            return true;
+        }
+        if let Some((verb, parameter)) = command
+            && compatibility_command(verb) == Some("ignore-toggle")
+        {
+            let enabled = match parameter.trim() {
+                "0" => !self.profile.ignore_enabled,
+                "1" => true,
+                "-1" | "2" => false,
+                _ => {
+                    self.status("cm_SwitchIgnoreList erwartet 0, 1, 2 oder -1.");
+                    return true;
+                }
+            };
+            if let Err(error) = self.set_ignore_enabled(enabled) {
+                self.text("Ignorierliste", &error.to_string());
+            }
+            return true;
+        }
         if let Some((verb, file)) = command
             && self.tc_tab_command(verb, file)
         {
@@ -284,7 +491,90 @@ impl App {
             .iter()
             .find(|(label, _)| *label == command)
             .map_or(command, |(_, id)| *id);
-        if self.navigate_key(command) {
+        if let Some(index) = command
+            .strip_prefix("sort-wdx:")
+            .and_then(|index| index.parse().ok())
+        {
+            self.sort_wdx(index);
+            return;
+        }
+        if self.view_setup_action(command)
+            || self.association_action(command)
+            || self.favorite_action(command)
+            || self.administration_action(command)
+            || self.rename_setup_action(command)
+        {
+            return;
+        }
+        if command == "print-file" && self.viewer.is_some() {
+            self.print_file();
+            return;
+        }
+        match command {
+            "shell-desktop" | "shell-computer" => {
+                let address = if command == "shell-desktop" {
+                    arco_windows::SHELL_DESKTOP
+                } else {
+                    arco_windows::SHELL_COMPUTER
+                };
+                self.open_shell_panel(self.active, address);
+                return;
+            }
+            "shell-local" if self.current().shell.is_some() => {
+                self.load(self.active, self.current().path.clone(), Navigation::Jump);
+                return;
+            }
+            "view" | "view-internal" | "view-separate" if self.current().shell.is_some() => {
+                if let Some(path) = self.current_shell_file().map(Path::to_path_buf) {
+                    if command == "view-separate" {
+                        self.open_lister(path);
+                    } else if command == "view-internal" || !self.preview_registered(&path) {
+                        self.view_file(path);
+                    }
+                } else {
+                    self.status("Wähle eine Shell-Datei mit lokalem Dateipfad.");
+                }
+                return;
+            }
+            "view-separate" if self.current().is_local() => {
+                self.with_file(|app, path| app.open_lister(path));
+                return;
+            }
+            "viewer-detach" => {
+                self.detach_lister();
+                return;
+            }
+            _ => (),
+        }
+        match command {
+            "known-folder" => {
+                let options: Vec<_> = KNOWN_FOLDERS.iter().map(|(name, _)| *name).collect();
+                self.dialog(
+                    "confirm",
+                    Pending::KnownFolder,
+                    Dialog {
+                        title: "Windows-Ordner öffnen",
+                        options: &options,
+                        ..Default::default()
+                    },
+                );
+                return;
+            }
+            "map-drive" | "unmap-drive" => {
+                if let Err(error) = arco_windows::network_drive_dialog(command == "map-drive") {
+                    self.status(error.to_string());
+                }
+                return;
+            }
+            "system-information" | "windows-version" => {
+                if let Err(error) = arco_windows::system_information(command == "windows-version") {
+                    self.status(error.to_string());
+                }
+                return;
+            }
+            _ => (),
+        }
+        if self.tree_key(command) || self.navigate_key(command) {
             return;
         }
         if self.wfx_command(command) {
@@ -298,7 +588,7 @@ impl App {
             self.edit_ftp_file();
             return;
         }
-        if matches!(command, "copy" | "zip-extract")
+        if matches!(command, "copy" | "copy-to-marked" | "zip-extract")
             && self.panels.iter().any(|panel| panel.loading)
         {
             self.status("Warte, bis beide Dateifenster geladen sind.");
@@ -340,13 +630,23 @@ impl App {
                     | "sort-size"
                     | "sort-time"
                     | "sort-attributes"
+                    | "sort-comment"
+                    | "sort-unsorted"
                     | "details"
                     | "short-view"
                     | "long-view"
+                    | "separate-tree-cycle"
                     | "clear-filter"
+                    | "only-marked"
+                    | "only-programs"
+                    | "ignore-edit"
+                    | "packer-profiles"
+                    | "ignore-import"
+                    | "ignore-toggle"
                     | "quick-view"
                     | "search"
                     | "sync"
+                    | "sync-profiles"
                     | "open"
                     | "refresh"
                     | "new-tab"
@@ -370,8 +670,17 @@ impl App {
                     | "match"
                     | "stacked"
                     | "theme"
+                    | "system-theme"
                     | "hidden"
                     | "settings"
+                    | "transfer-manager"
+                    | "ntfs-options"
+                    | "quick-find"
+                    | "selection-paste"
+                    | "buttonbars"
+                    | "starter"
+                    | "starter-edit"
+                    | "buttonbar-templates"
                     | "close-settings"
                     | "close-drives"
                     | "view"
@@ -424,7 +733,14 @@ impl App {
         if !self.panels[1 - side].current().is_local()
             && matches!(
                 command,
-                "move" | "split" | "join" | "zip-pack" | "zip-extract"
+                "move"
+                    | "split"
+                    | "join"
+                    | "encode-files"
+                    | "decode-files"
+                    | "zip-pack"
+                    | "zip-extract"
+                    | "external-pack"
             )
         {
             self.status("Wähle einen lokalen Zielordner im anderen Fenster.");
@@ -462,13 +778,51 @@ impl App {
             "sort-size" => self.current_mut().set_sort(SortKey::Size, hidden),
             "sort-time" => self.current_mut().set_sort(SortKey::Modified, hidden),
             "sort-attributes" => self.current_mut().set_sort(SortKey::Attributes, hidden),
+            "sort-comment" => self.current_mut().set_sort(SortKey::Comment, hidden),
+            "sort-unsorted" => self.current_mut().set_sort(SortKey::Unsorted, hidden),
             "sort-wdx-first" => self.sort_wdx(0),
             "sort-wdx-second" => self.sort_wdx(1),
             "sort-wdx-third" => self.sort_wdx(2),
-            "details" => self.current_mut().detailed = !self.current().detailed,
-            "short-view" => self.current_mut().detailed = false,
-            "long-view" => self.current_mut().detailed = true,
-            "clear-filter" => self.current_mut().filter(String::new(), hidden),
+            "details" => {
+                let view = if self.current().detailed() {
+                    TabView::Short
+                } else {
+                    TabView::Details
+                };
+                self.current_mut().set_view(view, None, None, hidden);
+            }
+            "short-view" => self.current_mut().set_view(TabView::Short, None, None, hidden),
+            "long-view" => self.current_mut().set_view(TabView::Details, None, None, hidden),
+            "thumbnail-view" if self.current().is_local() => {
+                self.current_mut().set_view(TabView::Thumbnails, None, None, hidden);
+            }
+            "thumbnail-view" => self.status("Die Miniaturansicht ist für lokale Ordner verfügbar."),
+            "comment-view" => {
+                let view = if self.current().shows_comments() { TabView::Details } else { TabView::Comments };
+                self.current_mut().set_view(view, None, None, hidden);
+                self.refresh(side);
+            }
+            "edit-comment" => self.open_comment(),
+            "edit-metadata" => self.open_metadata_edit(),
+            "print-file" => self.print_file(),
+            "print-directory" | "print-directory-recursive" => self.print_directory(command == "print-directory-recursive"),
+            "directory-tree" => self.toggle_tree(),
+            "separate-tree-cycle" => self.set_separate_trees((self.profile.separate_tree_mode.min(2) + 1) % 3),
+            "separate-tree-one" => self.set_separate_trees(1),
+            "separate-tree-two" => self.set_separate_trees(2),
+            "separate-tree-off" => self.set_separate_trees(0),
+            "separate-tree-toggle-one" => self.set_separate_trees(if self.profile.separate_tree_mode == 1 { 0 } else { 1 }),
+            "separate-tree-toggle-two" => self.set_separate_trees(if self.profile.separate_tree_mode == 2 { 0 } else { 2 }),
+            "buttonbars" => self.open_buttonbars(),
+            "starter" => self.starter(),
+            "starter-edit" => self.buttonbar_list(2),
+            "buttonbar-templates" => self.buttonbar_templates(),
+            "clear-filter" | "only-programs" => self.current_mut().set_programs_only(command == "only-programs", hidden),
+            "only-marked" => {
+                if !self.current_mut().toggle_selected_filter(hidden) {
+                    self.status("Markiere zuerst die Einträge für die Auswahlansicht.");
+                }
+            }
             "quick-view" => self.toggle_quick_preview(),
             "open" => self.open_row(self.current().cursor),
             "refresh" => self.refresh(side),
@@ -489,6 +843,7 @@ impl App {
             "tab-base" => { self.return_to_tab_base(); }
             "root" if self.return_to_tab_base() => (),
             "root" if ftp => self.go_ftp_root(),
+            "root" if self.current().shell.is_some() => self.open_shell_panel(side, arco_windows::SHELL_DESKTOP),
             "root" => self.load(side, self.current().path.ancestors().last().unwrap_or(&self.current().path).to_path_buf(), Navigation::Jump),
             "back" => {
                 if let Some(path) = self.current().back.last().cloned() { self.load_location(side, path, Navigation::Back); }
@@ -498,6 +853,7 @@ impl App {
             }
             "swap" => {
                 self.panels.swap(0, 1);
+                self.swap_trees();
                 self.set_active(1 - side);
                 self.refresh_both();
             }
@@ -507,8 +863,15 @@ impl App {
                 self.sync_ui_settings();
             }
             "theme" => {
-                self.profile.light_mode = !self.profile.light_mode;
+                self.profile.light_mode = !self.effective_light_theme();
+                self.profile.system_theme = false;
                 self.sync_ui_settings();
+                self.save();
+            }
+            "system-theme" => {
+                self.profile.system_theme = !self.profile.system_theme;
+                self.sync_ui_settings();
+                self.save();
             }
             "hidden" => {
                 self.set_hidden(!hidden);
@@ -518,10 +881,10 @@ impl App {
             "close-settings" => self.close_settings(),
             "close-drives" => self.ui().set_drive_side(-1),
             "edit" => self.with_file(|app, path| app.report(arco_windows::edit(&path, app.profile.editor.as_deref()))),
-            "view" if ftp => self.view_ftp_panel_entry(),
-            "view" if self.current().archive.is_some() => {
+            "view" | "view-separate" if ftp => self.view_ftp_panel_entry(command == "view-separate"),
+            "view" | "view-separate" if self.current().archive.is_some() => {
                 if let Some(entry) = self.current().display_row(self.current().cursor).filter(|entry| entry.kind == Kind::File) {
-                    self.archive_preview_dialog(entry.path.clone());
+                    self.archive_preview_dialog(entry.path.clone(), command == "view-separate");
                 } else {
                     self.status("Wähle eine Datei im Archiv.");
                 }
@@ -562,6 +925,7 @@ impl App {
             "copy" if ftp || passive_ftp => self.open_ftp_copy(),
             "copy" if self.panels[1 - side].current().archive.is_some() => self.archive_insert_dialog(),
             "copy" | "zip-extract" if self.current().archive.is_some() => self.archive_extract_dialog(),
+            "copy-to-marked" => self.copy_to_marked_dialog(),
             "copy" | "move" => self.transfer_dialog(self.current().paths(), self.target().to_path_buf(), if command == "copy" { Transfer::Copy } else { Transfer::Move }),
             "mkdir" | "delete" | "delete-permanent" | "rename" if ftp => self.ftp_panel_edit_dialog(command),
             "mkdir" | "new-file" => {
@@ -577,9 +941,10 @@ impl App {
                 if let Some(plan) = self.undo.clone() { self.rename_review(plan); }
                 else { self.status("Keine Umbenennung in dieser Sitzung verfügbar."); }
             }
+            "search" if self.current().is_local() => self.open_advanced_search(),
             "search" => {
                 let archive = self.current().archive.clone();
-                let search_text = archive.as_ref().is_none_or(|archive| is_zip(&archive.file));
+                let search_text = archive.as_ref().is_none_or(|archive| archive_view::supports_text_search(&archive.file));
                 self.dialog("input", Pending::Search(side, self.panels[side].request, self.current().location(), archive), Dialog {
                     title: "Dateien suchen", description: "Durchsucht den aktiven Ordner und seine Unterordner. Mehrere Dateimasken werden mit Semikolon getrennt.",
                     value: "*", placeholder: "Dateimaske", second_placeholder: if search_text { "Text als RegEx (optional)" } else { "" }, ..Default::default()
@@ -587,6 +952,12 @@ impl App {
             }
             "search-wdx" => self.show_wdx_search(),
             "wdx-search-profiles" => self.show_wdx_search_profiles(),
+            "wdx-edit" => self.start_wdx_edit(),
+            "ignore-edit" => self.edit_ignore_list(),
+            "ignore-import" => self.import_ignore_list(),
+            "ignore-toggle" => {
+                if let Err(error) = self.toggle_ignore_list() { self.text("Ignorierliste", &error.to_string()); }
+            }
             "branch" | "branch-selected" => {
                 let path = self.current().path.clone();
                 let request = self.panels[side].request;
@@ -604,7 +975,7 @@ impl App {
                         Some(paths) => (files::branch_selected(&path, paths, &job.cancel)?, "Zweigansicht der Auswahl"),
                         None => (files::branch(&path, &job.cancel)?, "Zweigansicht"),
                     };
-                    Ok(Outcome::Entries { side, location: Location::Local(path), request, entries, label: label.into() })
+                    Ok(Outcome::Entries { side, location: Location::Local(path), request, entries, label: label.into(), scope: arco_core::view_settings::Scope::Branch })
                 });
             }
             "compare" | "compare-binary" => self.compare(command == "compare-binary"),
@@ -618,37 +989,61 @@ impl App {
                 self.compare_panels(command == "compare-dirs-folders-size", MarkRule::Size, false);
             }
             "sync" => self.open_sync(),
+            "sync-profiles" => self.open_sync_profiles(),
             "space-usage" | "folder-sizes" => self.measure_files(command == "folder-sizes"),
             "hash" | "verify" => self.hash_dialog(command == "verify"),
+            "verify-clipboard" => self.hash_clipboard_dialog(),
+            "quick-find" => self.quick_find_dialog(),
+            "everything-configure" => self.configure_everything_dialog(),
+            "transfer-manager" => self.open_transfer_manager(),
+            "ntfs-options" => self.open_ntfs_options(),
+            "selection-save" | "selection-load" => self.selection_dialog(command == "selection-save"),
+            "selection-paste" => {
+                if let Err(error) = arco_windows::paste_text().and_then(|value| self.select_from_text(&value)) {
+                    self.status(error.to_string());
+                }
+            }
+            "encode-files" | "decode-files" => self.transport_encoding_dialog(command == "decode-files"),
             "duplicates" => {
-                let paths = vec![self.current().path.clone()];
-                self.start_job("Suche nach Duplikaten …", false, move |job| {
-                    let groups = tools::duplicates(&paths, &job.cancel)?;
-                    let mut text = String::new();
-                    for (index, group) in groups.iter().enumerate() {
-                        writeln!(text, "Gruppe {}", index + 1).unwrap();
-                        for path in group { writeln!(text, "  {}", display_path(path)).unwrap(); }
-                    }
-                    Ok(Outcome::Text(format!("{} Duplikatgruppen", groups.len()), text))
+                self.dialog("confirm", Pending::DuplicateSearch(self.current().path.clone()), Dialog {
+                    title: "Duplikate suchen",
+                    description: "Durchsucht den aktiven Ordner einschließlich Unterordnern.",
+                    options: &["Identischer Inhalt", "Gleicher Name", "Gleiche Größe", "Name und Größe", "Name und Inhalt"],
+                    ..Default::default()
                 });
             }
             "split" => self.with_file(|app, path| app.dialog("input", Pending::Split(path, app.target().to_path_buf()), Dialog {
-                title: "Datei teilen", description: "Die Teile werden mit .001, .002 usw. im anderen Fenster gespeichert.",
-                value: "64", placeholder: "Teilgröße in MiB", ..Default::default()
+                title: "Datei teilen", description: "Im Total-Commander-Modus entsteht zusätzlich eine CRC-Begleitdatei mit Originalname und Prüfsumme.",
+                value: "64", placeholder: "Teilgröße in MiB", options: &["Total Commander (.crc)", "Nur Dateiteile"], ..Default::default()
             })),
             "join" => {
                 let paths = self.current().paths();
                 if paths.is_empty() { self.status("Wähle die zu verbindenden Dateien."); }
-                else { self.dialog("input", Pending::Join(paths, self.target().to_path_buf()), Dialog {
-                    title: "Dateien verbinden", description: "Verbindet die ausgewählten Dateien in lexikografischer Reihenfolge. Ausgabe im anderen Fenster.",
-                    placeholder: "Name der Ausgabedatei", ..Default::default()
-                }); }
+                else {
+                    match tc_split::selected_manifest(&paths) {
+                        Err(error) => self.status(error.to_string()),
+                        Ok(manifest) => {
+                            let name = manifest.as_ref().map(|file| file.name.clone()).unwrap_or_default();
+                            let description = if manifest.is_some() {
+                                "Verbindet den vollständigen Satz und prüft Größe und CRC32 vor dem Speichern."
+                            } else {
+                                "Verbindet die ausgewählten Dateien in lexikografischer Reihenfolge. Ausgabe im anderen Fenster."
+                            };
+                            self.dialog("input", Pending::Join(paths, self.target().to_path_buf(), manifest), Dialog {
+                                title: "Dateien verbinden", description, value: &name,
+                                placeholder: "Name der Ausgabedatei", ..Default::default()
+                            });
+                        }
+                    }
+                }
             }
             "zip-open" => self.with_file(|app, path| {
-                if archive_view::is_supported(&path) { app.open_archive(path); }
+                if archive_view::is_openable(&path) { app.open_archive(path); }
                 else { app.status("Wähle ein unterstütztes Archiv."); }
             }),
             "zip-pack" => self.zip_pack_dialog(),
+            "packer-profiles" => self.open_packer_profiles(),
+            "external-pack" => self.external_pack_dialog(),
             "zip-test" if self.current().archive.is_some() => {
                 if let Some(archive) = &self.current().archive { self.archive_read_dialog(archive.file.clone(), true); }
             }
@@ -683,19 +1078,6 @@ impl App {
                     MaskEdit::Remove { .. } => "Auswahl nach Maske verkleinern",
                 };
                 self.dialog("input", Pending::Mask(mode), Dialog { title, value: "*", placeholder: "Dateimaske", ..Default::default() });
-            }
-            "add-favorite" => {
-                let path = self.current().path.clone();
-                if !self.profile.favorites.contains(&path) { self.profile.favorites.push(path); }
-                self.status("Ordner als Favorit gespeichert.");
-            }
-            "favorites" => {
-                if self.profile.favorites.is_empty() { self.status("Merke den aktiven Ordner über Werkzeuge → Neuen Favoriten merken."); }
-                else {
-                    let list = self.profile.favorites.iter().map(|path| display_path(path)).collect::<Vec<_>>();
-                    let options = list.iter().map(String::as_str).collect::<Vec<_>>();
-                    self.dialog("confirm", Pending::Favorite, Dialog { title: "Favoriten", options: &options, ..Default::default() });
-                }
             }
             "configure-editor" => {
                 let editor = self.profile.editor.as_deref().map(display_path).unwrap_or_default();
@@ -747,6 +1129,7 @@ impl App {
     pub(crate) fn dialog(&mut self, kind: &str, pending: Pending, data: Dialog<'_>) {
         self.pending = Some(pending);
         let ui = self.ui();
+        ui.set_dialog_transfer_filters(Default::default());
         ui.set_dialog_title(data.title.into());
         ui.set_dialog_description(data.description.into());
         ui.set_dialog_value(data.value.into());
@@ -766,11 +1149,14 @@ impl App {
         }
         self.viewer = None;
         self.staged_preview = None;
+        self.preview_image_path = None;
         let ui = self.ui();
         ui.set_dialog_kind("".into());
         ui.set_dialog_value("".into());
         ui.set_dialog_second("".into());
         ui.set_viewer_image(slint::Image::default());
+        ui.set_file_conflict(Default::default());
+        ui.set_diff_data(Default::default());
         ui.set_sync_rows(Default::default());
         ui.invoke_focus_panels();
     }
@@ -779,8 +1165,9 @@ impl App {
         let Some(pending) = self.pending.take() else {
             return;
         };
+        let filter = self.ui().get_dialog_transfer_filter().max(0) as usize;
         self.close_dialog();
-        if let Err(error) = self.execute(pending, value, second, option.max(0) as usize) {
+        if let Err(error) = self.execute(pending, value, second, option.max(0) as usize, filter) {
             self.text("Aktion konnte nicht ausgeführt werden", &error.to_string());
         }
         self.publish(self.active);
@@ -792,8 +1179,139 @@ impl App {
         value: &str,
         second: &str,
         option: usize,
+        transfer_filter: usize,
     ) -> io::Result<()> {
         match pending {
+            Pending::KnownFolder => {
+                if let Some((_, folder)) = KNOWN_FOLDERS.get(option) {
+                    self.load(
+                        self.active,
+                        arco_windows::known_folder(*folder)?,
+                        Navigation::Jump,
+                    );
+                }
+            }
+            Pending::TransferManager => self.transfer_manager_action(option)?,
+            Pending::TransferQueueChoose(ids) => {
+                if let Some(id) = ids.get(option) {
+                    self.open_queued_transfer(*id);
+                }
+            }
+            Pending::TransferQueueOrder(id) => self.reorder_transfer(id, option),
+            Pending::TransferSettings => self.save_transfer_settings(value, second)?,
+            Pending::NtfsOptions => (),
+            Pending::TransferConflict(ticket) => ticket.answer(option, second == "all", value),
+            Pending::ViewSetup(setup) => self.submit_view_setup(setup, value, option)?,
+            Pending::Associations(setup) => self.submit_association(setup, value, option)?,
+            Pending::Administration(setup) => self.submit_administration(setup, value, option)?,
+            Pending::TextCompare(_, _) | Pending::BinaryCompare(_, _) => (),
+            Pending::EverythingPath => self.save_everything_path(value)?,
+            Pending::PrintText(title, body) => {
+                if arco_windows::print_text(&title, &body)? {
+                    self.status("Druckauftrag übergeben.");
+                }
+            }
+            Pending::PrintDirectory(base, paths) => {
+                let options = arco_core::advanced_search::Options {
+                    names: value.to_owned(),
+                    depth: second.to_owned(),
+                    ..Default::default()
+                };
+                self.prepare_print_directory(base, paths, Some(options.compile()?));
+            }
+            Pending::EditComment(path, previous) => {
+                self.write_comment(path, previous, value.to_owned())
+            }
+            Pending::EditMetadata(paths) => self.apply_metadata_edit(paths, value)?,
+            Pending::AdvancedSearch(_) => (),
+            Pending::SearchReview(review) => self.use_search_results(*review),
+            Pending::QuickFind => self.quick_find(value, option)?,
+            Pending::SelectionFile(root, paths) => self.selection_file(root, paths, value)?,
+            Pending::HashClipboard(path, expected, methods) => {
+                let method = methods
+                    .get(option)
+                    .copied()
+                    .ok_or_else(|| io::Error::other("Wähle ein Prüfsummenverfahren."))?;
+                self.start_job("Prüfe Datei …", false, move |job| {
+                    let actual = tools::checksum(&path, method, &job.cancel)?;
+                    let title = if expected.eq_ignore_ascii_case(&actual) {
+                        "Prüfsumme stimmt"
+                    } else {
+                        "Prüfsumme weicht ab"
+                    };
+                    Ok(Outcome::Text(
+                        title.into(),
+                        format!(
+                            "{}\nErwartet  {expected}\nBerechnet {actual}",
+                            display_path(&path)
+                        ),
+                    ))
+                });
+            }
+            Pending::DuplicateSearch(path) => {
+                use tools::DuplicateMode::*;
+                let mode = [Content, Name, Size, NameAndSize, NameAndContent][option.min(4)];
+                let ignore = self.ignore_list();
+                self.start_job("Suche nach Duplikaten …", false, move |job| {
+                    let groups = tools::duplicates(&[path], mode, ignore.as_deref(), &job.cancel)?;
+                    let mut text = String::new();
+                    for (index, group) in groups.iter().enumerate() {
+                        writeln!(text, "Gruppe {}", index + 1).unwrap();
+                        for path in group {
+                            writeln!(text, "  {}", display_path(path)).unwrap();
+                        }
+                    }
+                    Ok(Outcome::Text(
+                        format!("{} Duplikatgruppen", groups.len()),
+                        text,
+                    ))
+                });
+            }
+            Pending::Buttonbar => self.buttonbar_list(option),
+            Pending::Starter => self.run_button(2, option),
+            Pending::ButtonbarTemplates(names) => {
+                self.select_buttonbar_template(
+                    option
+                        .checked_sub(1)
+                        .and_then(|index| names.get(index).cloned()),
+                );
+            }
+            Pending::ButtonbarTemplate(name) => self.apply_buttonbar_template(name, option)?,
+            Pending::ButtonbarTemplateSave => self.save_buttonbar_template(value)?,
+            Pending::ButtonbarList(bar) => self.buttonbar_select(bar, option),
+            Pending::ButtonbarFile(bar, importing) => {
+                self.buttonbar_file(bar, importing, &value)?
+            }
+            Pending::ButtonbarImport(bar, buttons) => {
+                self.confirm_buttonbar_import(bar, buttons)?
+            }
+            Pending::ButtonbarAction(bar, index) => self.buttonbar_action(bar, index, option)?,
+            Pending::ButtonbarEdit(bar, index) => self.save_button(bar, index, value)?,
+            Pending::PackerProfiles(names) => self.choose_packer_profile(names, option),
+            Pending::PackerProfileAction(name) => {
+                if option == 1 {
+                    self.remove_packer_profile(&name)?;
+                } else {
+                    self.edit_packer_profile(Some(name), None, None);
+                }
+            }
+            Pending::PackerProfileEdit(previous) => {
+                if let Err(error) = self.save_packer_profile(previous.as_deref(), value) {
+                    self.edit_packer_profile(previous, Some(value), Some(&error.to_string()));
+                }
+            }
+            Pending::ExternalPack(paths, base, directory, names) => {
+                let name = names
+                    .get(option)
+                    .ok_or_else(|| io::Error::other("Wähle ein Packerprofil."))?;
+                self.run_external_packer(paths, base, directory, name, value)?;
+            }
+            Pending::IgnoreList => {
+                if let Err(error) = self.save_ignore_list(value, self.profile.ignore_enabled) {
+                    self.edit_ignore_rules(value, Some(&error.to_string()));
+                }
+            }
+            Pending::IgnoreImport => self.read_ignore_list(value)?,
             Pending::WfxPrompt(ticket) => ticket.answer(value),
             Pending::WfxPanelEdit(location, source) => self.edit_wfx_panel(location, source, value),
             Pending::WfxPanelBatch(location, tasks) => self.run_wfx_batch(location, tasks),
@@ -814,9 +1332,32 @@ impl App {
                 }
             }
             Pending::WdxChoose(plugin, fields) => {
-                if let Some(field) = fields.get(option) {
+                if let Some(field) = fields.into_iter().nth(option) {
                     self.add_wdx_column(plugin, field)?;
                 }
+            }
+            Pending::WdxEditPlugin(plugins, paths) => {
+                if let Some(entry) = plugins.into_iter().nth(option) {
+                    self.read_wdx_editable(entry, paths);
+                }
+            }
+            Pending::WdxEditField(target, fields) => {
+                if let Some(field) = fields.into_iter().nth(option) {
+                    self.wdx_edit_value(target, field);
+                }
+            }
+            Pending::WdxEditValue(target, field) => {
+                self.confirm_wdx_edit(target, field, value, option);
+            }
+            Pending::WdxEditMode(target, field) => {
+                if option == 0 {
+                    self.open_wdx_editor(target, field);
+                } else {
+                    self.wdx_edit_text(target, field);
+                }
+            }
+            Pending::WdxEditApply(target, field, value) => {
+                self.apply_wdx_edit(target, field, value)
             }
             Pending::WdxSearchPlugin(target, plugins) => {
                 if let Some(entry) = plugins.into_iter().nth(option) {
@@ -874,6 +1415,15 @@ impl App {
             }
             Pending::Rename(paths, multi) => {
                 let plan = if multi {
+                    let clipboard = if rename::uses_clipboard(value)? {
+                        match arco_windows::paste_text() {
+                            Ok(text) => text.lines().next().map(str::to_owned),
+                            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                            Err(error) => return Err(error),
+                        }
+                    } else {
+                        None
+                    };
                     let pattern = if second.is_empty() {
                         None
                     } else {
@@ -887,21 +1437,25 @@ impl App {
                             paths,
                             value,
                             pattern.map(|(pattern, replace)| (pattern, replace.to_owned())),
+                            clipboard,
                         )?;
                         return Ok(());
                     }
-                    rename::Plan::new(
+                    rename::Plan::new_with_clipboard(
                         &paths,
                         value,
                         pattern
                             .as_ref()
                             .map(|(pattern, replace)| (pattern, *replace)),
+                        clipboard.as_deref(),
+                        |_, _| None,
                     )?
                 } else {
                     rename::Plan::single(&paths[0], tools::output_name(value)?)?
                 };
                 self.rename_review(plan);
             }
+            Pending::RenameSetup(setup) => self.submit_rename_setup(setup, value, option)?,
             Pending::ApplyRename(plan) => {
                 self.start_job("Benenne Dateien um …", true, move |_| {
                     plan.apply(arco_windows::rename_noreplace)?;
@@ -909,40 +1463,46 @@ impl App {
                 })
             }
             Pending::Transfer(paths, target, operation) => {
-                let policy = match option {
-                    1 => Conflict::Skip,
-                    2 => Conflict::Replace,
+                let filter = transfer_filter
+                    .checked_sub(1)
+                    .and_then(|index| {
+                        self.profile
+                            .search_profiles
+                            .values()
+                            .filter(|options| options.everything().is_none())
+                            .nth(index)
+                    })
+                    .map(arco_core::advanced_search::Options::compile)
+                    .transpose()?;
+                let target = match target {
+                    TransferDestination::Folder(base) if !value.trim().is_empty() => {
+                        TransferDestination::Folder(base.join(value.trim()))
+                    }
+                    target => target,
+                };
+                let mask = second.trim().to_owned();
+                let conflict = match option {
+                    2 => Conflict::Skip,
+                    3 => Conflict::Replace,
+                    4 => Conflict::Newer,
+                    5 => Conflict::Larger,
+                    6 => Conflict::Rename,
+                    7 if operation == Transfer::Copy => Conflict::Append,
                     _ => Conflict::Fail,
                 };
                 self.current_mut().remember_selection();
-                let label = if operation == Transfer::Copy {
-                    "Kopieren"
-                } else {
-                    "Verschieben"
-                };
-                self.start_job(label, true, move |job| {
-                    let mut last = Instant::now() - Duration::from_secs(1);
-                    let report = files::transfer(
-                        &paths,
-                        &target,
-                        operation,
-                        policy,
-                        &job.cancel,
-                        Some(arco_windows::rename_noreplace),
-                        |progress| {
-                            if last.elapsed() >= Duration::from_millis(100) {
-                                last = Instant::now();
-                                job.progress(format!(
-                                    "{label} · {} · {} / {}",
-                                    display_path(progress.path),
-                                    human_size(progress.copied),
-                                    human_size(progress.total)
-                                ));
-                            }
-                        },
-                    )?;
-                    Ok(Outcome::Report(label.into(), report))
-                });
+                self.enqueue_transfer(crate::app::TransferTask {
+                    paths,
+                    destination: target,
+                    operation,
+                    mask,
+                    conflict,
+                    ask_conflicts: option == 0,
+                    ntfs: self.profile.transfer_ntfs,
+                    descriptions: self.profile.transfer_descriptions,
+                    filter: filter.map(Arc::new),
+                    ignore: self.ignore_list(),
+                })?;
             }
             Pending::Delete(paths, permanent) => {
                 self.current_mut().remember_selection();
@@ -979,11 +1539,15 @@ impl App {
                     max_size: None,
                     max_depth: None,
                     show_hidden: self.profile.show_hidden,
+                    ignore: self.ignore_list(),
                 };
                 if let Some(archive) = archive {
-                    if query.text.is_some() && archive.catalog.contains_encrypted_entries() {
+                    if query.text.is_some()
+                        && archive.catalog.contains_encrypted_entries()
+                        && archive.password().is_none()
+                    {
                         self.dialog("input", Pending::ArchiveSearchPassword(side, request, archive, query), Dialog {
-                            title: "Textsuche im Archiv", placeholder: "ZIP-Passwort (optional)",
+                            title: "Textsuche im Archiv", placeholder: "Archivpasswort (optional)",
                             description: "Ohne Passwort werden verschlüsselte Einträge übersprungen.",
                             secret: true, ..Default::default()
                         });
@@ -1000,6 +1564,7 @@ impl App {
                             request,
                             entries,
                             label: "Suchtreffer".into(),
+                            scope: arco_core::view_settings::Scope::Search,
                         })
                     });
                 }
@@ -1014,6 +1579,11 @@ impl App {
                 );
             }
             Pending::SyncSetup(_) | Pending::SyncReview(_) => (),
+            Pending::SyncProfilePicker(profiles) => {
+                if let Some(profile) = profiles.get(option) {
+                    self.open_sync_profile(profile)?;
+                }
+            }
             Pending::Hash(paths, base, verify) => {
                 let method = HASHES
                     .get(option)
@@ -1041,6 +1611,92 @@ impl App {
                     Ok(Outcome::Text("Prüfsummen".into(), body))
                 });
             }
+            Pending::TransportEncoding {
+                paths,
+                directory,
+                decode,
+            } => {
+                use transport_encoding::Format;
+                let title = if decode {
+                    "Dateien dekodieren"
+                } else {
+                    "Dateien kodieren"
+                };
+                let selected = match (decode, option) {
+                    (true, 0) => None,
+                    (true, 2) | (false, 1) => Some(Format::Xxe),
+                    (true, 3) | (false, 2) => Some(Format::Mime),
+                    (true, 4) => Some(Format::BinHex),
+                    _ => Some(Format::Uue),
+                };
+                self.start_job(title, true, move |job| {
+                    let mut report = TransferReport::default();
+                    let mut mime = Vec::new();
+                    for path in paths {
+                        if job.cancel.load(Ordering::Relaxed) {
+                            report.cancelled = true;
+                            break;
+                        }
+                        job.progress(format!("{title} · {}", display_path(&path)));
+                        let format = selected.or_else(|| Format::from_path(&path));
+                        if decode && matches!(format, Some(Format::Mime)) {
+                            mime.push(path);
+                            continue;
+                        }
+                        let result = format
+                            .ok_or_else(|| {
+                                io::Error::other("Wähle die Kodierung für diese Dateiendung.")
+                            })
+                            .and_then(|format| {
+                                if decode {
+                                    transport_encoding::decode(
+                                        &path,
+                                        &directory,
+                                        format,
+                                        &job.cancel,
+                                    )
+                                    .map(|_| ())
+                                } else {
+                                    transport_encoding::encode(
+                                        &path,
+                                        &directory,
+                                        format,
+                                        &job.cancel,
+                                    )
+                                    .map(|_| ())
+                                }
+                            });
+                        match result {
+                            Ok(_) => report.completed += 1,
+                            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                                report.cancelled = true;
+                                break;
+                            }
+                            Err(error) => report
+                                .errors
+                                .push(format!("{}: {error}", display_path(&path))),
+                        }
+                    }
+                    if !report.cancelled && !mime.is_empty() {
+                        job.progress(format!("{title} · MIME-Nachrichten und Nachrichtenteile"));
+                        for (source, result) in
+                            transport_encoding::decode_mime_batch(&mime, &directory, &job.cancel)
+                        {
+                            match result {
+                                Ok(_) => report.completed += 1,
+                                Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                                    report.cancelled = true;
+                                    break;
+                                }
+                                Err(error) => report
+                                    .errors
+                                    .push(format!("{}: {error}", display_path(&source))),
+                            }
+                        }
+                    }
+                    Ok(Outcome::Report(title.into(), report))
+                });
+            }
             Pending::Split(path, target) => {
                 let bytes = value
                     .trim()
@@ -1050,18 +1706,23 @@ impl App {
                     .filter(|value| *value > 0)
                     .ok_or_else(|| io::Error::other("Teilgröße muss eine positive Zahl sein"))?;
                 self.start_job("Teile Datei …", true, move |job| {
-                    let parts = tools::split(&path, &target, bytes, &job.cancel)?;
-                    Ok(Outcome::Notice(format!(
-                        "{} Teile geschrieben.",
-                        parts.len()
-                    )))
+                    let parts = if option == 0 {
+                        tc_split::split(&path, &target, bytes, &job.cancel)?
+                    } else {
+                        tools::split(&path, &target, bytes, &job.cancel)?.len()
+                    };
+                    Ok(Outcome::Notice(format!("{parts} Teile geschrieben.")))
                 });
             }
-            Pending::Join(mut parts, target) => {
+            Pending::Join(mut parts, target, manifest) => {
                 let target = target.join(tools::output_name(value)?);
                 parts.sort();
                 self.start_job("Verbinde Dateien …", true, move |job| {
-                    tools::join(&parts, &target, &job.cancel)?;
+                    if let Some(manifest) = manifest {
+                        manifest.join(&target, &job.cancel)?;
+                    } else {
+                        tools::join(&parts, &target, &job.cancel)?;
+                    }
                     Ok(Outcome::Notice(format!(
                         "Erstellt: {}",
                         display_path(&target)
@@ -1069,18 +1730,83 @@ impl App {
                 });
             }
             Pending::ZipPack(paths, base, destination) => {
+                let volumes = match option {
+                    8 => Some((
+                        VolumePacking::Sas,
+                        "",
+                        "Die Dateien erhalten Endungen wie .p01 und .p02.",
+                    )),
+                    9 => Some((
+                        VolumePacking::Zip,
+                        ".zip",
+                        "Die Dateien erhalten Endungen wie .zip.001 und .zip.002.",
+                    )),
+                    10 => Some((
+                        VolumePacking::SevenZip,
+                        ".7z",
+                        "Die Dateien erhalten Endungen wie .7z.001 und .7z.002.",
+                    )),
+                    11 => Some((
+                        VolumePacking::Sea,
+                        ".exe",
+                        "DOS-Satz mit .exe und bei Bedarf .001, .002 usw. Verwende einen Archivnamen mit höchstens acht ASCII-Zeichen.",
+                    )),
+                    _ => None,
+                };
+                if let Some((format, extension, description)) = volumes {
+                    if matches!(format, VolumePacking::Sas | VolumePacking::Sea)
+                        && !second.is_empty()
+                    {
+                        return Err(io::Error::other(
+                            "UC2-Mehrteiler werden ohne Passwort erstellt.",
+                        ));
+                    }
+                    let value = value.trim();
+                    tools::output_name(value)?;
+                    let name = if value.to_ascii_lowercase().ends_with(extension) {
+                        value.to_owned()
+                    } else {
+                        format!("{value}{extension}")
+                    };
+                    let destination = destination.join(tools::output_name(&name)?);
+                    let password = (!second.is_empty()).then(|| Zeroizing::new(second.to_owned()));
+                    let sea = matches!(format, VolumePacking::Sea);
+                    self.dialog(
+                        "input",
+                        Pending::ArchiveVolumes(paths, base, destination, format, password),
+                        Dialog {
+                            title: "Mehrteiler erstellen",
+                            description,
+                            value: if sea { "1024" } else { "16" },
+                            placeholder: if sea {
+                                "Teilgröße in KiB"
+                            } else {
+                                "Teilgröße in MiB"
+                            },
+                            ..Dialog::default()
+                        },
+                    );
+                    return Ok(());
+                }
                 let (extension, format) = match option {
-                    1 => (".7z", Some(ExternalFormat::SevenZip)),
+                    1 => (".7z", None),
                     2 => (".tar", Some(ExternalFormat::Tar)),
                     3 => (".gz", Some(ExternalFormat::Gzip)),
+                    4 => (".exe", Some(ExternalFormat::SevenZipSfx)),
+                    5 => (".uc2", None),
+                    6 => (".exe", None),
+                    7 | 12 | 13 => (".ace", None),
                     _ => (".zip", None),
                 };
                 if value.trim().is_empty() {
                     return Err(io::Error::other("Ein Archivname ist erforderlich."));
                 }
-                if format.is_some() && !second.is_empty() {
+                if option == 14 && second.is_empty() {
+                    return Err(io::Error::other("Gib ein ZipCrypto-Passwort ein."));
+                }
+                if !matches!(extension, ".zip" | ".7z" | ".exe") && !second.is_empty() {
                     return Err(io::Error::other(
-                        "Die Passworteingabe ist für ZIP vorgesehen.",
+                        "Passwörter sind für ZIP und 7z einschließlich SFX vorgesehen.",
                     ));
                 }
                 let name = if value.to_ascii_lowercase().ends_with(extension) {
@@ -1089,9 +1815,54 @@ impl App {
                     format!("{value}{extension}")
                 };
                 let destination = destination.join(tools::output_name(&name)?);
-                let password = (!second.is_empty()).then(|| second.to_string());
+                let password =
+                    (!second.is_empty()).then(|| zeroize::Zeroizing::new(second.to_owned()));
+                if option == 6 && second.encode_utf16().count() > archives::ZIP_SFX_PASSWORD_LIMIT {
+                    return Err(io::Error::other("Das Passwort ist für ZIP-SFX zu lang."));
+                }
                 self.start_job("Erstelle Archiv …", true, move |job| {
-                    if let Some(format) = format {
+                    let password = password.as_ref().map(|password| password.as_str());
+                    if option == 6 {
+                        let stub = std::env::current_exe()?.with_file_name("arco-zip-sfx.exe");
+                        if !stub.is_file() {
+                            return Err(io::Error::new(
+                                io::ErrorKind::NotFound,
+                                "arco-zip-sfx.exe fehlt neben Arco Commander.",
+                            ));
+                        }
+                        archives::create_zip_sfx(
+                            &paths,
+                            &base,
+                            &destination,
+                            &stub,
+                            password,
+                            &job.cancel,
+                        )?;
+                    } else if let Some(password) = password.filter(|_| option == 4) {
+                        archive_view::pack_encrypted_7z_sfx(
+                            &paths,
+                            &base,
+                            &destination,
+                            password,
+                            &job.cancel,
+                        )?;
+                    } else if extension == ".ace" {
+                        let pack = match option {
+                            12 => arco_core::legacy_archives::pack_ace_compressed,
+                            13 => arco_core::legacy_archives::pack_ace_blocked,
+                            _ => arco_core::legacy_archives::pack_ace,
+                        };
+                        pack(&paths, &base, &destination, &job.cancel)?;
+                    } else if extension == ".7z" {
+                        archive_view::pack_7z(&paths, &base, &destination, password, &job.cancel)?;
+                    } else if extension == ".uc2" {
+                        arco_core::legacy_archives::pack_uc2(
+                            &paths,
+                            &base,
+                            &destination,
+                            &job.cancel,
+                        )?;
+                    } else if let Some(format) = format {
                         ExternalArchiver::discover(&job.cancel)?.pack(
                             &paths,
                             &base,
@@ -1099,19 +1870,72 @@ impl App {
                             format,
                             &job.cancel,
                         )?;
-                    } else {
-                        archives::create_zip(
+                    } else if option == 14 {
+                        let password = password
+                            .ok_or_else(|| io::Error::other("ZipCrypto-Passwort fehlt."))?;
+                        archives::create_zip_zipcrypto(
                             &paths,
                             &base,
                             &destination,
-                            password.as_deref(),
+                            password,
                             &job.cancel,
                         )?;
+                    } else {
+                        archives::create_zip(&paths, &base, &destination, password, &job.cancel)?;
                     }
                     Ok(Outcome::Notice(format!(
                         "Erstellt: {}",
                         display_path(&destination)
                     )))
+                });
+            }
+            Pending::ArchiveVolumes(paths, base, destination, format, password) => {
+                let sea = matches!(format, VolumePacking::Sea);
+                let size = value
+                    .trim()
+                    .parse::<u64>()
+                    .ok()
+                    .and_then(|size| size.checked_mul(if sea { 1024 } else { 1024 * 1024 }))
+                    .filter(|&size| {
+                        if sea {
+                            (32 * 1024..=512 * 1024 * 1024).contains(&size)
+                        } else {
+                            size > 0 && size <= u64::from(u32::MAX)
+                        }
+                    })
+                    .ok_or_else(|| {
+                        io::Error::other(if sea {
+                            "Gib eine Teilgröße von 32 bis 524288 KiB ein."
+                        } else {
+                            "Gib eine Teilgröße von 1 bis 4095 MiB ein."
+                        })
+                    })?;
+                self.start_job("Erstelle Mehrteiler …", true, move |job| {
+                    let count = match format {
+                        VolumePacking::Sas => arco_core::legacy_archives::pack_uc2_sas(
+                            &paths,
+                            &base,
+                            &destination,
+                            size,
+                            &job.cancel,
+                        ),
+                        VolumePacking::Sea => arco_core::legacy_archives::pack_uc2_sea(
+                            &paths,
+                            &base,
+                            &destination,
+                            size,
+                            &job.cancel,
+                        ),
+                        VolumePacking::Zip | VolumePacking::SevenZip => archive_view::pack_split(
+                            &paths,
+                            &base,
+                            &destination,
+                            size,
+                            password.as_ref().map(|password| password.as_str()),
+                            &job.cancel,
+                        ),
+                    }?;
+                    Ok(Outcome::Notice(format!("{count} Archivteile erstellt.")))
                 });
             }
             Pending::ArchiveExtract(archive, target, selection) => {
@@ -1122,27 +1946,38 @@ impl App {
                     (!value.is_empty()).then(|| value.to_owned()),
                 );
             }
+            Pending::ArchiveUnlock(side, target, navigation) => {
+                if value.is_empty() {
+                    return Err(io::Error::other("Gib das Archivpasswort ein."));
+                }
+                let password = Arc::new(zeroize::Zeroizing::new(value.to_owned()));
+                self.load_location_with_password(side, target, navigation, Some(password));
+            }
             Pending::ArchiveInsert(input, target) => {
-                self.insert_into_zip(
+                let target_secret = asks_target_password(&target);
+                let source = if target_secret { second } else { value };
+                self.insert_into_archive(
                     input,
                     target,
-                    (!value.is_empty()).then(|| value.to_owned()),
-                    (!second.is_empty()).then(|| second.to_owned()),
+                    (target_secret && !value.is_empty()).then(|| value.to_owned()),
+                    (!source.is_empty()).then(|| source.to_owned()),
                 );
             }
-            Pending::ArchivePreview(archive, member) => {
+            Pending::ArchivePreview(archive, member, separate) => {
                 self.preview_archive_member(
                     archive,
                     member,
                     (!value.is_empty()).then(|| value.to_owned()),
+                    separate,
                 )?;
             }
             Pending::ArchiveRemove(archive, paths) => {
-                self.edit_zip(archive, archives::ZipEdit::Remove(paths))
+                self.edit_archive(archive, archives::ZipEdit::Remove(paths), value)
             }
-            Pending::ArchiveRename(archive, path) => self.edit_zip(
+            Pending::ArchiveRename(archive, path) => self.edit_archive(
                 archive,
                 archives::ZipEdit::Rename(path, tools::output_name(value)?.to_os_string()),
+                second,
             ),
             Pending::ArchiveContext => {
                 if let Some(command) =
@@ -1152,7 +1987,7 @@ impl App {
                 }
             }
             Pending::ZipRead(path, target, test) => {
-                let password = (!value.is_empty()).then(|| value.to_string());
+                let password = (!value.is_empty()).then(|| Zeroizing::new(value.to_owned()));
                 self.start_job(
                     if test {
                         "Prüfe Archiv …"
@@ -1161,17 +1996,11 @@ impl App {
                     },
                     !test,
                     move |job| {
-                        let count = if !is_zip(&path) {
-                            let engine = ExternalArchiver::discover(&job.cancel)?;
-                            if test {
-                                engine.test(&path, &job.cancel)?
-                            } else {
-                                engine.extract(&path, &target, &job.cancel)?
-                            }
-                        } else if test {
-                            archives::test_zip(&path, password.as_deref(), &job.cancel)?
+                        let password = password.as_ref().map(|password| password.as_str());
+                        let count = if test {
+                            archive_view::test(&path, password, &job.cancel)?
                         } else {
-                            archives::extract_zip(&path, &target, password.as_deref(), &job.cancel)?
+                            archive_view::extract_all(&path, &target, password, &job.cancel)?
                         };
                         Ok(Outcome::Notice(format!(
                             "{count} Einträge {}.",
@@ -1205,10 +2034,10 @@ impl App {
                 );
             }
             Pending::FtpPassword(side, connection) => {
-                self.mount_ftp(side, connection.with_proxy(second)?, value, None)?;
+                self.mount_ftp(side, connection.with_proxy(second)?, value, None, None)?;
             }
-            Pending::FtpProfilePassword(side, connection, local) => {
-                self.mount_ftp(side, connection, value, local)?;
+            Pending::FtpProfilePassword(side, connection, local, name) => {
+                self.mount_ftp(side, connection, value, local, Some(name))?;
             }
             Pending::FtpProfileDelete(name) => self.delete_ftp_profile(&name)?,
             Pending::FtpProfileImport => self.import_ftp_profiles(value.trim())?,
@@ -1216,9 +2045,19 @@ impl App {
             Pending::FtpDirectory((session, _), side) => {
                 let directory = session.directory(value.trim())?;
                 if let Some(side) = side {
+                    let profile = self.panels[side]
+                        .current()
+                        .ftp
+                        .as_ref()
+                        .filter(|ftp| Arc::ptr_eq(&ftp.location.session, &session))
+                        .and_then(|ftp| ftp.location.profile.clone());
                     self.load_location(
                         side,
-                        Location::Ftp(FtpLocation { session, directory }),
+                        Location::Ftp(FtpLocation {
+                            session,
+                            directory,
+                            profile,
+                        }),
                         Navigation::Jump,
                     );
                 } else {
@@ -1232,16 +2071,19 @@ impl App {
                     second
                 })?);
                 let name = value.to_string();
-                self.start_job("FTP-Download …", true, move |job| {
+                self.enqueue_virtual_transfer("FTP-Download", true, move |job| {
                     if option == 1 {
                         session.download_resuming(&directory, &name, &target, &job.cancel)?;
                     } else {
                         session.download(&directory, &name, &target, &job.cancel)?;
                     }
-                    Ok(Outcome::Notice(format!(
-                        "Heruntergeladen: {}",
-                        display_path(&target)
-                    )))
+                    Ok(Outcome::Report(
+                        format!("FTP-Download · {}", display_path(&target)),
+                        TransferReport {
+                            completed: 1,
+                            ..Default::default()
+                        },
+                    ))
                 });
             }
             Pending::FtpUpload((session, directory), source) => {
@@ -1252,12 +2094,16 @@ impl App {
                             && ftp.location.directory == directory
                     })
                 });
-                self.start_job("FTP-Upload …", in_panel, move |job| {
+                self.enqueue_virtual_transfer("FTP-Upload", in_panel, move |job| {
                     session.upload(&directory, &source, &name, option == 1, &job.cancel)?;
                     if in_panel {
-                        return Ok(Outcome::Notice(format!(
-                            "FTP-Upload abgeschlossen · {name}"
-                        )));
+                        return Ok(Outcome::Report(
+                            format!("FTP-Upload · {name}"),
+                            TransferReport {
+                                completed: 1,
+                                ..Default::default()
+                            },
+                        ));
                     }
                     let listing = session.list(&directory, &job.cancel)?;
                     Ok(Outcome::Ftp(FtpView {
@@ -1310,17 +2156,20 @@ impl App {
             Pending::FtpFxp((source, source_dir), (target, target_dir)) => {
                 let source_name = value.to_owned();
                 let target_name = if second.is_empty() { value } else { second }.to_owned();
-                self.start_job("FTP-Server übertragen direkt …", false, move |job| {
+                self.enqueue_virtual_transfer("FXP-Direktübertragung", false, move |job| {
                     let size = source.fxp_to(
                         (&source_dir, &source_name),
                         &target,
                         (&target_dir, &target_name),
                         &job.cancel,
                     )?;
-                    Ok(Outcome::Notice(format!(
-                        "FXP abgeschlossen · {}",
-                        human_size(size)
-                    )))
+                    Ok(Outcome::Report(
+                        format!("FXP · {}", human_size(size)),
+                        TransferReport {
+                            completed: 1,
+                            ..Default::default()
+                        },
+                    ))
                 });
             }
             Pending::Mask(mode) => {
@@ -1342,11 +2191,7 @@ impl App {
                     }
                 }
             }
-            Pending::Favorite => {
-                if let Some(path) = self.profile.favorites.get(option).cloned() {
-                    self.load(self.active, path, Navigation::Jump);
-                }
-            }
+            Pending::Favorites(setup) => self.submit_favorite(setup, value, option)?,
             Pending::Editor => {
                 if value.trim().is_empty() {
                     self.profile.editor = None;
@@ -1398,7 +2243,7 @@ impl App {
                     ));
                 }
                 self.start_job("Lese Total-Commander-Profil …", false, move |_| {
-                    Ok(Outcome::Imported(profile::read_tc_ini(&path)?))
+                    Ok(Outcome::Imported(crate::app::tc_profile(&path)?))
                 });
             }
             Pending::ApplyTc(import, bindings) => {
@@ -1409,11 +2254,7 @@ impl App {
                         }
                     }
                 }
-                for path in import.favorites {
-                    if !self.profile.favorites.contains(&path) {
-                        self.profile.favorites.push(path);
-                    }
-                }
+                self.import_favorites(import.favorites);
                 let count = bindings.len();
                 for (key, command) in bindings {
                     shortcuts::change(&mut self.profile.shortcuts, key, Some(command));
@@ -1498,7 +2339,7 @@ impl App {
                     return None;
                 }
                 let row = model.row_data(index)?;
-                if details && tab.detailed {
+                if details && tab.detailed() {
                     Some((
                         entry.clone(),
                         [row.name, row.extension, row.info, row.time, row.attributes]
@@ -1512,7 +2353,7 @@ impl App {
                 }
             })
             .unzip();
-        if details && tab.detailed && tab.is_local() {
+        if details && tab.detailed() && tab.is_local() {
             self.copy_details_with_wdx(entries, lines);
             return;
         }
@@ -1542,9 +2383,125 @@ impl App {
             self.status("Wähle Dateien oder Ordner.");
             return;
         }
-        let description = format!("{} Einträge → {}", paths.len(), display_path(&target));
+        self.show_transfer(paths, TransferDestination::Folder(target), operation);
+    }
+
+    fn copy_to_marked_dialog(&mut self) {
+        let passive = self.panels[1 - self.active].current();
+        if !self.current().is_local() || !passive.is_local() {
+            self.status("Öffne in beiden Dateifenstern lokale Ordner.");
+            return;
+        }
+        let sources = self.current().paths();
+        if sources.is_empty() {
+            self.status("Wähle links oder rechts die Dateien und Ordner zum Kopieren.");
+            return;
+        }
+        let targets = passive.marked_transfer_targets();
+        if targets.is_empty() {
+            self.status("Markiere die Zielordner im anderen Dateifenster.");
+            return;
+        }
+        self.show_transfer(
+            sources,
+            TransferDestination::Marked(targets),
+            Transfer::Copy,
+        );
+    }
+
+    fn transport_encoding_dialog(&mut self, decode: bool) {
+        if self.panels.iter().any(|panel| panel.loading) {
+            self.status("Warte, bis beide Dateifenster geladen sind.");
+            return;
+        }
+        let paths = self.current().paths();
+        if paths.is_empty() {
+            self.status("Wähle die Dateien für die Textkodierung.");
+            return;
+        }
+        let directory = self.target().to_path_buf();
+        let description = format!(
+            "{} Dateien · Zielordner {}",
+            paths.len(),
+            display_path(&directory)
+        );
         self.dialog(
             "confirm",
+            Pending::TransportEncoding {
+                paths,
+                directory,
+                decode,
+            },
+            Dialog {
+                title: if decode {
+                    "Dateien dekodieren"
+                } else {
+                    "Dateien kodieren"
+                },
+                description: &description,
+                options: if decode {
+                    &[
+                        "Automatisch nach Dateiendung",
+                        "UUE",
+                        "XXE",
+                        "MIME",
+                        "BinHex",
+                    ]
+                } else {
+                    &["UUE", "XXE", "MIME"]
+                },
+                ..Default::default()
+            },
+        );
+    }
+
+    fn show_transfer(
+        &mut self,
+        paths: Vec<PathBuf>,
+        target: TransferDestination,
+        operation: Transfer,
+    ) {
+        let (kind, description, destinations, placeholder, second_placeholder) = match &target {
+            TransferDestination::Folder(target) => (
+                "input",
+                format!(
+                    "{} Einträge. Relative Zielordner werden vom vorgeschlagenen Ordner aus aufgelöst.",
+                    paths.len()
+                ),
+                display_path(target),
+                "Zielordner",
+                "Optionale Zielmaske, z. B. *.bak oder *-Kopie.*",
+            ),
+            TransferDestination::Marked(targets) => (
+                "review",
+                format!(
+                    "{} Einträge in jeden der {} markierten Zielordner kopieren.",
+                    paths.len(),
+                    targets.len()
+                ),
+                targets
+                    .iter()
+                    .map(|target| display_path(target))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                "",
+                "",
+            ),
+        };
+        let mut conflicts = vec![
+            "Bei jeder vorhandenen Datei nachfragen",
+            "Bei Namenskonflikten Fehler melden",
+            "Vorhandene Dateien überspringen",
+            "Vorhandene Dateien überschreiben",
+            "Nur mit neueren Dateien überschreiben",
+            "Nur mit größeren Dateien überschreiben",
+            "Kopie unter freiem Namen speichern",
+        ];
+        if operation == Transfer::Copy {
+            conflicts.push("An vorhandene Dateien anhängen");
+        }
+        self.dialog(
+            kind,
             Pending::Transfer(paths, target, operation),
             Dialog {
                 title: if operation == Transfer::Copy {
@@ -1553,14 +2510,27 @@ impl App {
                     "Verschieben"
                 },
                 description: &description,
-                options: &[
-                    "Bei Namenskonflikten Fehler melden",
-                    "Vorhandene Dateien überspringen",
-                    "Vorhandene Dateien überschreiben",
-                ],
+                value: &destinations,
+                placeholder,
+                second_placeholder,
+                options: &conflicts,
                 ..Default::default()
             },
         );
+        let local_profiles: Vec<_> = self
+            .profile
+            .search_profiles
+            .iter()
+            .filter(|(_, options)| options.everything().is_none())
+            .map(|(name, _)| name.as_str())
+            .collect();
+        if !local_profiles.is_empty() {
+            let ui = self.ui();
+            ui.set_dialog_transfer_filter(0);
+            ui.set_dialog_transfer_filters(strings(
+                std::iter::once("Alle Dateien").chain(local_profiles),
+            ));
+        }
     }
 
     fn delete_dialog(&mut self, permanent: bool) {
@@ -1569,7 +2539,7 @@ impl App {
             self.status("Wähle Dateien oder Ordner.");
             return;
         }
-        let description = format!(
+        let mut description = format!(
             "{} Einträge {}?",
             paths.len(),
             if permanent {
@@ -1578,6 +2548,9 @@ impl App {
                 "in den Windows-Papierkorb verschieben"
             }
         );
+        if permanent && self.ignore_list().is_some() && paths.iter().any(|path| path.is_dir()) {
+            description.push_str("\nDer Vorgang löscht auch ausgeblendete Inhalte dieser Ordner.");
+        }
         self.dialog(
             "confirm",
             Pending::Delete(paths, permanent),
@@ -1594,6 +2567,14 @@ impl App {
     }
 
     fn rename_dialog(&mut self, multi: bool) {
+        self.rename_dialog_with_template(multi, None);
+    }
+
+    pub(crate) fn rename_dialog_with_template(
+        &mut self,
+        multi: bool,
+        template: Option<profile::RenameTemplate>,
+    ) {
         let paths = if multi {
             self.current().paths()
         } else {
@@ -1615,8 +2596,11 @@ impl App {
         let data = if multi {
             Dialog {
                 title: "Mehrfach umbenennen",
-                description: "[N] Name, [E] Erweiterung, [F] ganzer Name, [C] Zähler, [=Plugin.Feld] WDX-Wert. Optional RegEx-Ersetzung als Muster=>Ersatz.",
-                value: "[F]",
+                description: "[N] Name, [E] Erweiterung, [F] ganzer Name, [C10+5:3] Zähler, [Y]-[M]-[D] Änderungsdatum, [U]/[L]/[n] Groß- und Kleinschreibung, [X] oder [X+] Zwischenablage, [=Plugin.Feld] WDX-Wert.",
+                value: template.as_ref().map_or("[F]", |item| item.mask.as_str()),
+                second: template
+                    .as_ref()
+                    .map_or("", |item| item.replacement.as_str()),
                 placeholder: "Namensmaske",
                 second_placeholder: "RegEx=>Ersetzung (optional)",
                 ..Default::default()
@@ -1664,15 +2648,49 @@ impl App {
             self.status("Setze den Cursor in beiden Fenstern auf eine Datei.");
             return;
         };
-        self.start_job("Vergleiche Dateiinhalt …", false, move |job| {
-            Ok(Outcome::Text(
-                "Inhaltsvergleich · links und rechts".into(),
-                if binary {
-                    tools::compare_binary(&left, &right, &job.cancel)?
-                } else {
-                    tools::compare_text(&left, &right)?
+        if !binary {
+            self.compare_interactive([left, right]);
+            return;
+        }
+        self.compare_binary_interactive([left, right]);
+    }
+
+    fn hash_clipboard_dialog(&mut self) {
+        self.with_file(|app, path| {
+            let text = match arco_windows::paste_text() {
+                Ok(text) => text,
+                Err(error) => {
+                    app.status(error.to_string());
+                    return;
+                }
+            };
+            let expected = text.split_whitespace().next().unwrap_or_default();
+            let choices: Vec<_> = HASHES
+                .iter()
+                .filter_map(|name| {
+                    let method = Hash::parse(name)?;
+                    method.matches_text(expected).then_some((*name, method))
+                })
+                .collect();
+            if choices.is_empty() {
+                app.status("Die Zwischenablage enthält keine unterstützte Hex-Prüfsumme.");
+                return;
+            }
+            let options: Vec<_> = choices.iter().map(|(name, _)| *name).collect();
+            app.dialog(
+                "confirm",
+                Pending::HashClipboard(
+                    path.clone(),
+                    expected.to_owned(),
+                    choices.iter().map(|(_, method)| *method).collect(),
+                ),
+                Dialog {
+                    title: "Prüfsumme aus Zwischenablage prüfen",
+                    description: &display_path(&path),
+                    options: &options,
+                    ..Default::default()
                 },
-            ))
+            );
         });
     }
 
@@ -1704,23 +2722,27 @@ impl App {
             return;
         }
         self.dialog("input", Pending::ZipPack(paths, self.current().path.clone(), self.target().to_path_buf()), Dialog {
-            title: "Dateien packen", description: "Das Archiv wird im anderen Fenster erstellt. Bei ZIP aktiviert ein Passwort AES-256.",
-            value: "archiv", placeholder: "Archivname", second_placeholder: "ZIP-Passwort (optional)", second_secret: true,
-            options: &["ZIP", "7z über 7-Zip", "TAR über 7-Zip", "GZIP über 7-Zip"], ..Default::default()
+            title: "Dateien packen", description: "Das Archiv wird im anderen Fenster erstellt. ZIP und 7z unterstützen AES-256 auch als SFX und Mehrteiler. Bei 7z schützt das Passwort auch die Dateinamen.",
+            value: "archiv", placeholder: "Archivname", second_placeholder: "ZIP-/7z-Passwort (optional)", second_secret: true,
+            options: &["ZIP", "7z", "TAR über 7-Zip", "GZIP über 7-Zip", "Selbstentpackendes 7z (.exe)", "UC2 über Python", "Selbstentpackendes ZIP (.exe)", "ACE (ohne Kompression)", "UC2-SAS-Mehrteiler", "ZIP-Mehrteiler", "7z-Mehrteiler", "Selbstentpackendes DOS-UC2SEA", "ACE (LZ77)", "ACE 2.0 (Blocked)", "ZIP (ZipCrypto)"], ..Default::default()
         });
     }
 
     fn archive_read_dialog(&mut self, path: PathBuf, test: bool) {
-        let zip = is_zip(&path);
-        if !zip && !external_archives::is_supported(&path) {
+        let password = archive_view::supports_password(&path);
+        let brotli = archive_view::is_brotli(&path);
+        let legacy = archive_view::uses_legacy_adapter(&path);
+        if !archive_view::is_openable(&path) {
             self.status("Wähle ein unterstütztes Archiv.");
             return;
         }
-        self.dialog(if zip { "input" } else { "confirm" }, Pending::ZipRead(path, self.target().to_path_buf(), test), Dialog {
+        self.dialog(if password { "input" } else { "confirm" }, Pending::ZipRead(path, self.target().to_path_buf(), test), Dialog {
             title: if test { "Archiv prüfen" } else { "Archiv entpacken" },
-            description: if zip { "Verschlüsselte Einträge benötigen das Archivpasswort. Vorhandene Dateien im Ziel bleiben erhalten." }
+            description: if password { "Verschlüsselte Einträge benötigen das Archivpasswort. Vorhandene Dateien im Ziel bleiben erhalten." }
+                else if brotli { "Die Brotli-Datei wird ohne Zusatzprogramm gelesen. Vorhandene Dateien im Ziel bleiben erhalten." }
+                else if legacy { "Der Legacy-Adapter verwendet die konfigurierte Python-Installation. Vorhandene Dateien im Ziel bleiben erhalten." }
                 else { "Der Archiv-Adapter verwendet 7-Zip. Vorhandene Dateien im Ziel bleiben erhalten." },
-            placeholder: "ZIP-Passwort (optional)", secret: true, ..Default::default()
+            placeholder: "Archivpasswort (optional)", secret: true, ..Default::default()
         });
     }
 
@@ -1739,7 +2761,9 @@ impl App {
             }
         };
         let file = archive.file.clone();
-        let password = is_zip(&file) && archive.catalog.contains_encrypted_entries();
+        let password = archive_view::supports_password(&file)
+            && archive.catalog.contains_encrypted_entries()
+            && archive.password().is_none();
         let target = self.target().to_path_buf();
         let description = format!(
             "{count} Archiveinträge → {}\nVorhandene Dateien bleiben erhalten.",
@@ -1751,7 +2775,7 @@ impl App {
             Dialog {
                 title: "Archivauswahl entpacken",
                 description: &description,
-                placeholder: "ZIP-Passwort (bei verschlüsselten Einträgen)",
+                placeholder: "Archivpasswort (bei verschlüsselten Einträgen)",
                 secret: true,
                 ..Default::default()
             },
@@ -1762,14 +2786,17 @@ impl App {
         let Some(target) = self.panels[1 - self.active].current().archive.as_ref() else {
             return;
         };
-        if !target
-            .file
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
-        {
-            self.status("Als Archivziel für F5 wird ZIP unterstützt.");
+        if !archive_view::is_editable(&target.file) {
+            self.status("Als Archivziel für F5 sind ZIP, 7z, deren Mehrteiler und unterstützte ACE-Archive verfügbar.");
             return;
         }
+        if target.catalog.contains_encrypted_entries()
+            && !archive_view::supports_password(&target.file)
+        {
+            self.status("Das ACE-Ziel muss unverschlüsselt sein.");
+            return;
+        }
+        let target_secret = asks_target_password(target);
         let paths = self.current().selected_paths();
         if paths.is_empty() {
             self.status("Wähle Dateien oder Ordner.");
@@ -1789,7 +2816,9 @@ impl App {
                     archive: source.clone(),
                     selection,
                 },
-                is_zip(&source.file) && source.catalog.contains_encrypted_entries(),
+                archive_view::supports_password(&source.file)
+                    && source.catalog.contains_encrypted_entries()
+                    && source.password().is_none(),
             )
         } else {
             (
@@ -1806,17 +2835,23 @@ impl App {
             display_path(&target.folder),
         );
         self.dialog(
-            "input",
+            if target_secret || source_secret {
+                "input"
+            } else {
+                "confirm"
+            },
             Pending::ArchiveInsert(input, target.clone()),
             Dialog {
-                title: "In ZIP kopieren",
+                title: "In Archiv kopieren",
                 description: &description,
-                placeholder: if target.catalog.contains_encrypted_entries() {
-                    "Passwort für neue ZIP-Einträge (erforderlich)"
+                placeholder: if !target_secret {
+                    "Quellarchiv-Passwort"
+                } else if target.catalog.contains_encrypted_entries() {
+                    "Zielarchiv-Passwort"
                 } else {
                     "Passwort für neue ZIP-Einträge (optional)"
                 },
-                second_placeholder: if source_secret {
+                second_placeholder: if target_secret && source_secret {
                     "Quellarchiv-Passwort"
                 } else {
                     ""
@@ -1828,7 +2863,7 @@ impl App {
         );
     }
 
-    pub(crate) fn archive_preview_dialog(&mut self, member: PathBuf) {
+    pub(crate) fn archive_preview_dialog(&mut self, member: PathBuf, separate: bool) {
         let Some(archive) = self.current().archive.as_ref() else {
             return;
         };
@@ -1837,18 +2872,20 @@ impl App {
             .current()
             .display_row(self.current().cursor)
             .is_some_and(|entry| entry.path == member && entry.attributes & 0x4000 != 0);
-        if encrypted && is_zip(&file) {
+        if encrypted && archive_view::supports_password(&file) && archive.password().is_none() {
             self.dialog(
                 "input",
-                Pending::ArchivePreview(archive.clone(), member),
+                Pending::ArchivePreview(archive.clone(), member, separate),
                 Dialog {
                     title: "Verschlüsselte Archivdatei anzeigen",
-                    placeholder: "ZIP-Passwort",
+                    placeholder: "Archivpasswort",
                     secret: true,
                     ..Default::default()
                 },
             );
-        } else if let Err(error) = self.preview_archive_member(archive.clone(), member, None) {
+        } else if let Err(error) =
+            self.preview_archive_member(archive.clone(), member, None, separate)
+        {
             self.status(error.to_string());
         }
     }
@@ -1857,15 +2894,16 @@ impl App {
         let Some(archive) = self.current().archive.clone() else {
             return;
         };
-        if !archive
-            .file
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
-            || archive.catalog.contains_encrypted_entries()
+        let encrypted = archive.catalog.contains_encrypted_entries();
+        if !archive_view::is_editable(&archive.file)
+            || (encrypted && !archive_view::supports_encrypted_edit(&archive.file))
         {
-            self.status("Löschen und Umbenennen sind für unverschlüsselte ZIP-Dateien verfügbar.");
+            self.status(
+                "Löschen und Umbenennen sind für ZIP, 7z, deren Mehrteiler und unterstützte ACE-Archive verfügbar.",
+            );
             return;
         }
+        let ask_password = encrypted && archive.password().is_none();
         if rename {
             let Some(entry) = self.current().display_row(self.current().cursor) else {
                 return;
@@ -1875,9 +2913,11 @@ impl App {
                 "input",
                 Pending::ArchiveRename(archive, entry.path.clone()),
                 Dialog {
-                    title: "ZIP-Eintrag umbenennen",
+                    title: "Archiveintrag umbenennen",
                     value: &name,
                     placeholder: "Neuer Name",
+                    second_placeholder: if ask_password { "Archivpasswort" } else { "" },
+                    second_secret: ask_password,
                     ..Default::default()
                 },
             );
@@ -1887,15 +2927,17 @@ impl App {
                 return;
             }
             let description = format!(
-                "{} markierte Einträge einschließlich ihrer Unterordner dauerhaft aus dem ZIP entfernen?",
+                "{} markierte Einträge einschließlich ihrer Unterordner dauerhaft aus dem Archiv entfernen?",
                 paths.len()
             );
             self.dialog(
-                "confirm",
+                if ask_password { "input" } else { "confirm" },
                 Pending::ArchiveRemove(archive, paths),
                 Dialog {
-                    title: "ZIP-Einträge löschen",
+                    title: "Archiveinträge löschen",
                     description: &description,
+                    placeholder: "Archivpasswort",
+                    secret: ask_password,
                     ..Default::default()
                 },
             );
@@ -2216,15 +3258,18 @@ impl App {
 
     pub fn show_tc_import(&mut self, import: TcImport) {
         let mut body = String::new();
-        for (label, items) in [
-            ("Links", &import.panels[0]),
-            ("Rechts", &import.panels[1]),
-            ("Favoriten", &import.favorites),
-        ] {
+        for (label, items) in [("Links", &import.panels[0]), ("Rechts", &import.panels[1])] {
             writeln!(body, "{label}").unwrap();
             for path in items {
                 writeln!(body, "  {}", display_path(path)).unwrap();
             }
+        }
+        writeln!(body, "Favoriten").unwrap();
+        for entry in &import.favorites {
+            let group = entry.groups.join(" › ");
+            let label = crate::app::favorite_label(entry);
+            let path = display_path(&entry.path);
+            writeln!(body, "  {group} · {label} → {path}").unwrap();
         }
         writeln!(body, "\nTastenkürzel").unwrap();
         let mut seen = std::collections::BTreeSet::new();
@@ -2372,86 +3417,78 @@ impl App {
             match preview::read(&path)? {
                 preview::Content::Page(mode, page) => Ok(Outcome::Preview { path, mode, page }),
                 preview::Content::Image(image) => Ok(Outcome::Image(path, image)),
+                preview::Content::Rich(content) => Ok(Outcome::RichPreview(path, content)),
             }
         });
     }
 
-    fn read_preview(&mut self, path: PathBuf, offset: u64, mode: PreviewMode) {
+    fn read_viewer_page(&mut self, request: ViewerRequest) {
         let storage = self
             .staged_preview
             .as_ref()
-            .filter(|archive| archive.path == path)
+            .filter(|archive| archive.path == request.path())
             .map(|archive| archive.storage.clone());
-        self.start_job("Lese Vorschau …", false, move |_| {
+        self.start_job(request.label(), false, move |job| {
             let _storage = storage;
-            let page = tools::preview(&path, offset, mode)?;
-            Ok(Outcome::Preview { path, mode, page })
+            Ok(match request.load(&job.cancel)? {
+                Some((viewer, page)) => Outcome::ViewerPage(viewer, page),
+                None => Outcome::Notice("Kein weiterer Treffer.".into()),
+            })
         });
     }
 
     fn viewer_action(&mut self, command: &str) {
-        if self.job.is_some() {
-            return;
+        if self.job.is_none()
+            && let Some(request) = self
+                .viewer
+                .clone()
+                .and_then(|viewer| viewer.navigate(command))
+        {
+            self.read_viewer_page(request);
         }
-        let Some(viewer) = &mut self.viewer else {
-            return;
-        };
-        let (offset, mode) = match command {
-            "viewer-back" => (viewer.previous.pop().unwrap_or(0), viewer.mode),
-            "viewer-next" => {
-                viewer.previous.push(viewer.offset);
-                (viewer.next, viewer.mode)
+    }
+
+    pub(crate) fn viewer_control(&mut self, operation: i32, value: &str, option: i32) {
+        if self.job.is_none()
+            && let Some(viewer) = self.viewer.clone()
+        {
+            match viewer.control(operation, value, option) {
+                Ok(Some(request)) => self.read_viewer_page(request),
+                Ok(None) => (),
+                Err(error) => self.status(error),
             }
-            _ => {
-                viewer.previous.clear();
-                (
-                    0,
-                    if viewer.mode == PreviewMode::Text {
-                        PreviewMode::Hex
-                    } else {
-                        PreviewMode::Text
-                    },
-                )
-            }
-        };
-        let path = viewer.path.clone();
-        self.read_preview(path, offset, mode);
+        }
     }
 
     pub fn show_preview(&mut self, path: PathBuf, mode: PreviewMode, page: Preview) {
-        let previous = self
-            .viewer
-            .take()
-            .filter(|viewer| viewer.path == path)
-            .map(|viewer| viewer.previous)
-            .unwrap_or_default();
+        self.show_viewer_page(Viewer::new(path, mode), page);
+    }
+
+    pub(crate) fn show_viewer_page(&mut self, mut viewer: Viewer, page: Preview) {
         let ui = self.ui();
         let title = self
             .staged_preview
             .as_ref()
-            .filter(|archive| archive.path == path)
-            .map_or_else(|| display_path(&path), |archive| archive.title.clone());
+            .filter(|archive| archive.path == viewer.path)
+            .map_or_else(
+                || display_path(&viewer.path),
+                |archive| archive.title.clone(),
+            );
         ui.set_dialog_title(title.into());
-        ui.set_dialog_description(
-            format!("Bytes {}–{} / {}", page.offset, page.next, page.length).into(),
-        );
+        ui.set_dialog_description(viewer.description(&page).into());
+        viewer.update_page(&page);
         ui.set_dialog_value(page.text.into());
         ui.set_dialog_options(strings(std::iter::empty::<&str>()));
-        ui.set_viewer_back(!previous.is_empty());
-        ui.set_viewer_next(page.next < page.length);
-        ui.set_viewer_mode(if mode == PreviewMode::Hex {
+        ui.set_viewer_back(!viewer.previous.is_empty());
+        ui.set_viewer_next(viewer.next < viewer.length);
+        ui.set_viewer_mode(if viewer.mode == PreviewMode::Hex {
             "hex".into()
         } else {
             "text".into()
         });
+        ui.set_viewer_encoding(viewer.encoding_index());
         ui.set_dialog_kind("viewer".into());
-        self.viewer = Some(Viewer {
-            path,
-            mode,
-            offset: page.offset,
-            next: page.next,
-            previous,
-        });
+        self.viewer = Some(viewer);
     }
 }
 
@@ -2484,6 +3521,31 @@ fn tc_shortcut_command(name: &str) -> Option<&'static str> {
     }
 }
 
+pub(crate) fn valid_button_command(line: &str) -> bool {
+    compatibility_command(line).is_some()
+        || COMMANDS.iter().any(|(label, command)| {
+            command.eq_ignore_ascii_case(line) || label.eq_ignore_ascii_case(line)
+        })
+        || line
+            .split_once(char::is_whitespace)
+            .is_some_and(|(verb, arguments)| {
+                !arguments.trim().is_empty()
+                    && matches!(
+                        verb.to_ascii_lowercase().as_str(),
+                        "cd" | "opentabs"
+                            | "appendtabs"
+                            | "savetabs"
+                            | "savetabsl"
+                            | "savetabsr"
+                            | "savetabs2"
+                            | "savetabs2l"
+                            | "savetabs2r"
+                            | "cm_switchignorelist"
+                            | "2922"
+                    )
+            })
+}
+
 fn compatibility_command(name: &str) -> Option<&'static str> {
     let name = name.to_ascii_lowercase();
     if let Some((command, parameter)) = name.split_once(char::is_whitespace) {
@@ -2505,7 +3567,13 @@ fn compatibility_command(name: &str) -> Option<&'static str> {
         "cm_list" => Some("view"),
         "cm_edit" => Some("edit"),
         "cm_renameonly" => Some("rename"),
+        "cm_encode" | "562" => Some("encode-files"),
+        "cm_decode" | "563" => Some("decode-files"),
         "cm_switchhidsys" => Some("hidden"),
+        "cm_switchignorelist" | "2922" => Some("ignore-toggle"),
+        "cm_srcexecs" | "311" => Some("only-programs"),
+        "cm_srcallfiles" | "312" => Some("clear-filter"),
+        "cm_showonlyselected" | "2023" => Some("only-marked"),
         "cm_verticalpanels" => Some("stacked"),
         "cm_executedos" => Some("terminal"),
         "cm_copynamestoclip" | "2017" => Some("copy-names"),
@@ -2515,7 +3583,7 @@ fn compatibility_command(name: &str) -> Option<&'static str> {
         "cm_copyfiledetailstoclip" | "2036" => Some("copy-details"),
         "cm_rereadsource" => Some("refresh"),
         "cm_searchfor" => Some("search"),
-        "cm_multirenamefiles" => Some("multi-rename"),
+        "cm_multirenamefiles" | "multirename" => Some("multi-rename"),
         "cm_filesync" => Some("sync"),
         "cm_ftpconnect" | "550" => Some("ftp-profiles"),
         "cm_ftpnew" | "551" => Some("ftp-connect"),
@@ -2547,8 +3615,25 @@ fn compatibility_command(name: &str) -> Option<&'static str> {
         "cm_gotoroot" => Some("root"),
         "cm_srcquickview" => Some("quick-view"),
         "cm_config" | "cm_layoutconfig" => Some("settings"),
-        "cm_srcshort" => Some("short-view"),
-        "cm_srclong" => Some("long-view"),
+        "cm_srcshort" | "301" => Some("short-view"),
+        "cm_srclong" | "302" => Some("long-view"),
+        "cm_srcthumbs" | "269" => Some("thumbnail-view"),
+        "cm_srccomments" | "300" => Some("comment-view"),
+        "cm_editcomment" | "2700" => Some("edit-comment"),
+        "cm_setattrib" | "502" => Some("edit-metadata"),
+        "cm_printfile" => Some("print-file"),
+        "cm_printdir" => Some("print-directory"),
+        "cm_printdirsub" | "2028" => Some("print-directory-recursive"),
+        "cm_srctree" | "303" => Some("directory-tree"),
+        "cm_srccustomviewmenu" | "270" => Some("column-sets"),
+        "cm_srcviewmodelist" | "333" => Some("view-modes"),
+        "cm_toggleautoviewmodeswitch" | "2947" => Some("auto-view-toggle"),
+        "cm_separatetreeoff" | "3200" => Some("separate-tree-off"),
+        "cm_separatetree1" | "3201" => Some("separate-tree-one"),
+        "cm_separatetree2" | "3202" => Some("separate-tree-two"),
+        "cm_switchseparatetree" | "3203" => Some("separate-tree-cycle"),
+        "cm_toggleseparatetree1" | "3204" => Some("separate-tree-toggle-one"),
+        "cm_toggleseparatetree2" | "3205" => Some("separate-tree-toggle-two"),
         _ => None,
     }
 }

@@ -5,16 +5,21 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+base64 = "0.22"
 blake3 = "1"
+brotli-decompressor = "5"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 crc32fast = "1"
 encoding_rs = "0.8"
 filetime = "0.2"
 globset = "0.4"
+getrandom = "0.4"
 md-5 = "0.10"
+mailparse = "0.17"
 regex = "1"
 serde.workspace = true
 serde_json.workspace = true
+sevenz-rust2 = { version = "0.25.0", default-features = false, features = ["compress", "aes256", "bzip2", "deflate", "ppmd", "brotli", "lz4", "zstd"] }
 sha1 = "0.10"
 sha2 = "0.10"
 sha3 = "0.10"
@@ -22,9 +27,12 @@ similar = "2"
 tempfile.workspace = true
 walkdir = "2"
 zeroize = "1"
-zip = { version = "9.4.1", default-features = false, features = [
+zip = { version = "=9.4.1", default-features = false, features = [
     "aes-crypto", "bzip2", "deflate", "deflate64", "legacy-zip", "lzma", "ppmd", "xz", "zstd",
 ] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl"] }
 
 [lints]
 workspace = true

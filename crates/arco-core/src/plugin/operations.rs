@@ -20,6 +20,10 @@ pub enum WcxOperation {
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub enum WfxOperation {
+    Overwrite {
+        operation: Box<WfxOperation>,
+        expected: WfxVersion,
+    },
     Download {
         remote: String,
         local: PathBuf,
@@ -79,6 +83,28 @@ pub enum WfxOperation {
     DeleteTree {
         path: String,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct WfxVersion {
+    pub size: u64,
+    pub modified: u64,
+    pub attributes: u32,
+}
+
+impl WfxOperation {
+    pub fn file_destination(&self) -> Option<&str> {
+        match self {
+            Self::Upload { remote, .. }
+            | Self::UploadMove {
+                remote,
+                tree: false,
+                ..
+            } => Some(remote),
+            Self::Copy { to, .. } | Self::Rename { to, .. } => Some(to),
+            _ => None,
+        }
+    }
 }
 
 pub fn operate(
@@ -206,6 +232,7 @@ fn edit_archive(
             expected.push(Row {
                 name: member,
                 value: format!("{} B", metadata.len()),
+                ..Default::default()
             });
             WcxOperation::Pack {
                 source: source_copy,
@@ -289,7 +316,7 @@ fn wfx(
             "Ein WFX-Ordnerdownload benötigt den Mehrfachauftrag.",
         ));
     }
-    let staged = stage_wfx(operation, cancel)?;
+    let staged = stage_wfx(operation, cancel, false)?;
     let rows = inspect_interactive(
         Interface::Wfx,
         plugin,
@@ -306,7 +333,7 @@ fn wfx(
             io::Error::other(format!("{error}. Prüfe den Zustand im Plugin-Dateisystem."))
         }
     })?;
-    staged.finish(cancel, None)?;
+    staged.finish(cancel, None, None)?;
     Ok(rows)
 }
 
@@ -318,12 +345,21 @@ struct StagedWfx {
 }
 
 type RenameDirectory = fn(&Path, &Path) -> io::Result<()>;
+pub type DownloadConflict<'a> =
+    dyn Fn(&str, files::FileConflict<'_>) -> io::Result<files::ConflictDecision> + 'a;
+
+enum Finish {
+    Completed,
+    Skipped,
+    Remove(WfxOperation),
+}
 
 struct DownloadOutput {
     staged: PathBuf,
     target: PathBuf,
+    remote: String,
     tree: bool,
-    remove_remote: Option<String>,
+    moving: bool,
 }
 
 struct LocalMove {
@@ -337,7 +373,8 @@ impl StagedWfx {
         self,
         cancel: &AtomicBool,
         rename_directory: Option<RenameDirectory>,
-    ) -> io::Result<Option<WfxOperation>> {
+        resolve: Option<&DownloadConflict<'_>>,
+    ) -> io::Result<Finish> {
         if let Some(LocalMove {
             source,
             staged,
@@ -352,31 +389,139 @@ impl StagedWfx {
         }
         if let Some(DownloadOutput {
             staged,
-            target,
+            mut target,
+            remote,
             tree,
-            remove_remote,
+            moving,
         }) = self.output
         {
+            files::check_cancel(cancel)?;
+            let source = files::regular_metadata(&staged)?;
+            let mut previous = None;
+            if let Some(resolve) = resolve {
+                match fs::symlink_metadata(&target) {
+                    Ok(existing)
+                        if tree && !moving && existing.is_dir() && !files::is_link(&existing) =>
+                    {
+                        let on_conflict = |conflict: files::FileConflict<'_>| {
+                            let member = conflict
+                                .source
+                                .strip_prefix(&staged)
+                                .map_err(io::Error::other)?;
+                            resolve(&format!("{remote}\\{}", member.display()), conflict)
+                        };
+                        let report = files::transfer(
+                            std::slice::from_ref(&staged),
+                            target.parent().expect("resolved target"),
+                            files::Transfer::Move,
+                            files::TransferPolicy {
+                                resolve_conflict: Some(&on_conflict),
+                                ..files::Conflict::Fail.into()
+                            },
+                            cancel,
+                            rename_directory,
+                            |_| {},
+                        )?;
+                        if report.cancelled {
+                            return Err(io::ErrorKind::Interrupted.into());
+                        }
+                        if !report.errors.is_empty() {
+                            return Err(io::Error::other(report.errors.join("\n")));
+                        }
+                        return Ok(if report.completed == 0 {
+                            Finish::Skipped
+                        } else {
+                            Finish::Completed
+                        });
+                    }
+                    Ok(existing) => {
+                        let decision = resolve(
+                            &remote,
+                            files::FileConflict {
+                                source: &staged,
+                                target: &target,
+                                source_metadata: &source,
+                                target_metadata: &existing,
+                            },
+                        )?;
+                        files::check_cancel(cancel)?;
+                        if let files::ConflictDecision::RenameTo(name) = decision {
+                            target.set_file_name(files::leaf_name(&name)?);
+                        } else if let files::ConflictDecision::Apply(rule) = decision {
+                            match rule {
+                                files::Conflict::Skip => return Ok(Finish::Skipped),
+                                files::Conflict::Rename => {
+                                    target = files::unused_copy_name(&target, cancel)?
+                                }
+                                files::Conflict::Replace
+                                | files::Conflict::Newer
+                                | files::Conflict::Larger
+                                    if source.is_file()
+                                        && existing.is_file()
+                                        && !files::is_link(&existing) =>
+                                {
+                                    if (rule == files::Conflict::Newer
+                                        && source.modified()? <= existing.modified()?)
+                                        || (rule == files::Conflict::Larger
+                                            && source.len() <= existing.len())
+                                    {
+                                        return Ok(Finish::Skipped);
+                                    }
+                                    previous = Some(existing);
+                                }
+                                _ => return Err(io::ErrorKind::AlreadyExists.into()),
+                            }
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+                    Err(error) => return Err(error),
+                }
+            }
             if tree {
-                if !files::regular_metadata(&staged)?.is_dir() {
+                if !source.is_dir() {
                     return Err(invalid("Das Plugin hat keinen regulären Ordner geliefert."));
                 }
                 files::check_cancel(cancel)?;
                 rename_directory.ok_or(io::ErrorKind::Unsupported)?(&staged, &target)?;
             } else {
-                publish(staged, &target, None, cancel)?;
+                publish(staged, &target, previous.as_ref(), cancel)?;
             }
-            return Ok(remove_remote.map(|remote| WfxOperation::RemoveDownloaded {
-                remote,
-                local: target,
-                tree,
-            }));
+            if moving {
+                return Ok(Finish::Remove(WfxOperation::RemoveDownloaded {
+                    remote,
+                    local: target,
+                    tree,
+                }));
+            }
         }
-        Ok(None)
+        Ok(Finish::Completed)
     }
 }
 
-fn stage_wfx(operation: WfxOperation, cancel: &AtomicBool) -> io::Result<StagedWfx> {
+fn stage_wfx(
+    operation: WfxOperation,
+    cancel: &AtomicBool,
+    conflicts: bool,
+) -> io::Result<StagedWfx> {
+    if let WfxOperation::Overwrite {
+        operation,
+        expected,
+    } = operation
+    {
+        if operation.file_destination().is_none()
+            || (!conflicts && matches!(*operation, WfxOperation::UploadMove { .. }))
+        {
+            return Err(invalid(
+                "Nur einzelne WFX-Dateien können überschrieben werden.",
+            ));
+        }
+        let mut staged = stage_wfx(*operation, cancel, conflicts)?;
+        staged.operation = WfxOperation::Overwrite {
+            operation: Box::new(staged.operation),
+            expected,
+        };
+        return Ok(staged);
+    }
     files::check_cancel(cancel)?;
     let operation = normalize_wfx(operation)?;
     let tree = matches!(
@@ -394,18 +539,21 @@ fn stage_wfx(operation: WfxOperation, cancel: &AtomicBool) -> io::Result<StagedW
         WfxOperation::Download { remote, local }
         | WfxOperation::DownloadTree { remote, local }
         | WfxOperation::DownloadMove { remote, local, .. } => {
-            let local = destination(&local)?;
+            let local = if conflicts {
+                resolved_target(&local)?
+            } else {
+                destination(&local)?
+            };
             let workspace = temp_near(&local)?;
             let staged = workspace.path().join(leaf(&local)?);
-            let remove_remote = moving.then(|| remote.clone());
             let operation = if tree {
                 WfxOperation::DownloadTree {
-                    remote,
+                    remote: remote.clone(),
                     local: staged.clone(),
                 }
             } else {
                 WfxOperation::Download {
-                    remote,
+                    remote: remote.clone(),
                     local: staged.clone(),
                 }
             };
@@ -414,8 +562,9 @@ fn stage_wfx(operation: WfxOperation, cancel: &AtomicBool) -> io::Result<StagedW
                 output: Some(DownloadOutput {
                     staged,
                     target: local,
+                    remote,
                     tree,
-                    remove_remote,
+                    moving,
                 }),
                 local_move: None,
                 _workspace: Some(workspace),
@@ -479,6 +628,7 @@ pub fn wfx_batch(
     mut progress: impl FnMut(String),
     prompt: &mut PromptHandler<'_>,
     rename_directory: RenameDirectory,
+    resolve: Option<&DownloadConflict<'_>>,
 ) -> files::TransferReport {
     let mut report = files::TransferReport::default();
     const CHUNK: usize = 48;
@@ -490,7 +640,7 @@ pub fn wfx_batch(
         }
         let mut staged = Vec::new();
         for (label, operation) in items_group {
-            match stage_wfx(operation.clone(), cancel) {
+            match stage_wfx(operation.clone(), cancel, resolve.is_some()) {
                 Ok(operation) => staged.push((label, operation)),
                 Err(error) => report.errors.push(format!("{label}: {error}")),
             }
@@ -519,9 +669,14 @@ pub fn wfx_batch(
             if !row.value.is_empty() {
                 report.errors.push(format!("{label}: {}", row.value));
             } else {
-                match staged.finish(cancel, Some(rename_directory)) {
-                    Ok(Some(operation)) => cleanup.push((label, operation)),
-                    Ok(None) => report.completed += 1,
+                match staged.finish(cancel, Some(rename_directory), resolve) {
+                    Ok(Finish::Remove(operation)) => cleanup.push((label, operation)),
+                    Ok(Finish::Completed) => report.completed += 1,
+                    Ok(Finish::Skipped) => report.skipped += 1,
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                        report.cancelled = true;
+                        break;
+                    }
                     Err(error) => report.errors.push(format!("{label}: {error}")),
                 }
             }
@@ -581,6 +736,9 @@ fn wfx_group(
 
 fn normalize_wfx(operation: WfxOperation) -> io::Result<WfxOperation> {
     Ok(match operation {
+        WfxOperation::Overwrite { .. } => {
+            return Err(invalid("Ungültiger verschachtelter WFX-Auftrag."));
+        }
         WfxOperation::Download { remote, local } => WfxOperation::Download {
             remote: checked_remote(&remote)?,
             local,
@@ -903,6 +1061,46 @@ fn invalid(message: &str) -> io::Error {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wfx_download_conflicts_preserve_target_on_skip_and_use_renamed_path_for_cleanup() {
+        let fixture = tempfile::tempdir().unwrap();
+        let target = fixture.path().join("sample.txt");
+        let cancel = AtomicBool::new(false);
+        fs::write(&target, b"existing").unwrap();
+        let stage = || {
+            let output = stage_wfx(
+                WfxOperation::DownloadMove {
+                    remote: r"\files\sample.txt".into(),
+                    local: target.clone(),
+                    tree: false,
+                },
+                &cancel,
+                true,
+            )
+            .unwrap();
+            fs::write(&output.output.as_ref().unwrap().staged, b"downloaded").unwrap();
+            output
+        };
+        let skip = |_: &str, _: files::FileConflict<'_>| Ok(files::Conflict::Skip.into());
+        assert!(matches!(
+            stage().finish(&cancel, None, Some(&skip)).unwrap(),
+            Finish::Skipped
+        ));
+        assert_eq!(fs::read(&target).unwrap(), b"existing");
+        let rename = |remote: &str, _: files::FileConflict<'_>| {
+            assert_eq!(remote, r"\files\sample.txt");
+            Ok(files::Conflict::Rename.into())
+        };
+        let Finish::Remove(WfxOperation::RemoveDownloaded { local, .. }) =
+            stage().finish(&cancel, None, Some(&rename)).unwrap()
+        else {
+            panic!("expected verified removal to be scheduled");
+        };
+        assert_eq!(local.file_name().unwrap(), "sample (2).txt");
+        assert_eq!(fs::read(local).unwrap(), b"downloaded");
+        assert_eq!(fs::read(&target).unwrap(), b"existing");
+    }
 
     #[test]
     fn remote_paths_reject_root_wildcards_and_parent_components() {

@@ -22,6 +22,7 @@ pub struct ExternalArchiver {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Format {
     SevenZip,
+    SevenZipSfx,
     Tar,
     Gzip,
 }
@@ -36,39 +37,100 @@ pub struct Entry {
 }
 
 pub fn is_supported(path: &Path) -> bool {
-    path.extension()
-        .and_then(|value| value.to_str())
-        .is_some_and(|value| {
-            matches!(
-                value.to_ascii_lowercase().as_str(),
-                "7z" | "arj"
-                    | "lzh"
-                    | "lha"
-                    | "rar"
-                    | "cab"
-                    | "tar"
-                    | "gz"
-                    | "tgz"
-                    | "xz"
-                    | "bz2"
-                    | "zst"
+    is_first_volume(path)
+        || path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| {
+                matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "7z" | "arj"
+                        | "lzh"
+                        | "lha"
+                        | "rar"
+                        | "cab"
+                        | "tar"
+                        | "gz"
+                        | "tgz"
+                        | "xz"
+                        | "bz2"
+                        | "zst"
+                        | "tzst"
+                )
+            })
+}
+
+pub(crate) fn is_first_volume(path: &Path) -> bool {
+    crate::archive_parts::kind(path).is_some()
+}
+
+pub fn is_sfx(path: &Path) -> bool {
+    sfx_offset(path).is_some()
+}
+
+pub(crate) fn sfx_offset(path: &Path) -> Option<u64> {
+    if !path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+    {
+        return None;
+    }
+    let Ok(file) = File::open(path) else {
+        return None;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return None;
+    };
+    let mut bytes = Vec::new();
+    if file.take(2 * 1024 * 1024).read_to_end(&mut bytes).is_err() || !bytes.starts_with(b"MZ") {
+        return None;
+    }
+    bytes.windows(32).enumerate().find_map(|(offset, header)| {
+        if !header.starts_with(b"7z\xbc\xaf\x27\x1c") {
+            return None;
+        }
+        let word =
+            |range: std::ops::Range<usize>| u64::from_le_bytes(header[range].try_into().unwrap());
+        let start_crc = u32::from_le_bytes(header[8..12].try_into().unwrap());
+        (crc32fast::hash(&header[12..32]) == start_crc
+            && (offset as u64 + 32)
+                .checked_add(word(12..20))
+                .and_then(|next| next.checked_add(word(20..28)))
+                .is_some_and(|end| end <= metadata.len()))
+        .then_some(offset as u64)
+    })
+}
+
+fn configured_executable() -> Option<PathBuf> {
+    std::env::var_os("ARCO_7ZIP_PATH")
+        .map(PathBuf::from)
+        .or_else(|| {
+            let program = std::env::current_exe().ok()?;
+            let adjacent = program.parent()?.join("7zip").join("7z.exe");
+            adjacent.is_file().then_some(adjacent)
+        })
+        .or_else(|| {
+            std::env::var_os("ProgramFiles")
+                .map(|folder| PathBuf::from(folder).join("7-Zip").join("7z.exe"))
+        })
+}
+
+pub(crate) fn sfx_module() -> io::Result<PathBuf> {
+    std::env::var_os("ARCO_7ZIP_SFX")
+        .map(PathBuf::from)
+        .or_else(|| configured_executable().map(|path| path.with_file_name("7z.sfx")))
+        .filter(|module| module.is_absolute() && module.is_file())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "Das Modul 7z.sfx fehlt neben 7z.exe. ARCO_7ZIP_SFX kann auf das Modul zeigen.",
             )
         })
 }
 
 impl ExternalArchiver {
     pub fn discover(cancel: &AtomicBool) -> io::Result<Self> {
-        let executable = std::env::var_os("ARCO_7ZIP_PATH")
-            .map(PathBuf::from)
-            .or_else(|| {
-                let program = std::env::current_exe().ok()?;
-                let adjacent = program.parent()?.join("7zip").join("7z.exe");
-                adjacent.is_file().then_some(adjacent)
-            })
-            .or_else(|| {
-                std::env::var_os("ProgramFiles")
-                    .map(|folder| PathBuf::from(folder).join("7-Zip").join("7z.exe"))
-            })
+        let executable = configured_executable()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "7-Zip wurde nicht gefunden"))?;
         Self::open(executable, cancel)
     }
@@ -146,6 +208,7 @@ impl ExternalArchiver {
             |entry| entry.directory,
             cancel,
         )?;
+        let zone = crate::archive_zone::ArchiveZone::read(archive, cancel)?;
         let mut completed = 0;
         for (entry, relative) in entries {
             files::check_cancel(cancel)?;
@@ -170,6 +233,7 @@ impl ExternalArchiver {
                 .arg(archive)
                 .arg(&entry.raw_path);
             stream_to_file(command, output.reopen()?, entry.size, cancel)?;
+            zone.apply(output.path())?;
             crate::archive_view::preserve_timestamp(output.as_file(), entry.modified)?;
             output.as_file().sync_all()?;
             files::check_cancel(cancel)?;
@@ -239,6 +303,7 @@ impl ExternalArchiver {
         fs::write(&list, items.join("\n"))?;
         let (format_flag, staging_name) = match format {
             Format::SevenZip => ("-t7z", "archive-stage.7z"),
+            Format::SevenZipSfx => ("-t7z", "archive-stage.exe"),
             Format::Tar => ("-ttar", "archive-stage.tar"),
             Format::Gzip => ("-tgzip", "archive-stage.gz"),
         };
@@ -248,10 +313,27 @@ impl ExternalArchiver {
         let mut command = self.command();
         command
             .current_dir(base)
-            .args(["a", format_flag, "-spd", "-scsUTF-8", "-bso0"])
-            .arg(&stage)
-            .arg(list_argument);
+            .args(["a", format_flag, "-spd", "-scsUTF-8", "-bso0"]);
+        if format == Format::SevenZipSfx {
+            let module = std::env::var_os("ARCO_7ZIP_SFX")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| self.executable.with_file_name("7z.sfx"));
+            if !module.is_absolute() || !module.is_file() {
+                return Err(io::Error::other(
+                    "Das 7-Zip-SFX-Modul 7z.sfx fehlt neben 7z.exe. Alternativ kann ARCO_7ZIP_SFX auf das Modul zeigen.",
+                ));
+            }
+            let mut argument = OsString::from("-sfx");
+            argument.push(module);
+            command.arg(argument);
+        }
+        command.arg(&stage).arg(list_argument);
         capture(command, 64 * 1024, cancel)?;
+        if format == Format::SevenZipSfx && !is_sfx(&stage) {
+            return Err(io::Error::other(
+                "7-Zip hat kein gültiges Windows-SFX-Archiv erzeugt.",
+            ));
+        }
         self.test(&stage, cancel)?;
         fs::OpenOptions::new()
             .write(true)
@@ -374,7 +456,16 @@ fn parse_list(bytes: &[u8]) -> io::Result<Vec<Entry>> {
     Ok(entries)
 }
 
-fn capture(mut command: Command, limit: u64, cancel: &AtomicBool) -> io::Result<Vec<u8>> {
+fn capture(command: Command, limit: u64, cancel: &AtomicBool) -> io::Result<Vec<u8>> {
+    capture_output("7-Zip", command, limit, cancel)
+}
+
+pub(crate) fn capture_output(
+    tool: &str,
+    mut command: Command,
+    limit: u64,
+    cancel: &AtomicBool,
+) -> io::Result<Vec<u8>> {
     files::check_cancel(cancel)?;
     let mut child = command
         .stdout(Stdio::piped())
@@ -385,11 +476,13 @@ fn capture(mut command: Command, limit: u64, cancel: &AtomicBool) -> io::Result<
         let mut data = Vec::new();
         stdout.take(limit + 1).read_to_end(&mut data)?;
         if data.len() as u64 > limit {
-            return Err(io::Error::other("7-Zip output exceeds the listing limit"));
+            return Err(io::Error::other(
+                "Die Ausgabe des Archiv-Adapters überschreitet das Limit.",
+            ));
         }
         Ok(data)
     });
-    let status = wait(&mut child, cancel);
+    let status = wait(tool, &mut child, cancel);
     let bytes = reader
         .join()
         .map_err(|_| io::Error::other("archive reader failed"))?;
@@ -398,6 +491,16 @@ fn capture(mut command: Command, limit: u64, cancel: &AtomicBool) -> io::Result<
 }
 
 fn stream_to_file(
+    command: Command,
+    output: File,
+    expected: u64,
+    cancel: &AtomicBool,
+) -> io::Result<()> {
+    stream_output("7-Zip", command, output, expected, cancel)
+}
+
+pub(crate) fn stream_output(
+    tool: &str,
     mut command: Command,
     mut output: File,
     expected: u64,
@@ -414,7 +517,7 @@ fn stream_to_file(
         output.flush()?;
         Ok::<_, io::Error>(length)
     });
-    let status = wait(&mut child, cancel);
+    let status = wait(tool, &mut child, cancel);
     let length = reader
         .join()
         .map_err(|_| io::Error::other("archive stream failed"))?;
@@ -425,14 +528,14 @@ fn stream_to_file(
     Ok(())
 }
 
-fn wait(child: &mut Child, cancel: &AtomicBool) -> io::Result<()> {
+fn wait(tool: &str, child: &mut Child, cancel: &AtomicBool) -> io::Result<()> {
     loop {
         let state = files::check_cancel(cancel).and_then(|()| child.try_wait());
         match state {
             Ok(Some(status)) if status.success() => return Ok(()),
             Ok(Some(status)) => {
                 return Err(io::Error::other(format!(
-                    "7-Zip beendet mit Status {}. Prüfe Archiv, Format und eventuellen Passwortschutz.",
+                    "{tool} beendet mit Status {}. Prüfe Archiv, Format und eventuellen Passwortschutz.",
                     status.code().unwrap_or(-1)
                 )));
             }
@@ -513,6 +616,16 @@ mod tests {
             );
         }
         let gzip = fixture.path().join("test.gz");
+        let native = fixture.path().join("native.7z");
+        crate::archive_view::pack_7z(
+            std::slice::from_ref(&nested),
+            &source,
+            &native,
+            None,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(engine.test(&native, &cancel).unwrap(), 2);
         let output = destination.join("gzip");
         fs::create_dir(&output).unwrap();
         engine
@@ -530,6 +643,194 @@ mod tests {
             fs::read(output.join("Probe [ä].txt")).unwrap(),
             b"archive bytes"
         );
+
+        for (format, name) in [("-t7z", "multi.7z"), ("-tzip", "multi.zip")] {
+            let payload = "volume.txt";
+            let bytes = b"split archive fixture\n".repeat(800);
+            fs::write(fixture.path().join(payload), &bytes).unwrap();
+            let mut command = engine.command();
+            command
+                .current_dir(fixture.path())
+                .args(["a", format, "-v2k", "-mx0", name, payload]);
+            capture(command, LIST_LIMIT, &cancel).unwrap();
+            let first = fixture.path().join(format!("{name}.001"));
+            assert!(crate::archive_view::is_supported(&first));
+            assert_eq!(crate::archive_view::test(&first, None, &cancel).unwrap(), 1);
+            let catalog = crate::archive_view::Catalog::read(&first, &cancel).unwrap();
+            assert!(catalog.unchanged(&first));
+            let entries = catalog.rows(Path::new("")).unwrap();
+            assert_eq!(entries[0].path, Path::new(payload));
+            let output = tempfile::tempdir().unwrap();
+            let selection = crate::archive_view::Selection::preview(Path::new(payload)).unwrap();
+            assert_eq!(
+                crate::archive_view::extract(&first, output.path(), &selection, None, &cancel)
+                    .unwrap(),
+                1
+            );
+            assert_eq!(fs::read(output.path().join(payload)).unwrap(), bytes);
+            fs::remove_file(fixture.path().join(format!("{name}.002"))).unwrap();
+            assert!(!catalog.unchanged(&first));
+            assert!(crate::archive_view::test(&first, None, &cancel).is_err());
+        }
+
+        let encrypted_payload = "protected.txt";
+        let data = b"encrypted split fixture\n".repeat(220);
+        fs::write(fixture.path().join(encrypted_payload), &data).unwrap();
+        for (format, encryption, name, protected_header) in [
+            ("-t7z", "-mhe=on", "hidden.7z", true),
+            ("-t7z", "-mhe=off", "visible.7z", false),
+            ("-tzip", "-mem=AES256", "external.zip", false),
+        ] {
+            let mut command = engine.command();
+            command.current_dir(fixture.path()).args([
+                "a",
+                format,
+                "-v2k",
+                "-mx0",
+                "-pfixture",
+                encryption,
+                name,
+                encrypted_payload,
+            ]);
+            capture(command, LIST_LIMIT, &cancel).unwrap();
+            let first = fixture.path().join(format!("{name}.001"));
+            let catalog =
+                crate::archive_view::Catalog::read_with_password(&first, Some("fixture"), &cancel)
+                    .unwrap();
+            assert_eq!(catalog.header_encrypted(), protected_header);
+            assert!(catalog.contains_encrypted_entries());
+            let output = tempfile::tempdir().unwrap();
+            assert_eq!(
+                crate::archive_view::extract_all(&first, output.path(), Some("fixture"), &cancel)
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                fs::read(output.path().join(encrypted_payload)).unwrap(),
+                data
+            );
+        }
+
+        for name in ["arco.7z", "arco.zip"] {
+            let archive = fixture.path().join(name);
+            let count = crate::archive_view::pack_split(
+                std::slice::from_ref(&nested),
+                &source,
+                &archive,
+                80,
+                None,
+                &cancel,
+            )
+            .unwrap();
+            assert!(count > 1);
+            let first = fixture.path().join(format!("{name}.001"));
+            assert_eq!(engine.test(&first, &cancel).unwrap(), 2);
+            let output = tempfile::tempdir().unwrap();
+            assert_eq!(engine.extract(&first, output.path(), &cancel).unwrap(), 1);
+            assert_eq!(
+                fs::read(output.path().join("Unterordner/Probe [ä].txt")).unwrap(),
+                b"archive bytes"
+            );
+            assert!(
+                crate::archive_view::pack_split(
+                    std::slice::from_ref(&nested),
+                    &source,
+                    &archive,
+                    80,
+                    None,
+                    &cancel,
+                )
+                .is_err()
+            );
+        }
+
+        for name in ["native-aes.7z", "native-aes.zip"] {
+            let archive = fixture.path().join(name);
+            let count = crate::archive_view::pack_split(
+                std::slice::from_ref(&nested),
+                &source,
+                &archive,
+                80,
+                Some("fixture"),
+                &cancel,
+            )
+            .unwrap();
+            assert!(count > 1);
+            let first = fixture.path().join(format!("{name}.001"));
+            let mut command = engine.command();
+            command.args(["t", "-pfixture", "--"]).arg(&first);
+            capture(command, LIST_LIMIT, &cancel).unwrap();
+        }
+
+        let mut command = engine.command();
+        command.current_dir(fixture.path()).args([
+            "a",
+            "-tzip",
+            "-mem=ZipCrypto",
+            "-pfixture",
+            "-v2k",
+            "-mx0",
+            "external-legacy.zip",
+            encrypted_payload,
+        ]);
+        capture(command, LIST_LIMIT, &cancel).unwrap();
+        let first = fixture.path().join("external-legacy.zip.001");
+        crate::archive_view::edit(
+            &first,
+            archives::ZipEdit::Rename(encrypted_payload.into(), "legacy-renamed.txt".into()),
+            Some("fixture"),
+            &cancel,
+        )
+        .unwrap();
+        let mut command = engine.command();
+        command.args(["t", "-pfixture", "--"]).arg(first);
+        capture(command, LIST_LIMIT, &cancel).unwrap();
+
+        if sfx_module().is_ok() {
+            let plain_sfx = fixture.path().join("plain.exe");
+            engine
+                .pack(
+                    std::slice::from_ref(&nested),
+                    &source,
+                    &plain_sfx,
+                    Format::SevenZipSfx,
+                    &cancel,
+                )
+                .unwrap();
+            assert_eq!(
+                crate::archive_view::test(&plain_sfx, None, &cancel).unwrap(),
+                2
+            );
+            let sfx = fixture.path().join("protected.exe");
+            crate::archive_view::pack_encrypted_7z_sfx(
+                std::slice::from_ref(&nested),
+                &source,
+                &sfx,
+                "fixture",
+                &cancel,
+            )
+            .unwrap();
+            assert!(is_sfx(&sfx));
+            assert!(crate::archive_view::is_openable(&sfx));
+            assert!(!crate::archive_view::is_supported(&sfx));
+            let error = crate::archive_view::Catalog::read(&sfx, &cancel)
+                .err()
+                .unwrap();
+            assert!(crate::archive_view::needs_header_password(&error));
+            let output = tempfile::tempdir().unwrap();
+            assert_eq!(
+                crate::archive_view::extract_all(&sfx, output.path(), Some("fixture"), &cancel)
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                fs::read(output.path().join("Unterordner/Probe [ä].txt")).unwrap(),
+                b"archive bytes"
+            );
+            let mut command = engine.command();
+            command.args(["t", "-pfixture", "--"]).arg(&sfx);
+            capture(command, LIST_LIMIT, &cancel).unwrap();
+        }
     }
 
     #[test]

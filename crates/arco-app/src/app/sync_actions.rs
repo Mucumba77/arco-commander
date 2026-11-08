@@ -1,24 +1,25 @@
 use super::archive_actions::check_archive;
-use super::ftp_sync::{FtpPlan, FtpRelayPlan};
+use super::ftp_sync::{FtpPlan, FtpRelayPlan, ftp_ignores};
 use super::{App, FtpEndpoint, Outcome, strings};
-use crate::commands::Pending;
+use crate::commands::{Dialog, Pending};
 use crate::panel::ArchiveTab;
 use crate::{SyncOptionsData, SyncRowData, display_path, human_size};
 use arco_core::archive_view::{self, Selection};
 use arco_core::files::{self, Kind, TransferReport};
+use arco_core::profile::SavedSyncProfile;
 use arco_core::sync::{
     self, Action, Comparison, EntryInfo, FileMasks, MarkRule, Mode, Options, PanelMarks, Plan, Row,
 };
 use arco_core::tools;
 use chrono::{DateTime, Local};
 use slint::{Model, ModelRc, VecModel};
-use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+use zeroize::Zeroizing;
 
 const LAST_USED: &str = "Letzte Einstellungen";
 
@@ -26,24 +27,54 @@ pub(crate) struct SyncSetup {
     source: SyncSource,
     labels: [String; 2],
     selected: Vec<PathBuf>,
+    fixed_roots: Option<[PathBuf; 2]>,
+}
+
+impl SyncSetup {
+    fn local_roots(&self) -> Option<&[PathBuf; 2]> {
+        match &self.source {
+            SyncSource::Disk { roots, archives } if archives.iter().all(Option::is_none) => {
+                Some(self.fixed_roots.as_ref().unwrap_or(roots))
+            }
+            _ => None,
+        }
+    }
+
+    fn selected_available(&self) -> bool {
+        if self.selected.is_empty() {
+            return false;
+        }
+        match (&self.fixed_roots, &self.source) {
+            (Some(fixed), SyncSource::Disk { roots, .. }) => fixed == roots,
+            _ => true,
+        }
+    }
+
+    fn displayed_roots(&self) -> [String; 2] {
+        self.fixed_roots.as_ref().map_or_else(
+            || self.labels.clone(),
+            |roots| roots.each_ref().map(|path| display_path(path)),
+        )
+    }
 }
 
 enum SyncSource {
     Disk {
         roots: [PathBuf; 2],
-        archive: Option<(usize, ArchiveTab)>,
+        archives: [Option<ArchiveTab>; 2],
     },
     Ftp {
         local: PathBuf,
         endpoint: FtpEndpoint,
+        profile: Option<String>,
     },
 }
 
 impl SyncSource {
-    fn archive(&self) -> Option<&(usize, ArchiveTab)> {
+    fn archives(&self) -> [Option<&ArchiveTab>; 2] {
         match self {
-            Self::Disk { archive, .. } => archive.as_ref(),
-            Self::Ftp { .. } => None,
+            Self::Disk { archives, .. } => archives.each_ref().map(Option::as_ref),
+            Self::Ftp { .. } => [None, None],
         }
     }
 }
@@ -53,7 +84,7 @@ pub(crate) struct SyncReview {
     rows: Vec<Row>,
     labels: [String; 2],
     visible: Vec<usize>,
-    archive: Option<StagedArchive>,
+    archives: [Option<StagedArchive>; 2],
     copy_only: bool,
 }
 
@@ -67,35 +98,47 @@ impl ReviewPlan {
     fn apply(
         self,
         rows: Vec<Row>,
-        cancel: &AtomicBool,
+        job: &super::JobContext,
+        copy_conflicts: bool,
         progress: impl FnMut(&Path),
-    ) -> TransferReport {
-        match self {
+    ) -> io::Result<TransferReport> {
+        let cancel = &job.cancel;
+        let mut skipped = 0;
+        let mut report = match self {
             Self::Disk(mut plan) => {
                 plan.rows = rows;
                 plan.apply(cancel, progress)
             }
             Self::Ftp(mut plan) => {
                 plan.rows = rows;
+                if copy_conflicts {
+                    skipped = plan.resolve_conflicts(job)?;
+                }
                 plan.apply(cancel, progress)
             }
             Self::FtpRelay(mut plan) => {
                 plan.rows = rows;
+                if copy_conflicts {
+                    skipped = plan.resolve_conflicts(job)?;
+                }
                 plan.apply(cancel, progress)
             }
-        }
+        };
+        report.skipped += skipped;
+        Ok(report)
     }
 }
 
 struct StagedArchive {
     storage: tempfile::TempDir,
     source: ArchiveTab,
+    password: Option<Zeroizing<String>>,
 }
 
 impl SyncReview {
     pub(crate) fn close(self) {
-        if let Some(archive) = self.archive {
-            std::thread::spawn(move || drop(archive));
+        if self.archives.iter().any(Option::is_some) {
+            std::thread::spawn(move || drop(self.archives));
         }
     }
 }
@@ -202,17 +245,11 @@ impl App {
             return;
         }
         let [left, right] = self.panels.each_ref().map(|panel| panel.current());
-        let archive = match (&left.archive, &right.archive) {
-            (Some(_), Some(_)) => {
-                self.status(
-                    "Öffne für den Archivabgleich einen lokalen Zielordner im anderen Fenster.",
-                );
-                return;
-            }
-            (Some(archive), None) => Some((0, archive.clone())),
-            (None, Some(archive)) => Some((1, archive.clone())),
-            _ => None,
-        };
+        if [left, right].iter().any(|tab| tab.wfx.is_some()) {
+            self.status("Der Verzeichnisabgleich benötigt lokale Ordner oder Archivordner.");
+            return;
+        }
+        let archives = [left.archive.clone(), right.archive.clone()];
         let roots = self
             .panels
             .each_ref()
@@ -237,10 +274,80 @@ impl App {
             })
             .collect();
         self.begin_sync(SyncSetup {
-            source: SyncSource::Disk { roots, archive },
+            source: SyncSource::Disk { roots, archives },
             labels,
             selected,
+            fixed_roots: None,
         });
+    }
+
+    pub(crate) fn open_sync_profiles(&mut self) {
+        let mut names = vec![LAST_USED.to_owned()];
+        let mut labels = vec![LAST_USED.to_owned()];
+        for with_roots in [true, false] {
+            for (name, profile) in self
+                .profile
+                .sync_profiles
+                .iter()
+                .filter(|(_, profile)| profile.roots.is_some() == with_roots)
+            {
+                names.push(name.clone());
+                labels.push(match &profile.roots {
+                    Some([left, right]) => {
+                        format!("{name} · {} ↔ {}", display_path(left), display_path(right))
+                    }
+                    None => format!("{name} · aktuelle Dateifenster"),
+                });
+            }
+        }
+        let options: Vec<_> = labels.iter().map(String::as_str).collect();
+        self.dialog(
+            "confirm",
+            Pending::SyncProfilePicker(names),
+            Dialog {
+                title: "Synchronisierungsprofil öffnen",
+                description: "Das gewählte Profil öffnet die Vergleichseinstellungen.",
+                options: &options,
+                ..Default::default()
+            },
+        );
+    }
+
+    pub(crate) fn open_sync_profile(&mut self, name: &str) -> io::Result<()> {
+        if self.job.is_some() || self.panels.iter().any(|panel| panel.loading) {
+            return Err(io::Error::other(
+                "Warte, bis beide Dateifenster und der laufende Auftrag fertig sind.",
+            ));
+        }
+        if self.panels.iter().all(|panel| panel.current().is_local()) {
+            self.open_sync();
+        } else {
+            let roots = self
+                .profile
+                .sync_profiles
+                .get(name)
+                .and_then(|profile| profile.roots.clone())
+                .ok_or_else(|| {
+                    io::Error::other("Dieses Profil benötigt zwei lokale Dateifenster.")
+                })?;
+            if roots.iter().any(|path| !path.is_absolute()) {
+                return Err(io::Error::other(
+                    "Das gespeicherte Verzeichnispaar enthält einen relativen Pfad.",
+                ));
+            }
+            let labels = roots.each_ref().map(|path| display_path(path));
+            self.begin_sync(SyncSetup {
+                source: SyncSource::Disk {
+                    roots,
+                    archives: [None, None],
+                },
+                labels,
+                selected: Vec::new(),
+                fixed_roots: None,
+            });
+        }
+        self.configure_sync(SyncOptionsData::default(), name, 0, ["", ""]);
+        Ok(())
     }
 
     pub(crate) fn open_ftp_sync(&mut self) {
@@ -267,22 +374,29 @@ impl App {
             .filter_map(|path| path.strip_prefix(&local).ok().map(Path::to_path_buf))
             .collect::<Vec<_>>();
         let remote = self.panels[1 - side].current();
-        if remote.ftp.as_ref().is_some_and(|tab| {
+        let matching_remote = remote.ftp.as_ref().filter(|tab| {
             std::sync::Arc::ptr_eq(&tab.location.session, &endpoint.0)
                 && tab.location.directory == endpoint.1
-        }) {
+        });
+        if matching_remote.is_some() {
             selected.extend(remote.marked_paths());
         }
         let labels = [display_path(&local), endpoint.1.to_string()];
         self.begin_sync(SyncSetup {
-            source: SyncSource::Ftp { local, endpoint },
+            source: SyncSource::Ftp {
+                local,
+                endpoint,
+                profile: matching_remote.and_then(|tab| tab.location.profile.clone()),
+            },
             labels,
             selected,
+            fixed_roots: None,
         });
     }
 
     pub(crate) fn open_ftp_copy(&mut self) {
         let other = 1 - self.active;
+        let ignore = self.ignore_list();
         if let (Some(source), Some(target)) =
             (&self.current().ftp, &self.panels[other].current().ftp)
         {
@@ -293,19 +407,31 @@ impl App {
             }
             let endpoints = [&source.location, &target.location]
                 .map(|location| (location.session.clone(), location.directory.clone()));
+            let profiles =
+                [&source.location, &target.location].map(|location| location.profile.clone());
             let labels = endpoints.each_ref().map(|endpoint| endpoint.1.to_string());
-            self.start_job(
+            self.enqueue_virtual_transfer(
                 "Bereite Kopie zwischen FTP-Ordnern vor …",
                 false,
                 move |job| {
-                    let mut plan = FtpRelayPlan::for_copy(endpoints, &selected, &job.cancel)?;
-                    let rows = std::mem::take(&mut plan.rows);
+                    let from =
+                        ftp_ignores(ignore.as_deref(), &endpoints[0].1, profiles[0].as_deref());
+                    let to =
+                        ftp_ignores(ignore.as_deref(), &endpoints[1].1, profiles[1].as_deref());
+                    let mut plan = FtpRelayPlan::for_copy(
+                        endpoints.clone(),
+                        &selected,
+                        &|path, directory| from(path, directory) || to(path, directory),
+                        &job.cancel,
+                    )?;
+                    let mut rows = std::mem::take(&mut plan.rows);
+                    super::ftp_sync::enable_copy_conflicts(&mut rows, 0);
                     Ok(Outcome::Sync(Box::new(SyncReview {
                         plan: ReviewPlan::FtpRelay(plan),
                         rows,
                         labels,
                         visible: Vec::new(),
-                        archive: None,
+                        archives: [None, None],
                         copy_only: true,
                     })))
                 },
@@ -331,6 +457,7 @@ impl App {
             .expect("remote tab")
             .location;
         let endpoint = (remote.session.clone(), remote.directory.clone());
+        let profile = remote.profile.clone();
         let labels = [display_path(&root), remote.directory.to_string()];
         let selected = if upload {
             self.current()
@@ -345,16 +472,31 @@ impl App {
             self.status("Wähle Dateien oder Ordner für die FTP-Kopie.");
             return;
         }
-        self.start_job("Bereite FTP-Kopie vor …", false, move |job| {
-            let mut plan =
-                FtpPlan::for_copy(&root, endpoint, &selected, upload, &job.cancel, |_| {})?;
-            let rows = std::mem::take(&mut plan.rows);
+        self.enqueue_virtual_transfer("Bereite FTP-Kopie vor …", false, move |job| {
+            let remote_ignored = ftp_ignores(ignore.as_deref(), &endpoint.1, profile.as_deref());
+            let ignored = |path: &Path, directory| {
+                remote_ignored(path, directory)
+                    || ignore
+                        .as_ref()
+                        .is_some_and(|ignore| ignore.local(&root.join(path), directory))
+            };
+            let mut plan = FtpPlan::for_copy(
+                &root,
+                endpoint.clone(),
+                &selected,
+                upload,
+                &ignored,
+                &job.cancel,
+                |_| {},
+            )?;
+            let mut rows = std::mem::take(&mut plan.rows);
+            super::ftp_sync::enable_copy_conflicts(&mut rows, usize::from(!upload));
             Ok(Outcome::Sync(Box::new(SyncReview {
                 plan: ReviewPlan::Ftp(plan),
                 rows,
                 labels,
                 visible: Vec::new(),
-                archive: None,
+                archives: [None, None],
                 copy_only: true,
             })))
         });
@@ -364,21 +506,41 @@ impl App {
         let ui = self.ui();
         ui.set_sync_roots(strings(setup.labels.iter().map(String::as_str)));
         ui.set_sync_has_selection(!setup.selected.is_empty());
-        let archive = setup.source.archive();
+        let archives = setup.source.archives();
+        let archive_side = match archives {
+            [None, None] => -1,
+            [Some(_), None] => 0,
+            [None, Some(_)] => 1,
+            [Some(_), Some(_)] => 2,
+        };
         let ftp = matches!(setup.source, SyncSource::Ftp { .. });
         ui.set_sync_ftp(ftp);
-        ui.set_sync_archive_side(archive.as_ref().map_or(-1, |(side, _)| *side as i32));
-        ui.set_sync_archive_secret(archive.as_ref().is_some_and(|(_, archive)| {
-            archive_view::is_zip(&archive.file) && archive.catalog.contains_encrypted_entries()
-        }));
+        ui.set_sync_archive_side(archive_side);
+        ui.set_sync_archive_writable(matches!(archives, [Some(archive), None] | [None, Some(archive)] if archive.catalog.can_sync_write()));
+        let secrets = archives.map(|archive| {
+            archive.is_some_and(|archive| {
+                archive.password().is_none()
+                    && archive_view::supports_password(&archive.file)
+                    && archive.catalog.contains_encrypted_entries()
+            })
+        });
+        ui.set_sync_archive_left_secret(secrets[0]);
+        ui.set_sync_archive_right_secret(secrets[1]);
         ui.set_sync_notice("".into());
         self.publish_sync_profiles();
         let mut options = self.profile.sync_options.clone();
         options.selected_only &= !setup.selected.is_empty();
-        if let Some((side, _)) = archive {
-            set_archive_options(&mut options, *side);
+        match archives {
+            [Some(_), None] => set_archive_options(&mut options, 0),
+            [None, Some(_)] => set_archive_options(&mut options, 1),
+            [Some(_), Some(_)] => {
+                options.mode = Mode::BothWays;
+                options.by_content = true;
+                options.ignore_date = true;
+            }
+            [None, None] => {}
         }
-        ui.set_sync_draft(options_data(&options));
+        ui.set_sync_draft(options_data(&options, false));
         self.pending = Some(Pending::SyncSetup(setup));
         ui.set_dialog_kind("sync-options".into());
     }
@@ -389,23 +551,51 @@ impl App {
         ));
     }
 
-    pub(super) fn configure_sync(&mut self, data: SyncOptionsData, preset: &str, operation: i32) {
-        let Some(Pending::SyncSetup(setup)) = self.pending.as_ref() else {
+    pub(super) fn configure_sync(
+        &mut self,
+        data: SyncOptionsData,
+        preset: &str,
+        operation: i32,
+        passwords: [&str; 2],
+    ) {
+        let ui = self.ui();
+        let Some(Pending::SyncSetup(setup)) = self.pending.as_mut() else {
             return;
         };
-        let ui = self.ui();
         ui.set_sync_notice("".into());
         if operation == 0 {
-            let settings = if preset == LAST_USED {
-                Some(&self.profile.sync_options)
+            let saved = if preset == LAST_USED {
+                Some((self.profile.sync_options.clone(), None))
             } else {
-                self.profile.sync_profiles.get(preset)
+                self.profile
+                    .sync_profiles
+                    .get(preset)
+                    .map(|saved| (saved.options.clone(), saved.roots.clone()))
             };
-            if let Some(options) = settings {
-                let mut options = options.clone();
-                options.selected_only &= !setup.selected.is_empty();
-                ui.set_sync_draft(options_data(&options));
+            if let Some((mut options, roots)) = saved {
+                if roots
+                    .as_ref()
+                    .is_some_and(|paths| paths.iter().any(|path| !path.is_absolute()))
+                {
+                    ui.set_sync_notice(
+                        "Das gespeicherte Verzeichnispaar enthält einen relativen Pfad.".into(),
+                    );
+                    return;
+                }
+                setup.fixed_roots = roots;
+                options.selected_only &= setup.selected_available();
+                ui.set_sync_roots(strings(setup.displayed_roots().iter().map(String::as_str)));
+                ui.set_sync_has_selection(setup.selected_available());
+                ui.set_sync_draft(options_data(&options, setup.fixed_roots.is_some()));
                 ui.set_sync_draft_revision(ui.get_sync_draft_revision().wrapping_add(1));
+            }
+            return;
+        }
+        if operation == 3 {
+            if self.profile.sync_profiles.remove(preset).is_some() {
+                self.publish_sync_profiles();
+                self.save();
+                ui.set_sync_notice(format!("Profil „{preset}“ entfernt.").into());
             }
             return;
         }
@@ -423,8 +613,21 @@ impl App {
             ignore_date: data.ignore_date,
             masks: data.masks.trim().to_owned(),
         };
-        if let Some((side, _)) = setup.source.archive() {
-            set_archive_options(&mut options, *side);
+        let archives = setup.source.archives();
+        let has_archive = archives.iter().any(Option::is_some);
+        if has_archive {
+            options.by_content = true;
+            options.ignore_date = true;
+            match archives {
+                [Some(archive), None] if !archive.catalog.can_sync_write() => {
+                    set_archive_options(&mut options, 0);
+                }
+                [None, Some(archive)] if !archive.catalog.can_sync_write() => {
+                    set_archive_options(&mut options, 1);
+                }
+                [Some(_), Some(_)] => options.mode = Mode::BothWays,
+                _ => {}
+            }
         }
         if let Err(error) = options.validate() {
             ui.set_sync_notice(error.to_string().into());
@@ -440,37 +643,73 @@ impl App {
                 ui.set_sync_notice("Gib einen Profilnamen mit höchstens 80 Zeichen ein.".into());
                 return;
             }
-            self.profile.sync_profiles.insert(name.to_owned(), options);
+            let roots = if data.remember_roots {
+                setup.local_roots().cloned()
+            } else {
+                None
+            };
+            self.profile
+                .sync_profiles
+                .insert(name.to_owned(), SavedSyncProfile { options, roots });
             self.publish_sync_profiles();
             self.save();
             ui.set_sync_notice(format!("Profil „{name}“ gespeichert.").into());
             return;
         }
-        if options.selected_only && setup.selected.is_empty() {
+        if options.selected_only && !setup.selected_available() {
             ui.set_sync_notice("Markiere zuerst Dateien oder Ordner in einem Dateifenster.".into());
             return;
         }
-        let Some(Pending::SyncSetup(setup)) = self.pending.take() else {
+        let Some(Pending::SyncSetup(mut setup)) = self.pending.take() else {
             return;
         };
-        if matches!(setup.source, SyncSource::Disk { archive: None, .. }) {
+        if let Some(fixed) = setup.fixed_roots.take()
+            && let SyncSource::Disk { roots, .. } = &mut setup.source
+        {
+            if *roots != fixed {
+                setup.selected.clear();
+            }
+            setup.labels = fixed.each_ref().map(|path| display_path(path));
+            *roots = fixed;
+        }
+        if !has_archive && matches!(setup.source, SyncSource::Disk { .. }) {
             self.profile.sync_options = options.clone();
             self.save();
         }
-        let password =
-            (!preset.is_empty() && setup.source.archive().is_some()).then(|| preset.to_owned());
+        let passwords = passwords.map(|password| {
+            (!password.is_empty() && has_archive).then(|| Zeroizing::new(password.to_owned()))
+        });
+        let ignore = self.ignore_list();
         self.close_dialog();
         self.start_job("Vergleiche Verzeichnisse …", false, move |job| {
-            let SyncSource::Disk { mut roots, archive } = setup.source else {
-                let SyncSource::Ftp { local, endpoint } = setup.source else {
+            let SyncSource::Disk {
+                mut roots,
+                archives,
+            } = setup.source
+            else {
+                let SyncSource::Ftp {
+                    local,
+                    endpoint,
+                    profile,
+                } = setup.source
+                else {
                     unreachable!()
                 };
                 let mut last = Instant::now() - Duration::from_secs(1);
+                let remote_ignored =
+                    ftp_ignores(ignore.as_deref(), &endpoint.1, profile.as_deref());
+                let ignored = |path: &Path, directory| {
+                    remote_ignored(path, directory)
+                        || ignore
+                            .as_ref()
+                            .is_some_and(|ignore| ignore.local(&local.join(path), directory))
+                };
                 let mut plan = FtpPlan::compare(
                     &local,
-                    endpoint,
+                    endpoint.clone(),
                     &options,
                     &setup.selected,
+                    &ignored,
                     &job.cancel,
                     |path| {
                         if last.elapsed() >= Duration::from_millis(150) {
@@ -485,43 +724,56 @@ impl App {
                     rows,
                     labels: setup.labels,
                     visible: Vec::new(),
-                    archive: None,
+                    archives: [None, None],
                     copy_only: false,
                 })));
             };
-            let archive = if let Some((side, source)) = archive {
-                job.progress("Entpacke Archivdaten für den Vergleich …".into());
-                let staged = stage_archive(
-                    source,
-                    &options,
-                    &setup.selected,
-                    password.as_deref(),
-                    &job.cancel,
-                )?;
-                roots[side] = staged.storage.path().to_path_buf();
-                Some((side, staged))
-            } else {
-                None
-            };
+            let mut stages = [None, None];
+            for (side, (source, password)) in archives.into_iter().zip(passwords).enumerate() {
+                if let Some(source) = source {
+                    job.progress("Entpacke Archivdaten für den Vergleich …".into());
+                    let staged = stage_archive(
+                        source,
+                        &options,
+                        &setup.selected,
+                        password.as_ref().map(|password| password.as_str()),
+                        &job.cancel,
+                    )?;
+                    roots[side] = staged.storage.path().to_path_buf();
+                    stages[side] = Some(staged);
+                }
+            }
             job.progress("Vergleiche Verzeichnisse …".into());
-            let mut plan = sync::compare(
+            let mut plan = sync::compare_ignoring(
                 roots.each_ref().map(PathBuf::as_path),
                 &options,
                 &setup.selected,
+                if has_archive { None } else { ignore.as_deref() },
                 &job.cancel,
             )?;
-            let labels = if let Some((side, archive)) = &archive {
-                plan.protect_path(1 - *side, &archive.source.file)?;
-                setup.labels
-            } else {
-                plan.roots().each_ref().map(|root| display_path(root))
+            let labels = match &stages {
+                [None, None] => plan.roots().each_ref().map(|root| display_path(root)),
+                [Some(_), Some(_)] => {
+                    plan.disable_actions();
+                    setup.labels
+                }
+                _ => {
+                    for (side, archive) in stages.iter().enumerate() {
+                        if let Some(archive) = archive {
+                            for file in archive.source.catalog.storage_paths() {
+                                plan.protect_path(1 - side, file)?;
+                            }
+                        }
+                    }
+                    setup.labels
+                }
             };
             Ok(Outcome::Sync(Box::new(SyncReview {
                 rows: std::mem::take(&mut plan.rows),
                 plan: ReviewPlan::Disk(plan),
                 labels,
                 visible: Vec::new(),
-                archive: archive.map(|(_, stage)| stage),
+                archives: stages,
                 copy_only: false,
             })))
         });
@@ -531,6 +783,7 @@ impl App {
         let ui = self.ui();
         ui.set_sync_roots(strings(review.labels.iter().map(String::as_str)));
         ui.set_sync_copy_only(review.copy_only);
+        ui.set_sync_comparison_only(review.archives.iter().all(Option::is_some));
         self.pending = Some(Pending::SyncReview(review));
         self.filter_sync(0);
         ui.set_dialog_kind("sync-review".into());
@@ -606,7 +859,7 @@ impl App {
         if copies + deletes == 0 || (deletes > 0 && !confirm_deletes) {
             return;
         }
-        if self.job.is_some() {
+        if self.job.is_some() && !review.copy_only {
             self.status("Ein Auftrag läuft bereits.");
             return;
         }
@@ -621,17 +874,32 @@ impl App {
             keep
         });
         self.close_dialog();
-        self.start_job("Synchronisiere …", true, move |job| {
-            if let Some(archive) = &review.archive {
+        let copy_only = review.copy_only;
+        let work = move |job: super::JobContext| {
+            for archive in review.archives.iter().flatten() {
                 check_archive(&archive.source)?;
             }
             let mut last = Instant::now() - Duration::from_secs(1);
-            let report = review.plan.apply(review.rows, &job.cancel, |path| {
+            let progress = |path: &Path| {
                 if last.elapsed() >= Duration::from_millis(150) {
                     last = Instant::now();
                     job.progress(format!("Synchronisiere {}", display_path(path)));
                 }
-            });
+            };
+            let report = match (review.plan, &review.archives) {
+                (ReviewPlan::Disk(plan), [Some(archive), None]) => {
+                    apply_archive_sync(plan, review.rows, 0, archive, &job.cancel, progress)
+                }
+                (ReviewPlan::Disk(plan), [None, Some(archive)]) => {
+                    apply_archive_sync(plan, review.rows, 1, archive, &job.cancel, progress)
+                }
+                (_, [Some(_), Some(_)]) => {
+                    return Err(io::Error::other(
+                        "Der Vergleich zweier Archive enthält keine Schreibaktionen.",
+                    ));
+                }
+                (plan, _) => plan.apply(review.rows, &job, review.copy_only, progress)?,
+            };
             Ok(Outcome::Report(
                 if review.copy_only {
                     "FTP-Kopie".into()
@@ -640,11 +908,16 @@ impl App {
                 },
                 report,
             ))
-        });
+        };
+        if copy_only {
+            self.enqueue_virtual_transfer("FTP-Kopie", true, work);
+        } else {
+            self.start_job("Synchronisiere …", true, work);
+        }
     }
 }
 
-fn options_data(options: &Options) -> SyncOptionsData {
+fn options_data(options: &Options, remember_roots: bool) -> SyncOptionsData {
     SyncOptionsData {
         mode: match options.mode {
             Mode::BothWays => 0,
@@ -658,6 +931,7 @@ fn options_data(options: &Options) -> SyncOptionsData {
         by_content: options.by_content,
         ignore_date: options.ignore_date,
         masks: options.masks.as_str().into(),
+        remember_roots,
     }
 }
 
@@ -669,6 +943,107 @@ fn set_archive_options(options: &mut Options, side: usize) {
     };
     options.by_content = true;
     options.ignore_date = true;
+}
+
+fn apply_archive_sync(
+    mut plan: Plan,
+    rows: Vec<Row>,
+    side: usize,
+    archive: &StagedArchive,
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(&Path),
+) -> TransferReport {
+    let total = rows.len();
+    let (archive_rows, local_rows): (Vec<_>, Vec<_>) =
+        rows.into_iter().partition(|row| match row.action {
+            Action::CopyLeft => side == 0,
+            Action::CopyRight | Action::DeleteRight => side == 1,
+            Action::Skip => false,
+        });
+    let mut completed = 0;
+    if !archive_rows.is_empty() {
+        if !archive.source.catalog.can_sync_write() {
+            return TransferReport {
+                skipped: total,
+                errors: vec!["Das Archiv ist für Änderungen gesperrt.".into()],
+                ..Default::default()
+            };
+        }
+        plan.rows = archive_rows;
+        // Apply the reviewed snapshot checks before writing anything to the actual archive.
+        let staged = plan.apply(cancel, &mut progress);
+        if staged.completed != plan.rows.len() || staged.cancelled || !staged.errors.is_empty() {
+            return TransferReport {
+                completed: 0,
+                skipped: total,
+                ..staged
+            };
+        }
+        if let Err(error) = write_archive_delta(&plan.rows, side, archive, cancel) {
+            let cancelled = error.kind() == io::ErrorKind::Interrupted;
+            return TransferReport {
+                skipped: total,
+                errors: if cancelled {
+                    Vec::new()
+                } else {
+                    vec![error.to_string()]
+                },
+                cancelled,
+                ..Default::default()
+            };
+        }
+        completed = staged.completed;
+    }
+    plan.rows = local_rows;
+    let mut report = plan.apply(cancel, progress);
+    report.completed += completed;
+    report
+}
+
+fn write_archive_delta(
+    rows: &[Row],
+    side: usize,
+    archive: &StagedArchive,
+    cancel: &AtomicBool,
+) -> io::Result<()> {
+    let delta = tempfile::tempdir()?;
+    let mut removals = Vec::new();
+    let mut additions = Vec::new();
+    for row in rows {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        let relative = row.path(side);
+        let member = archive.source.folder.join(relative);
+        if row.action == Action::DeleteRight || row.info(side).is_some() {
+            removals.push(member.clone());
+        }
+        if row.action != Action::DeleteRight {
+            let target = delta.path().join(&member);
+            let source = archive.storage.path().join(relative);
+            if fs::metadata(&source)?.is_dir() {
+                if archive.source.catalog.has_directory(&member) {
+                    continue;
+                }
+                fs::create_dir_all(&target)?;
+            } else {
+                fs::create_dir_all(target.parent().expect("Archive member has a parent"))?;
+                fs::rename(source, &target)?;
+            }
+            additions.push(target);
+        }
+    }
+    archive.source.catalog.apply_sync_changes(
+        removals,
+        &additions,
+        delta.path(),
+        archive
+            .password
+            .as_ref()
+            .map(|password| password.as_str())
+            .or(archive.source.password()),
+        cancel,
+    )
 }
 
 fn stage_archive(
@@ -687,14 +1062,14 @@ fn stage_archive(
         max_size: None,
         max_depth: (!options.recursive).then_some(1),
         show_hidden: true,
+        ignore: None,
     };
     let rows = source
         .catalog
         .search(&source.folder, &query, None, cancel)?
         .entries;
     let masks = FileMasks::new(&options.masks)?;
-    let fold = |path: &Path| PathBuf::from(path.to_string_lossy().to_lowercase());
-    let selected: BTreeSet<_> = selected.iter().map(|path| fold(path)).collect();
+    let scope = sync::Scope::new(options.selected_only, selected)?;
     let mut roots = Vec::new();
     for row in rows {
         if cancel.load(Ordering::Relaxed) {
@@ -704,27 +1079,31 @@ fn stage_archive(
             .path
             .strip_prefix(&source.folder)
             .map_err(io::Error::other)?;
-        if options.selected_only
-            && !fold(relative)
-                .ancestors()
-                .any(|part| selected.contains(part))
-        {
+        if !scope.visits(relative) {
             continue;
         }
         if row.kind == Kind::Directory {
-            if options.recursive && options.empty_dirs {
-                fs::create_dir_all(storage.path().join(relative))?;
-            }
+            fs::create_dir_all(storage.path().join(relative))?;
         } else if masks.includes(relative) {
             roots.push(row.path);
         }
     }
     if !roots.is_empty() {
         let selection = Selection::new(source.folder.clone(), roots)?;
-        archive_view::extract(&source.file, storage.path(), &selection, password, cancel)?;
+        archive_view::extract(
+            &source.file,
+            storage.path(),
+            &selection,
+            password.or(source.password()),
+            cancel,
+        )?;
     }
     check_archive(&source)?;
-    Ok(StagedArchive { storage, source })
+    Ok(StagedArchive {
+        storage,
+        source,
+        password: password.map(|password| Zeroizing::new(password.to_owned())),
+    })
 }
 
 fn row_data(index: usize, row: &Row, copy_only: bool) -> SyncRowData {
@@ -834,6 +1213,7 @@ mod tests {
         .unwrap();
         let before = fs::read(&archive).unwrap();
         let source = ArchiveTab {
+            password: None,
             catalog: Arc::new(Catalog::read(&archive, &cancel).unwrap()),
             file: archive.clone(),
             folder: PathBuf::new(),
@@ -881,5 +1261,101 @@ mod tests {
             fs::metadata(restored).unwrap().modified().unwrap(),
             timestamp
         );
+    }
+
+    #[test]
+    fn archive_sync_writes_only_reviewed_rows_to_zip_and_split_7z() {
+        let cancel = AtomicBool::new(false);
+        let password = "test fixture password";
+        for split in [false, true] {
+            let fixture = tempfile::tempdir().unwrap();
+            let local = fixture.path().join("local");
+            let input = fixture.path().join("input");
+            let folder = input.join("scope");
+            fs::create_dir_all(folder.join("Nested")).unwrap();
+            let local_nested = local.join(if cfg!(windows) { "nested" } else { "Nested" });
+            fs::create_dir_all(&local_nested).unwrap();
+            fs::write(folder.join("change.txt"), b"old").unwrap();
+            fs::write(folder.join("remove.txt"), b"remove me").unwrap();
+            fs::write(folder.join("skip.txt"), b"archive version").unwrap();
+            fs::write(folder.join("Nested").join("excluded.bin"), b"keep me").unwrap();
+            fs::write(input.join("outside.txt"), b"outside scope").unwrap();
+            fs::write(local.join("change.txt"), b"new").unwrap();
+            fs::write(local.join("skip.txt"), b"local version").unwrap();
+            fs::write(local_nested.join("new.txt"), b"added").unwrap();
+            let sources = [folder, input.join("outside.txt")];
+            let archive = if split {
+                archive_view::pack_split(
+                    &sources,
+                    &input,
+                    &local.join("probe.7z"),
+                    89,
+                    Some(password),
+                    &cancel,
+                )
+                .unwrap();
+                local.join("probe.7z.001")
+            } else {
+                let archive = local.join("probe.zip");
+                create_zip(&sources, &input, &archive, None, &cancel).unwrap();
+                archive
+            };
+            let password = split.then_some(password);
+            let options = Options {
+                mode: Mode::Mirror,
+                recursive: true,
+                empty_dirs: false,
+                by_content: true,
+                ignore_date: true,
+                masks: "*.txt;*.zip;*.0*".into(),
+                ..Options::default()
+            };
+            let source = ArchiveTab {
+                password: None,
+                catalog: Arc::new(
+                    Catalog::read_with_password(&archive, password, &cancel).unwrap(),
+                ),
+                file: archive.clone(),
+                folder: PathBuf::from("scope"),
+            };
+            let stage = stage_archive(source, &options, &[], password, &cancel).unwrap();
+            let mut plan =
+                sync::compare([&local, stage.storage.path()], &options, &[], &cancel).unwrap();
+            for part in stage.source.catalog.storage_paths() {
+                plan.protect_path(0, part).unwrap();
+                assert!(plan.rows.iter().any(|row| {
+                    row.relative == Path::new(part.file_name().unwrap())
+                        && row.comparison == Comparison::Protected
+                }));
+            }
+            let mut rows = std::mem::take(&mut plan.rows);
+            rows.retain(|row| row.action != Action::Skip && row.relative != Path::new("skip.txt"));
+            let report = apply_archive_sync(plan, rows, 1, &stage, &cancel, |_| {});
+            assert!(report.errors.is_empty(), "{report:?}");
+            assert_eq!(report.completed, 3);
+            let output = fixture.path().join("output");
+            fs::create_dir(&output).unwrap();
+            let scope =
+                Selection::new(PathBuf::new(), vec!["scope".into(), "outside.txt".into()]).unwrap();
+            archive_view::extract(&archive, &output, &scope, password, &cancel).unwrap();
+            let root = output.join("scope");
+            assert_eq!(fs::read(root.join("change.txt")).unwrap(), b"new");
+            assert_eq!(fs::read(root.join("skip.txt")).unwrap(), b"archive version");
+            assert_eq!(
+                fs::read(root.join("Nested").join("excluded.bin")).unwrap(),
+                b"keep me"
+            );
+            assert_eq!(
+                fs::read(root.join("Nested").join("new.txt")).unwrap(),
+                b"added"
+            );
+            assert_eq!(
+                fs::read(output.join("outside.txt")).unwrap(),
+                b"outside scope"
+            );
+            assert!(!root.join("remove.txt").exists());
+            assert!(!stage.source.catalog.unchanged(&archive));
+            assert_eq!(archive_view::test(&archive, None, &cancel).is_err(), split);
+        }
     }
 }

@@ -14,6 +14,13 @@ pub struct SyncUpload<'a> {
     pub modified_utc: Option<&'a str>,
 }
 
+#[derive(Clone, Copy)]
+pub struct SyncChecksum {
+    command: &'static str,
+    algorithm: &'static str,
+    hex_len: usize,
+}
+
 impl Session {
     pub fn directory_url(&self, address: &str) -> io::Result<Url> {
         let mut directory = Url::parse(address).map_err(io::Error::other)?;
@@ -35,6 +42,12 @@ impl Session {
             .decode_utf8()
             .ok()
             .map(|value| value.into_owned())
+    }
+
+    pub fn directory_path(directory: &Url) -> String {
+        percent_encoding::percent_decode_str(directory.path())
+            .decode_utf8_lossy()
+            .into_owned()
     }
 
     pub fn parent_directory(&self, directory: &Url) -> io::Result<Url> {
@@ -134,6 +147,62 @@ impl Session {
             &expected.name,
             Some(expected),
         )
+    }
+
+    pub fn sync_checksum_method(
+        &self,
+        directory: &Url,
+        cancel: &AtomicBool,
+    ) -> io::Result<Option<SyncChecksum>> {
+        Ok(self
+            .checksum_replies(directory, &["FEAT"], cancel)?
+            .as_deref()
+            .and_then(checksum_method))
+    }
+
+    pub fn sync_checksum(
+        &self,
+        directory: &Url,
+        expected: &Entry,
+        method: SyncChecksum,
+        cancel: &AtomicBool,
+    ) -> io::Result<Option<(&'static str, String)>> {
+        if check_quote_name(&expected.name).is_err() || expected.directory != Some(false) {
+            return Ok(None);
+        }
+        self.verify_sync_entry(directory, expected, cancel)?;
+        let command = format!("+{} {}", method.command, expected.name);
+        let opts = format!("+OPTS HASH {}", method.algorithm);
+        let mut commands = vec!["+TYPE I"];
+        if method.command == "HASH" {
+            commands.push(&opts);
+        }
+        commands.push(&command);
+        let Some(replies) = self.checksum_replies(directory, &commands, cancel)? else {
+            return Ok(None);
+        };
+        let Some(digest) = checksum_reply(&replies, method, &expected.name) else {
+            return Ok(None);
+        };
+        self.verify_sync_entry(directory, expected, cancel)?;
+        Ok(Some((method.algorithm, digest.to_ascii_lowercase())))
+    }
+
+    fn checksum_replies(
+        &self,
+        directory: &Url,
+        commands: &[&str],
+        cancel: &AtomicBool,
+    ) -> io::Result<Option<Vec<u8>>> {
+        let mut arguments = vec!["--head", "--dump-header", "-", "--max-time", "20"];
+        for command in commands {
+            arguments.extend(["--quote", command]);
+        }
+        match run(self.command(directory)?, &arguments, None, cancel) {
+            Ok(output) => Ok(Some(output)),
+            Err(error) if error.kind() != io::ErrorKind::Interrupted => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     pub fn create_sync_directory(
@@ -428,6 +497,126 @@ impl Session {
     }
 }
 
+fn checksum_method(replies: &[u8]) -> Option<SyncChecksum> {
+    let replies = String::from_utf8_lossy(replies);
+    let mut lines = replies.lines();
+    lines.by_ref().find(|line| line.starts_with("211-"))?;
+    let features: Vec<_> = lines
+        .take_while(|line| !line.starts_with("211 "))
+        .filter_map(|line| line.strip_prefix(' ').map(str::trim_start))
+        .filter_map(|line| {
+            let mut fields = line.splitn(2, char::is_whitespace);
+            Some((fields.next()?, fields.next().unwrap_or("").trim()))
+        })
+        .collect();
+    let hash = features
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("HASH"))
+        .flat_map(|(_, algorithms)| algorithms.split(';'));
+    let advertised: Vec<_> = hash.map(|name| name.trim().trim_end_matches('*')).collect();
+    for (algorithm, hex_len) in [
+        ("SHA-512", 128),
+        ("SHA-256", 64),
+        ("SHA-1", 40),
+        ("MD5", 32),
+    ] {
+        if advertised
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(algorithm))
+        {
+            return Some(SyncChecksum {
+                command: "HASH",
+                algorithm,
+                hex_len,
+            });
+        }
+    }
+    for (command, algorithm, hex_len) in [
+        ("XSHA1", "SHA-1", 40),
+        ("XMD5", "MD5", 32),
+        ("MD5", "MD5", 32),
+        ("XCRC", "CRC32", 8),
+    ] {
+        if features
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(command))
+        {
+            return Some(SyncChecksum {
+                command,
+                algorithm,
+                hex_len,
+            });
+        }
+    }
+    None
+}
+
+fn checksum_reply(replies: &[u8], method: SyncChecksum, name: &str) -> Option<String> {
+    let replies = String::from_utf8_lossy(replies);
+    let mut multiline = None;
+    let mut digest = None;
+    for line in replies.lines() {
+        let Some((code, payload)) = line.split_at_checked(3) else {
+            continue;
+        };
+        if let Some(start) = multiline {
+            if code == start && payload.starts_with(' ') {
+                multiline = None;
+            }
+            continue;
+        }
+        if !code.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        if payload.starts_with('-') {
+            multiline = Some(code);
+            continue;
+        }
+        let Some(payload) = payload.strip_prefix(' ') else {
+            continue;
+        };
+        let parsed = if method.command == "HASH" {
+            if code != "213" {
+                continue;
+            }
+            let mut fields = payload.splitn(3, ' ');
+            let algorithm = fields.next()?;
+            let hash = fields.next()?;
+            let path = fields.next()?;
+            (algorithm.eq_ignore_ascii_case(method.algorithm) && checksum_name(path, name))
+                .then_some(hash)
+        } else {
+            if !matches!(code, "213" | "250" | "251") {
+                continue;
+            }
+            let (first, rest) = payload.split_once(' ').unwrap_or((payload, ""));
+            if rest.is_empty() || checksum_name(rest, name) {
+                Some(first)
+            } else {
+                payload
+                    .rsplit_once(' ')
+                    .and_then(|(path, hash)| checksum_name(path, name).then_some(hash))
+            }
+        };
+        if let Some(hash) = parsed.filter(|hash| {
+            hash.len() == method.hex_len && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        }) {
+            if digest.replace(hash).is_some() {
+                return None;
+            }
+        }
+    }
+    digest.map(str::to_owned)
+}
+
+fn checksum_name(path: &str, expected: &str) -> bool {
+    path == expected
+        || path
+            .strip_prefix('"')
+            .and_then(|path| path.strip_suffix('"'))
+            == Some(expected)
+}
+
 fn check_quote_name(name: &str) -> io::Result<()> {
     check_segment(name)?;
     if name.trim() != name {
@@ -468,6 +657,43 @@ mod tests {
     use super::*;
     use crate::ftp::{Connection, Security};
     use std::fs;
+
+    #[test]
+    fn ftp_checksum_negotiation_validates_algorithm_digest_and_filename() {
+        let method = checksum_method(
+            b"220 Ready\r\n211-Features:\r\n XCRC\r\n HASH SHA-256;SHA-1*\r\n211 End\r\n",
+        )
+        .unwrap();
+        assert_eq!(method.command, "HASH");
+        assert_eq!(method.algorithm, "SHA-256");
+        let hash = "a1".repeat(32);
+        let name = "test file.txt";
+        let reply = format!(
+            "220-Welcome\r\n213 SHA-256 {hash} {name}\r\n220 Ready\r\n250 OK\r\n213 SHA-256 {hash} {name}\r\n"
+        );
+        assert_eq!(
+            checksum_reply(reply.as_bytes(), method, name),
+            Some(hash.clone())
+        );
+        assert!(checksum_reply(reply.as_bytes(), method, "other.txt").is_none());
+        assert!(
+            checksum_reply(
+                format!("213 SHA-1 {hash} {name}\r\n").as_bytes(),
+                method,
+                name
+            )
+            .is_none()
+        );
+        let legacy =
+            checksum_method(b"211-Features:\r\n XCRC filename;start;end\r\n211 End\r\n").unwrap();
+        assert_eq!(legacy.command, "XCRC");
+        assert_eq!(
+            checksum_reply(b"250 OK\r\n250 A10F2245\r\n", legacy, name).as_deref(),
+            Some("A10F2245")
+        );
+        assert!(checksum_reply(b"250 A10F224G\r\n", legacy, name).is_none());
+        assert!(checksum_method(b"500 Unknown command\r\n").is_none());
+    }
 
     #[test]
     #[ignore = "requires a disposable writable local FTP server"]

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -7,12 +8,15 @@ use tempfile::NamedTempFile;
 
 pub struct TcImport {
     pub panels: [Vec<PathBuf>; 2],
-    pub favorites: Vec<PathBuf>,
+    pub favorites: Vec<DirectoryFavorite>,
     pub shortcuts: BTreeMap<String, String>,
     pub skipped: usize,
 }
 
-pub fn read_tc_ini(path: &Path) -> io::Result<TcImport> {
+pub fn read_tc_ini(
+    path: &Path,
+    resolve_variable: impl Fn(&str) -> Option<OsString>,
+) -> io::Result<TcImport> {
     let data = read_tc_text(path)?;
     let mut import = TcImport {
         panels: Default::default(),
@@ -20,7 +24,19 @@ pub fn read_tc_ini(path: &Path) -> io::Result<TcImport> {
         shortcuts: BTreeMap::new(),
         skipped: 0,
     };
-    for (section, key, mut value) in ini_entries(&data) {
+    let mut hotlist: BTreeMap<usize, [&str; 3]> = BTreeMap::new();
+    for (section, key, value) in ini_entries(&data) {
+        if section == "dirmenu" {
+            for (index, prefix) in ["menu", "cmd", "path"].into_iter().enumerate() {
+                if let Some(number) = key
+                    .strip_prefix(prefix)
+                    .and_then(|suffix| suffix.parse().ok())
+                {
+                    hotlist.entry(number).or_default()[index] = value;
+                }
+            }
+            continue;
+        }
         let target = match section.as_str() {
             "shortcuts" if !key.is_empty() && !value.is_empty() => {
                 import
@@ -36,17 +52,6 @@ pub fn read_tc_ini(path: &Path) -> io::Result<TcImport> {
             "right" if key == "path" => &mut import.panels[1],
             "lefttabs" if is_tab_key(&key) => &mut import.panels[0],
             "righttabs" if is_tab_key(&key) => &mut import.panels[1],
-            "dirmenu" if key.starts_with("cmd") => {
-                if let Some((verb, rest)) = value.split_once(' ')
-                    && verb.eq_ignore_ascii_case("cd")
-                {
-                    value = rest.trim();
-                    &mut import.favorites
-                } else {
-                    import.skipped += 1;
-                    continue;
-                }
-            }
             _ => continue,
         };
         let folder = PathBuf::from(value.trim_matches('"'));
@@ -56,10 +61,96 @@ pub fn read_tc_ini(path: &Path) -> io::Result<TcImport> {
             target.push(folder);
         }
     }
+    let mut groups = Vec::new();
+    let mut extra_groups = 0usize;
+    for [title, command, opposite] in hotlist.into_values() {
+        match title {
+            "--" => {
+                if extra_groups > 0 {
+                    extra_groups -= 1;
+                } else {
+                    groups.pop();
+                }
+                continue;
+            }
+            "-" => continue,
+            title if title.starts_with('-') && command.is_empty() => {
+                if groups.len() == 32 {
+                    extra_groups += 1;
+                } else {
+                    groups.push(favorite_title(&title[1..]));
+                }
+                continue;
+            }
+            _ => (),
+        }
+        if command.is_empty() {
+            continue;
+        }
+        if extra_groups > 0 || import.favorites.len() == 4096 {
+            import.skipped += 1;
+            continue;
+        }
+        let folder = command
+            .split_once(char::is_whitespace)
+            .filter(|(verb, _)| verb.eq_ignore_ascii_case("cd"))
+            .and_then(|(_, path)| tc_hotlist_path(path, &resolve_variable));
+        let Some(path) = folder else {
+            import.skipped += 1;
+            continue;
+        };
+        let other = tc_hotlist_path(opposite, &resolve_variable);
+        if !opposite.is_empty() && other.is_none() {
+            import.skipped += 1;
+        }
+        let favorite = DirectoryFavorite {
+            title: favorite_title(title),
+            groups: groups.clone(),
+            path,
+            other,
+        };
+        if !import.favorites.contains(&favorite) {
+            import.favorites.push(favorite);
+        }
+    }
     Ok(import)
 }
 
-pub(crate) fn read_tc_text(path: &Path) -> io::Result<String> {
+fn favorite_title(value: &str) -> String {
+    let mut characters = value.chars().peekable();
+    let mut title = String::new();
+    while let Some(character) = characters.next() {
+        if character == '&' && characters.next_if_eq(&'&').is_none() {
+            continue;
+        }
+        if !character.is_control() {
+            title.push(character);
+        }
+    }
+    title.trim().to_owned()
+}
+
+fn tc_hotlist_path(
+    value: &str,
+    resolve_variable: &impl Fn(&str) -> Option<OsString>,
+) -> Option<PathBuf> {
+    let mut remaining = value.trim().trim_matches('"');
+    let mut expanded = OsString::new();
+    while let Some((prefix, variable)) = remaining.split_once('%') {
+        let (name, suffix) = variable.split_once('%')?;
+        if name.is_empty() {
+            return None;
+        }
+        expanded.push(prefix);
+        expanded.push(resolve_variable(name)?);
+        remaining = suffix;
+    }
+    expanded.push(remaining);
+    let path = PathBuf::from(expanded);
+    (path.is_absolute() && !path.as_os_str().as_encoded_bytes().contains(&0)).then_some(path)
+}
+
+pub fn read_tc_text(path: &Path) -> io::Result<String> {
     use std::io::Read;
     const LIMIT: usize = 16 * 1024 * 1024;
     let mut raw = Vec::new();
@@ -276,6 +367,7 @@ pub fn read_tc_tabs(path: &Path, bases: [&Path; 2], source: usize) -> io::Result
                     .take(120)
                     .collect(),
                 lock,
+                ..SavedTab::default()
             });
         }
         panel
@@ -377,6 +469,82 @@ pub fn read_tc_ftp_ini(path: &Path) -> io::Result<Vec<(String, TcFtpSite)>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn expands_hotlist_variables_on_both_sides_and_skips_unresolved_paths() {
+        let fixture = tempfile::tempdir().unwrap();
+        let profile = fixture.path().join("wincmd.ini");
+        let install = fixture.path().join("Portabel");
+        let documents = fixture.path().join("Dokumente");
+        std::fs::write(
+            &profile,
+            r#"[DirMenu]
+menu1=-Projekte
+menu2=Berichte
+cmd2=cd "%commander_path%/Berichte %SUFFIX%"
+path2=%$PERSONAL%/Vergleich
+menu3=--
+menu4=Unbekannt
+cmd4=cd %UNKNOWN%/Datei
+menu5=Unvollständig
+cmd5=cd %COMMANDER_PATH
+"#,
+        )
+        .unwrap();
+        let result =
+            super::read_tc_ini(&profile, |name| match name.to_ascii_uppercase().as_str() {
+                "COMMANDER_PATH" => Some(install.as_os_str().to_owned()),
+                "$PERSONAL" => Some(documents.as_os_str().to_owned()),
+                "SUFFIX" => Some("Ö".into()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(result.skipped, 2);
+        assert_eq!(result.favorites.len(), 1);
+        assert_eq!(result.favorites[0].groups, ["Projekte"]);
+        assert_eq!(result.favorites[0].path, install.join("Berichte Ö"));
+        assert_eq!(result.favorites[0].other, Some(documents.join("Vergleich")));
+    }
+
+    #[test]
+    fn imports_nested_tc_favorites_and_optional_opposite_folder() {
+        let fixture = tempfile::tempdir().unwrap();
+        let profile = fixture.path().join("wincmd.ini");
+        let source = fixture.path().join("Berichte ä mit Leerzeichen");
+        let other = fixture.path().join("Vergleich");
+        std::fs::write(&profile, format!(
+            "[DirMenu]\ncmd3=cd \"{}\"\npath3={}\nmenu1=-Pro&jekte\nmenu2=-Analyse && Daten\nmenu3=&Berichte\nmenu4=--\nmenu5=--\nmenu6=Programm\ncmd6=notepad.exe\n",
+            source.display(), other.display()
+        )).unwrap();
+        let result = super::read_tc_ini(&profile, |_| None).unwrap();
+        assert_eq!(result.skipped, 1);
+        assert_eq!(
+            result.favorites,
+            [super::DirectoryFavorite {
+                title: "Berichte".into(),
+                groups: vec!["Projekte".into(), "Analyse & Daten".into()],
+                path: source,
+                other: Some(other),
+            }]
+        );
+    }
+
+    #[test]
+    fn sync_profiles_keep_existing_options_and_round_trip_fixed_roots() {
+        let mut saved: super::SavedSyncProfile =
+            serde_json::from_str(r#"{"mode":"Mirror","masks":"*.txt","recursive":false}"#).unwrap();
+        assert!(saved.roots.is_none());
+        assert_eq!(saved.options.mode, crate::sync::Mode::Mirror);
+        assert!(!saved.options.recursive);
+        saved.roots = Some([
+            std::path::PathBuf::from("links"),
+            std::path::PathBuf::from("rechts"),
+        ]);
+        let restored: super::SavedSyncProfile =
+            serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+        assert_eq!(restored.options.masks, "*.txt");
+        assert_eq!(restored.roots, saved.roots);
+    }
+
     use super::*;
 
     #[test]
@@ -397,12 +565,18 @@ mod tests {
             conditions: vec![
                 WdxSearchField {
                     plugin: PathBuf::from("meta.wdx64"),
-                    field: "Size".into(),
+                    selection: crate::plugin::WdxField {
+                        field: "Size".into(),
+                        unit: Some("kbytes".into()),
+                    },
                     expression: "> 100".into(),
                 },
                 WdxSearchField {
                     plugin: PathBuf::from("tags.wdx64"),
-                    field: "Title".into(),
+                    selection: crate::plugin::WdxField {
+                        field: "Title".into(),
+                        unit: None,
+                    },
                     expression: "~Grüße".into(),
                 },
             ],
@@ -438,6 +612,7 @@ mod tests {
                     SavedTab {
                         title: "Übersicht".into(),
                         lock: TabLock::ReturnToBase,
+                        ..SavedTab::default()
                     },
                 ],
             },
@@ -490,12 +665,24 @@ mod tests {
     fn tc_import_keeps_the_last_case_insensitive_binding_and_counts_win_shortcuts() {
         let file = NamedTempFile::new().unwrap();
         fs::write(file.path(), "[Shortcuts]\nA+F1=cm_RereadSource\na+f1=cm_LeftOpenDrives\n[ShortcutsWin]\nF1=cm_SearchFor\n").unwrap();
-        let profile = read_tc_ini(file.path()).unwrap();
+        let profile = read_tc_ini(file.path(), |_| None).unwrap();
         assert_eq!(
             profile.shortcuts,
             BTreeMap::from([("A+F1".into(), "cm_LeftOpenDrives".into())])
         );
         assert_eq!(profile.skipped, 1);
+    }
+
+    #[test]
+    fn tab_view_defaults_to_details_and_round_trips_in_saved_tabs() {
+        let old: SavedTab = serde_json::from_str(r#"{"title":"Bilder","lock":"fixed"}"#).unwrap();
+        assert_eq!(old.view, TabView::Details);
+        let tab = SavedTab {
+            view: TabView::Thumbnails,
+            ..old
+        };
+        let saved: SavedTab = serde_json::from_str(&serde_json::to_string(&tab).unwrap()).unwrap();
+        assert_eq!(saved, tab);
     }
 }
 
@@ -515,6 +702,23 @@ pub struct SavedPanel {
 pub struct SavedTab {
     pub title: String,
     pub lock: TabLock,
+    pub view: TabView,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column_set: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sort: Vec<crate::files::SortOrder>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TabView {
+    #[default]
+    Details,
+    Short,
+    Thumbnails,
+    Comments,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -542,6 +746,17 @@ pub struct LayoutSettings {
     pub command_line: bool,
     pub function_keys: bool,
     pub numpad_folders: bool,
+    pub quick_find_start: QuickFindStart,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum QuickFindStart {
+    #[default]
+    Shortcut,
+    Typing,
+    Alt,
+    CtrlAlt,
 }
 
 impl Default for LayoutSettings {
@@ -560,6 +775,7 @@ impl Default for LayoutSettings {
             command_line: true,
             function_keys: true,
             numpad_folders: false,
+            quick_find_start: QuickFindStart::Shortcut,
         }
     }
 }
@@ -570,30 +786,92 @@ pub struct Profile {
     version: u32,
     pub panels: [SavedPanel; 2],
     pub favorites: Vec<PathBuf>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub directory_favorites: Vec<DirectoryFavorite>,
     pub active_panel: usize,
     pub show_hidden: bool,
+    pub ignore_enabled: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub ignore_rules: String,
     pub light_mode: bool,
+    pub system_theme: bool,
     pub stacked: bool,
     pub split_ratio: f32,
+    pub separate_tree_mode: u8,
     pub layout: LayoutSettings,
+    #[serde(skip_serializing_if = "empty_buttonbars")]
+    pub buttonbars: [Vec<ButtonbarButton>; 2],
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub starter: Vec<ButtonbarButton>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub buttonbar_templates: BTreeMap<String, ButtonbarTemplate>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub tab_groups: BTreeMap<String, [SavedPanel; 2]>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<crate::plugin::Registration>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub wdx_columns: Vec<crate::plugin::WdxColumn>,
+    pub views: crate::view_settings::Settings,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub associations: Vec<FileAssociation>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub rename_templates: BTreeMap<String, RenameTemplate>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub wdx_search_profiles: BTreeMap<String, WdxSearchProfile>,
+    pub search_last: crate::advanced_search::Options,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub search_profiles: BTreeMap<String, crate::advanced_search::Options>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub everything_cli: Option<PathBuf>,
+    pub transfer_rate_kib: u32,
+    pub transfer_ntfs: crate::files::NtfsCopyOptions,
+    pub transfer_descriptions: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transfer_log: Option<PathBuf>,
     pub list_font: ListFont,
     pub list_font_size: u8,
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub shortcuts: std::collections::BTreeMap<String, Option<String>>,
     pub sync_options: crate::sync::Options,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub sync_profiles: BTreeMap<String, crate::sync::Options>,
+    pub sync_profiles: BTreeMap<String, SavedSyncProfile>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub ftp_profiles: BTreeMap<String, FtpProfile>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub packer_profiles: BTreeMap<String, crate::packer_profile::PackerProfile>,
     pub editor: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SavedSyncProfile {
+    #[serde(flatten)]
+    pub options: crate::sync::Options,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roots: Option<[PathBuf; 2]>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct FileAssociation {
+    pub name: String,
+    pub masks: String,
+    pub program: PathBuf,
+    pub arguments: Vec<String>,
+    pub default_open: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RenameTemplate {
+    pub mask: String,
+    pub replacement: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DirectoryFavorite {
+    pub title: String,
+    pub groups: Vec<String>,
+    pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other: Option<PathBuf>,
 }
 
 impl Default for Profile {
@@ -602,25 +880,112 @@ impl Default for Profile {
             version: PROFILE_VERSION,
             panels: Default::default(),
             favorites: Vec::new(),
+            directory_favorites: Vec::new(),
             active_panel: 0,
             show_hidden: false,
+            ignore_enabled: false,
+            ignore_rules: String::new(),
             light_mode: false,
+            system_theme: false,
             stacked: false,
             split_ratio: 0.5,
+            separate_tree_mode: 0,
             layout: LayoutSettings::default(),
+            buttonbars: Default::default(),
+            starter: Vec::new(),
+            buttonbar_templates: BTreeMap::new(),
             tab_groups: BTreeMap::new(),
             plugins: Vec::new(),
             wdx_columns: Vec::new(),
+            views: Default::default(),
+            associations: Vec::new(),
+            rename_templates: BTreeMap::new(),
             wdx_search_profiles: BTreeMap::new(),
+            search_last: Default::default(),
+            search_profiles: BTreeMap::new(),
+            everything_cli: None,
+            transfer_rate_kib: 0,
+            transfer_ntfs: Default::default(),
+            transfer_descriptions: true,
+            transfer_log: None,
             list_font: ListFont::default(),
             list_font_size: 14,
             shortcuts: Default::default(),
             sync_options: Default::default(),
             sync_profiles: BTreeMap::new(),
             ftp_profiles: BTreeMap::new(),
+            packer_profiles: BTreeMap::new(),
             editor: None,
         }
     }
+}
+
+fn empty_buttonbars(bars: &[Vec<ButtonbarButton>; 2]) -> bool {
+    bars.iter().all(Vec::is_empty)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ButtonbarButton {
+    pub label: String,
+    pub icon: String,
+    pub action: ButtonbarAction,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ButtonbarTemplate {
+    pub bars: [Vec<ButtonbarButton>; 2],
+    pub starter: Vec<ButtonbarButton>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum ButtonbarAction {
+    Internal {
+        command: String,
+    },
+    Program {
+        path: PathBuf,
+        arguments: Vec<String>,
+    },
+}
+
+#[derive(Default)]
+pub struct TcButtonbarEntry {
+    pub command: String,
+    pub parameters: String,
+    pub working_directory: String,
+    pub icon: String,
+    pub label: String,
+}
+
+pub fn parse_tc_buttonbar(text: &str) -> io::Result<Vec<TcButtonbarEntry>> {
+    let entries: BTreeMap<_, _> = ini_entries(text)
+        .filter_map(|(section, key, value)| (section == "buttonbar").then_some((key, value)))
+        .collect();
+    let count = entries
+        .get("buttoncount")
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|count| *count <= 4096)
+        .ok_or_else(|| io::Error::other("Ungültiger Buttoncount in der TC-Buttonbar."))?;
+    Ok((1..=count)
+        .map(|index| {
+            let value = |key: &str| {
+                entries
+                    .get(&format!("{key}{index}"))
+                    .copied()
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            TcButtonbarEntry {
+                command: value("cmd"),
+                parameters: value("param"),
+                working_directory: value("path"),
+                icon: value("button"),
+                label: value("menu"),
+            }
+        })
+        .collect())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -633,7 +998,8 @@ pub struct WdxSearchProfile {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct WdxSearchField {
     pub plugin: PathBuf,
-    pub field: String,
+    #[serde(flatten)]
+    pub selection: crate::plugin::WdxField,
     pub expression: String,
 }
 

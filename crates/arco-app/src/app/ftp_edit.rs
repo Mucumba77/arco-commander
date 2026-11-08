@@ -419,6 +419,7 @@ mod tests {
             FtpLocation {
                 session: session.clone(),
                 directory,
+                profile: None,
             },
             entry,
             recovery.path(),

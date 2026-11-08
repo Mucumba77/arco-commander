@@ -63,6 +63,7 @@ pub(super) fn read_panel(
             location: location.clone(),
             listing,
         }),
+        shell: Default::default(),
     })
 }
 
@@ -142,11 +143,11 @@ impl App {
                 Err(error) => self.status(error.to_string()),
             }
         } else {
-            self.preview_ftp_entry(location, entry);
+            self.preview_ftp_entry(location, entry, false);
         }
     }
 
-    pub(crate) fn view_ftp_panel_entry(&mut self) {
+    pub(crate) fn view_ftp_panel_entry(&mut self, separate: bool) {
         let tab = self.current();
         let Some(ftp) = &tab.ftp else {
             return;
@@ -157,10 +158,10 @@ impl App {
         else {
             return;
         };
-        self.preview_ftp_entry(ftp.location.clone(), entry.clone());
+        self.preview_ftp_entry(ftp.location.clone(), entry.clone(), separate);
     }
 
-    fn preview_ftp_entry(&mut self, location: FtpLocation, entry: ftp::Entry) {
+    fn preview_ftp_entry(&mut self, location: FtpLocation, entry: ftp::Entry, separate: bool) {
         if entry.directory == Some(true) {
             self.status("Wähle eine Datei für die FTP-Vorschau.");
             return;
@@ -188,6 +189,7 @@ impl App {
                     storage,
                     path,
                     title,
+                    separate,
                 },
                 content,
             ))
@@ -369,7 +371,7 @@ fn delete_selection(
         .collect::<Vec<_>>();
     let scope = Scope::new(true, &paths)?;
     let endpoint = (location.session, location.directory);
-    let (_, entries) = scan(&endpoint, &scope, true, cancel, &mut |_| {})?;
+    let (_, entries) = scan(&endpoint, &scope, true, &|_, _| false, cancel, &mut |_| {})?;
     for (path, before) in paths.iter().zip(selected) {
         if entries.get(path) != Some(before) {
             return Err(io::Error::other(format!(
@@ -430,6 +432,7 @@ mod tests {
                 .relative_directory(&root, Path::new("panel"))
                 .unwrap(),
             session,
+            profile: None,
         };
         panel
             .session

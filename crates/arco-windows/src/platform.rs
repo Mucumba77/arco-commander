@@ -8,9 +8,11 @@ use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{GlobalFree, INVALID_HANDLE_VALUE, POINT};
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_COMPRESSED, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SPARSE_FILE,
-    FILE_COMPRESSION_INFO, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_INFO_BY_HANDLE_CLASS,
-    FILE_READ_ATTRIBUTES, FILE_STANDARD_INFO, FileCompressionInfo, FileIdInfo, FileStandardInfo,
-    GetDiskFreeSpaceExW, GetFileInformationByHandleEx, GetLogicalDrives, MoveFileExW,
+    FILE_BASIC_INFO, FILE_COMPRESSION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_INFO_BY_HANDLE_CLASS, FILE_READ_ATTRIBUTES,
+    FILE_STANDARD_INFO, FILE_WRITE_ATTRIBUTES, FileBasicInfo, FileCompressionInfo, FileIdInfo,
+    FileStandardInfo, GetDiskFreeSpaceExW, GetFileInformationByHandleEx, GetLogicalDrives,
+    MoveFileExW, SetFileInformationByHandle,
 };
 use windows_sys::Win32::System::Console::{
     ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_OUTPUT_HANDLE,
@@ -129,6 +131,15 @@ pub fn terminal(path: &Path) -> io::Result<()> {
         .map(|_| ())
 }
 
+pub fn system_information(version_only: bool) -> io::Result<()> {
+    let name = if version_only {
+        "winver.exe"
+    } else {
+        "msinfo32.exe"
+    };
+    Command::new(system_program(name)?).spawn().map(|_| ())
+}
+
 fn system_program(name: &str) -> io::Result<PathBuf> {
     let root =
         std::env::var_os("SystemRoot").ok_or_else(|| io::Error::other("SystemRoot is missing"))?;
@@ -206,7 +217,126 @@ fn query_file_info<T: Default>(
     }
 }
 
-fn extended_path(path: &Path) -> io::Result<PathBuf> {
+pub fn edit_metadata(path: &Path, edit: MetadataEdit) -> io::Result<()> {
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    edit_file_metadata(&file, edit)
+}
+
+pub fn edit_file_metadata(file: &std::fs::File, edit: MetadataEdit) -> io::Result<()> {
+    const EDITABLE: u32 = 1 | 2 | 4 | 32;
+    const NORMAL: u32 = 128;
+    if (edit.set | edit.clear) & !EDITABLE != 0 || edit.set & edit.clear != 0 {
+        return Err(io::Error::other("Ungültige Attributänderung."));
+    }
+    let old = query_file_info::<FILE_BASIC_INFO>(file, FileBasicInfo)?;
+    if old.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::other(
+            "Attribute von Verknüpfungen werden übersprungen.",
+        ));
+    }
+    let flags = if edit.set | edit.clear == 0 {
+        0
+    } else {
+        let value = (old.FileAttributes | edit.set) & !(edit.clear | NORMAL);
+        if value == 0 { NORMAL } else { value }
+    };
+    let information = FILE_BASIC_INFO {
+        CreationTime: windows_ticks(edit.created)?,
+        LastAccessTime: windows_ticks(edit.accessed)?,
+        LastWriteTime: windows_ticks(edit.modified)?,
+        ChangeTime: 0,
+        FileAttributes: flags,
+    };
+    let ok = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileBasicInfo,
+            (&raw const information).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn windows_ticks(time: Option<SystemTime>) -> io::Result<i64> {
+    let Some(time) = time else { return Ok(0) };
+    let nanos = match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => duration.as_nanos() as i128,
+        Err(error) => -(error.duration().as_nanos() as i128),
+    };
+    let ticks = (11_644_473_600_000_000_000i128 + nanos) / 100;
+    i64::try_from(ticks)
+        .ok()
+        .filter(|&time| time > 0)
+        .ok_or_else(|| io::Error::other("Der Zeitpunkt liegt außerhalb des Windows-Zeitbereichs."))
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+    use std::os::windows::fs::MetadataExt;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn edits_windows_attributes_and_timestamps_on_a_file_and_directory() {
+        let fixture = tempfile::tempdir().unwrap();
+        let file = fixture.path().join("file");
+        std::fs::write(&file, b"data").unwrap();
+        let created = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let modified = created + Duration::from_secs(300);
+        let accessed = modified + Duration::from_secs(300);
+        for path in [file.as_path(), fixture.path()] {
+            let handle = std::fs::OpenOptions::new()
+                .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
+                .share_mode(0)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(path)
+                .unwrap();
+            edit_file_metadata(
+                &handle,
+                MetadataEdit {
+                    set: 2,
+                    clear: 32,
+                    created: Some(created),
+                    modified: Some(modified),
+                    accessed: Some(accessed),
+                },
+            )
+            .unwrap();
+            // NTFS may update access time again once other readers can open the entry.
+            let metadata = query_file_info::<FILE_BASIC_INFO>(&handle, FileBasicInfo).unwrap();
+            assert_eq!(metadata.FileAttributes & (2 | 32), 2);
+            assert_eq!(metadata.CreationTime, windows_ticks(Some(created)).unwrap());
+            assert_eq!(
+                metadata.LastWriteTime,
+                windows_ticks(Some(modified)).unwrap()
+            );
+            assert_eq!(
+                metadata.LastAccessTime,
+                windows_ticks(Some(accessed)).unwrap()
+            );
+            drop(handle);
+            edit_metadata(
+                path,
+                MetadataEdit {
+                    clear: 2,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(std::fs::metadata(path).unwrap().file_attributes() & 2, 0);
+        }
+    }
+}
+
+pub(crate) fn extended_path(path: &Path) -> io::Result<PathBuf> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("root cannot be renamed"))?;
@@ -297,6 +427,34 @@ pub fn copy_text(text: &str) -> io::Result<()> {
     let clipboard = Clipboard::open(true)?;
     clipboard.clear()?;
     clipboard.set(CF_UNICODETEXT, &bytes)
+}
+
+pub fn paste_text() -> io::Result<String> {
+    let _clipboard = Clipboard::open(false)?;
+    let memory = unsafe { GetClipboardData(CF_UNICODETEXT) };
+    if memory.is_null() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "Die Zwischenablage enthält keinen Text.",
+        ));
+    }
+    let size = unsafe { GlobalSize(memory) };
+    if !(2..=16 * 1024 * 1024).contains(&size) {
+        return Err(io::Error::other("Ungültige Größe des Zwischenablagetexts."));
+    }
+    let pointer = unsafe { GlobalLock(memory) }.cast::<u16>();
+    if pointer.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    // The clipboard remains open and the allocation locked during the read.
+    let data = unsafe { std::slice::from_raw_parts(pointer, size / 2) };
+    let text = data
+        .iter()
+        .position(|&character| character == 0)
+        .ok_or_else(|| io::Error::other("Der Zwischenablagetext ist unvollständig."))
+        .and_then(|end| String::from_utf16(&data[..end]).map_err(io::Error::other));
+    unsafe { GlobalUnlock(memory) };
+    text
 }
 
 pub fn copy_paths(paths: &[PathBuf], cut: bool) -> io::Result<()> {

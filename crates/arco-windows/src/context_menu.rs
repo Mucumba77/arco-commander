@@ -69,7 +69,13 @@ pub fn show_context_menu(paths: &[PathBuf], point: (i32, i32), extended: bool) -
     if !(FIRST_COMMAND..=LAST_COMMAND).contains(&command) {
         return Err(io::Error::other("Ungültiger Windows-Menübefehl."));
     }
-    invoke(&context, owner, parent, point, command - FIRST_COMMAND)?;
+    invoke(
+        &context,
+        owner,
+        parent.filter(|path| path.is_absolute()),
+        point,
+        command - FIRST_COMMAND,
+    )?;
     Ok(true)
 }
 
