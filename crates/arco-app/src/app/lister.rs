@@ -13,7 +13,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Duration;
 use tempfile::TempDir;
 
-mod surface;
+pub(super) mod surface;
 
 pub(crate) const VIEWER_ENCODINGS: &[PreviewEncoding] = &[
     PreviewEncoding::Auto,
@@ -305,7 +305,13 @@ impl State {
                 let label = content.label();
                 self.raw_path = Some(path.clone());
                 window.set_has_rich(true);
-                match surface::Surface::new(window.window(), &path, content, window.get_light()) {
+                match surface::Surface::new(
+                    window.window(),
+                    &path,
+                    content,
+                    window.get_light(),
+                    false,
+                ) {
                     Ok(surface) => {
                         self.surface = Some(surface);
                         window.set_status(format!("{label} · Formatierte Vorschau").into());
@@ -493,6 +499,13 @@ impl App {
             });
         }
         let weak = window.as_weak();
+        let fullscreen = window.as_weak();
+        window.on_toggle_fullscreen(move || {
+            if let Some(window) = fullscreen.upgrade() {
+                let window = window.window();
+                window.set_fullscreen(!window.is_fullscreen());
+            }
+        });
         let controls = state.clone();
         window.on_close_lister(move || {
             if let Ok(mut controls) = controls.try_borrow_mut() {

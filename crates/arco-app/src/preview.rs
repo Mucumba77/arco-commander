@@ -16,19 +16,27 @@ pub(crate) struct ThumbnailRequest {
 }
 
 impl ThumbnailRequest {
-    pub(crate) fn for_entry(entry: &Entry) -> Option<Self> {
+    pub(crate) fn for_entry(
+        entry: &Entry,
+        plugin_supports: impl FnOnce(&Path) -> bool,
+    ) -> Option<Self> {
         let size = entry.size?;
         let modified = entry.modified?;
-        (entry.kind == Kind::File && size <= IMAGE_LIMIT && image_extension(&entry.path)).then(
-            || Self {
-                path: entry.path.clone(),
-                size,
-                modified,
-            },
-        )
+        (entry.kind == Kind::File
+            && ((size <= IMAGE_LIMIT && image_extension(&entry.path))
+                || plugin_supports(&entry.path)))
+        .then(|| Self {
+            path: entry.path.clone(),
+            size,
+            modified,
+        })
     }
 
-    pub(crate) fn load(&self) -> Option<image::RgbaImage> {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn snapshot(&self) -> Option<std::fs::Metadata> {
         let before = files::regular_metadata(&self.path).ok()?;
         if !before.is_file()
             || before.len() != self.size
@@ -36,6 +44,14 @@ impl ThumbnailRequest {
         {
             return None;
         }
+        Some(before)
+    }
+
+    pub(crate) fn load(&self) -> Option<image::RgbaImage> {
+        if self.size > IMAGE_LIMIT || !image_extension(&self.path) {
+            return None;
+        }
+        let before = self.snapshot()?;
         let image = decode_image(&self.path, 144, 88).ok()?;
         files::ensure_unchanged(&self.path, &before).ok()?;
         Some(image)
@@ -49,6 +65,14 @@ pub enum Content {
 }
 
 pub fn read(path: &Path) -> io::Result<Content> {
+    read_with_image_limit(path, None)
+}
+
+pub(crate) fn read_quick(path: &Path) -> io::Result<Content> {
+    read_with_image_limit(path, Some(1280))
+}
+
+fn read_with_image_limit(path: &Path, image_limit: Option<u32>) -> io::Result<Content> {
     let metadata = arco_core::files::regular_metadata(path)?;
     if !metadata.is_file() {
         return Err(io::Error::other("Wähle eine reguläre Datei."));
@@ -56,20 +80,28 @@ pub fn read(path: &Path) -> io::Result<Content> {
     if let Some(rich) = rich::read(path, &metadata)? {
         return Ok(Content::Rich(rich));
     }
-    read_raw_with_metadata(path, &metadata)
+    read_raw_with_metadata(path, &metadata, image_limit)
 }
 
 pub(crate) fn read_raw(path: &Path) -> io::Result<Content> {
     let metadata = files::regular_metadata(path)?;
-    read_raw_with_metadata(path, &metadata)
+    read_raw_with_metadata(path, &metadata, None)
 }
 
-fn read_raw_with_metadata(path: &Path, metadata: &std::fs::Metadata) -> io::Result<Content> {
+fn read_raw_with_metadata(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    image_limit: Option<u32>,
+) -> io::Result<Content> {
     if image_extension(path)
         && metadata.len() <= IMAGE_LIMIT
-        && let Ok(image) = decode_image(path, 1280, 1280)
+        && let Ok(image) = read_image(path)
     {
-        return Ok(Content::Image(image));
+        let image = match image_limit {
+            Some(size) => image.thumbnail(size, size),
+            None => image,
+        };
+        return Ok(Content::Image(image.into_rgba8()));
     }
     let page = tools::preview(path, 0, PreviewMode::Text)?;
     if page.text.chars().take(4096).any(|character| {
@@ -99,13 +131,17 @@ pub(crate) fn decode_image(
     width: u32,
     height: u32,
 ) -> image::ImageResult<image::RgbaImage> {
+    Ok(read_image(path)?.thumbnail(width, height).into_rgba8())
+}
+
+fn read_image(path: &Path) -> image::ImageResult<image::DynamicImage> {
     let mut reader = image::ImageReader::open(path)?.with_guessed_format()?;
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(4096);
     limits.max_image_height = Some(4096);
     limits.max_alloc = Some(128 * 1024 * 1024);
     reader.limits(limits);
-    Ok(reader.decode()?.thumbnail(width, height).into_rgba8())
+    reader.decode()
 }
 
 pub fn to_slint(image: &image::RgbaImage) -> slint::Image {
@@ -128,7 +164,7 @@ mod tests {
             .save(&path)
             .unwrap();
         let entry = files::list(fixture.path()).unwrap().entries.remove(0);
-        let request = ThumbnailRequest::for_entry(&entry).unwrap();
+        let request = ThumbnailRequest::for_entry(&entry, |_| false).unwrap();
         let image = request.load().unwrap();
         assert_eq!(image.dimensions(), (144, 72));
         assert_eq!(image.get_pixel(0, 0).0, [3, 47, 65, 255]);

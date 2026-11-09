@@ -200,6 +200,20 @@ impl Session {
         self.connection.url.clone()
     }
 
+    pub fn restore_directory(&self, address: Option<&str>) -> io::Result<Url> {
+        let Some(address) = address else {
+            return Ok(self.initial_directory());
+        };
+        let mut url = Url::parse(address).map_err(io::Error::other)?;
+        self.validate(&url)?;
+        if !url.path().ends_with('/') {
+            url.path_segments_mut()
+                .map_err(|_| io::Error::other("Ungültiger FTP-Pfad."))?
+                .push("");
+        }
+        Ok(url)
+    }
+
     pub fn directory(&self, path: &str) -> io::Result<Url> {
         let mut url = self.connection.url.clone();
         let mut segments = url

@@ -1,0 +1,309 @@
+Dateien	Files
+Anzeigen	View
+Intern anzeigen	View internally
+Lister in eigenem Fenster	Lister in separate window
+Bearbeiten	Edit
+Dateikommentar bearbeiten	Edit file comment
+Attribute und Zeitstempel ändern	Change attributes and timestamps
+Textdatei drucken	Print text file
+Dateiliste drucken	Print file list
+Dateiliste mit Unterordnern drucken	Print file list with subfolders
+Kopieren	Copy
+Transfermanager	Transfer Manager
+In markierte Zielordner kopieren	Copy to selected destination folders
+Dateinamen als Text kopieren	Copy file names as text
+Dateidetails als TSV kopieren	Copy file details as TSV
+Dateien kodieren (MIME, UUE, XXE)	Encode files (MIME, UUE, XXE)
+Dateien dekodieren (MIME, UUE, XXE, BinHex)	Decode files (MIME, UUE, XXE, BinHex)
+Verschieben	Move
+Neuer Ordner	New folder
+Papierkorb	Recycle Bin
+Windows-Kontextmenü	Windows context menu
+Mit Windows öffnen	Open with Windows
+Öffnen mit …	Open with …
+Interne Dateiaktionen …	Internal file actions …
+Windows-Verknüpfung erstellen …	Create Windows shortcut …
+Datenträgerbezeichnung ändern …	Change volume label …
+Als Administrator starten	Run as administrator
+Dateiauftrag mit Windows-Rechteabfrage …	Elevated Windows file operation …
+Als anderer Benutzer starten …	Run as another user …
+Eigenschaften	Properties
+Markieren	Select
+Auswahl in Dateiliste speichern	Save selection to file
+Auswahl aus Dateiliste laden	Load selection from file
+Auswahl aus Zwischenablage laden	Load selection from clipboard
+Alles markieren	Select all
+Nach Maske markieren	Select by mask
+Auswahl umkehren	Invert selection
+Auswahl wiederherstellen	Restore selection
+Dateifenster vergleichen	Compare panels
+Dateifenster einschließlich Ordner vergleichen	Compare panels including folders
+Vergleichen und gleiche Dateien ausblenden	Compare and hide identical files
+Befehle	Commands
+Suchen	Search
+Suchen in separatem Fenster	Search in separate window
+Schnellsuche	Quick search
+Prüfsumme aus Zwischenablage prüfen	Verify checksum from clipboard
+Nach Plugin-Feld suchen	Search by plugin field
+WDX-Suchprofile	WDX search profiles
+WDX-Feld ändern …	Edit WDX field …
+Dateien vergleichen	Compare files
+Verzeichnisse synchronisieren	Synchronize directories
+Synchronisierungsprofile	Synchronization profiles
+Mehrfach umbenennen	Multi-rename
+Umbenennvorlagen …	Rename templates …
+Namensliste bearbeiten …	Edit list of names …
+Namensliste im externen Editor bearbeiten …	Edit list of names in external editor …
+Ordnerfavoriten	Directory favorites
+Aktuellen Ordner zu Favoriten hinzufügen …	Add current folder to favorites …
+Ordnerfavoriten verwalten …	Manage directory favorites …
+Befehlspalette	Command palette
+Archive	Archives
+Öffnen	Open
+Packen	Pack
+Mit Profil packen …	Pack with profile …
+Entpacken	Extract
+Prüfen	Test
+Netz	Network
+Netzlaufwerk verbinden …	Map network drive …
+Netzlaufwerk trennen …	Disconnect network drive …
+Lokale Windows-Freigaben …	Local Windows shares …
+Ordner freigeben …	Share folder …
+FTP-Verbindungen …	FTP connections …
+FTP-Schnellverbindung …	FTP quick connect …
+FTP-Verzeichnis anzeigen	List FTP directory
+FTP-Ordner wechseln	Change FTP directory
+FTP herunterladen	Download from FTP
+FTP hochladen	Upload to FTP
+FTP-Unix-Rechte ändern …	Change FTP Unix permissions …
+Offene FTP-Bearbeitungen …	Open FTP edits …
+FTP mit lokalem Ordner abgleichen	Synchronize FTP with local folder
+FTP trennen	Disconnect FTP
+WFX-Dateisystem öffnen …	Open WFX file system …
+WFX verlassen	Leave WFX
+Ansicht	View
+Windows-Ordner öffnen …	Open Windows folder …
+Kurz- und Detailansicht wechseln	Switch between brief and detailed views
+Miniaturansicht	Thumbnails
+Kommentaransicht	File comments
+Spaltensätze …	Column sets …
+Ansichtsmodi …	View modes …
+Automatische Ansichten umschalten	Toggle automatic view modes
+Mehrfachsortierung …	Multi-column sort …
+Unsortierte Dateiliste	Unsorted file list
+Ordnerbaum umschalten	Toggle directory tree
+Windows-Desktop im Dateifenster	Windows Desktop in panel
+Dieser PC im Dateifenster	This PC in panel
+Gemeinsamer Ordnerbaum	Shared directory tree
+Ordnerbaum je Fenster	Directory tree per panel
+Separate Ordnerbäume ausblenden	Hide separate directory trees
+Schnellansicht	Quick view
+Ordnergrößen berechnen	Calculate folder sizes
+Zweigansicht	Branch view
+Zweigansicht der Auswahl	Branch view of selection
+Nur markierte Einträge umschalten	Toggle selected entries only
+Nur Programme anzeigen	Show programs only
+Dateitypen im Tab filtern …	Filter file types in tab …
+Alle Dateien anzeigen	Show all files
+Tab-Gruppen verwalten …	Manage tab groups …
+Ordner-Tabs als .tab exportieren …	Export folder tabs as .tab …
+Kürzlich geschlossene Tabs …	Recently closed tabs …
+Markierte Ordner in Tabs öffnen	Open selected folders in tabs
+Markierte Ordner auf Gegenseite in Tabs öffnen	Open selected folders in tabs on opposite side
+Versteckte Dateien umschalten	Toggle hidden files
+Ignorierliste umschalten	Toggle ignore list
+Fenster tauschen	Swap panels
+Fenster angleichen	Match panels
+Anordnung wechseln	Switch layout
+Farbschema wechseln	Switch color scheme
+Windows-Farbschema umschalten	Toggle Windows color scheme
+Konfigurieren	Configuration
+Everything-Suche	Everything search
+Eigene Buttonbars	Custom button bars
+NTFS-Kopieroptionen …	NTFS copy options …
+Buttonbar- und Startervorlagen …	Button bar and launcher templates …
+Einstellungen	Settings
+Sprache …	Language …
+Ignorierliste bearbeiten …	Edit ignore list …
+Ignorierliste importieren …	Import ignore list …
+Plugin-Verwaltung …	Manage plugins …
+Externe Packerprofile …	External packer profiles …
+WDX-Spalten verwalten …	Manage WDX columns …
+Automatische Ansichtsregeln …	Automatic view rules …
+TC-Ansichten importieren …	Import TC views …
+Datei- und Auswahlfarben …	File and selection colors …
+Interne Dateizuordnungen …	Internal file associations …
+Starter	Launcher
+Programme und Befehle …	Programs and commands …
+Starter bearbeiten …	Edit launcher …
+Hilfe	Help
+Tastatur und Befehle	Keyboard and commands
+Systeminformationen	System information
+Windows-Version	Windows version
+Oberflächensprache	Interface language
+Wähle die Sprache für Arco Commander.	Choose the language for Arco Commander.
+Bereit	Ready
+Aktualisieren	Refresh
+Dateien packen	Pack files
+Archiv entpacken	Extract archive
+FTP-Verbindungen	FTP connections
+Dateien suchen	Find files
+Dateiinhalt vergleichen	Compare file contents
+Werkzeuge	Tools
+Laufwerk	Drive
+Zum Laufwerksstamm	Go to drive root
+Übergeordneter Ordner	Parent directory
+Zurück	Back
+Weiter	Next
+Vorwärts	Forward
+Pfad eingeben	Enter path
+Neuer Tab	New tab
+Tab schließen	Close tab
+Ordner-Tab verwalten	Manage folder tab
+Schnellfilter	Quick filter
+ Schnellfilter	 quick filter
+ Dateiliste	 file list
+Erw.	Ext.
+Größe	Size
+Datum	Date
+Links	Left
+Rechts	Right
+LINKS	LEFT
+RECHTS	RIGHT
+Kommentar	Comment
+Linkes Laufwerk wählen	Select left drive
+Rechtes Laufwerk wählen	Select right drive
+Arco-Befehlszeile	Arco command line
+Terminal im aktiven Ordner öffnen	Open terminal in active folder
+Bedienung	Operation
+Tastatur	Keyboard
+Schrift	Font
+Obere Symbolleiste anzeigen	Show top toolbar
+Symbolleiste zwischen den Dateifenstern anzeigen	Show toolbar between panels
+Laufwerksbuttons anzeigen	Show drive buttons
+Laufwerksliste anzeigen	Show drive list
+Ordner-Tabs anzeigen	Show folder tabs
+Aktuellen Pfad anzeigen	Show current path
+Anklickbare Pfadsegmente	Clickable path segments
+Zurück- und Vorwärtsbuttons anzeigen	Show back and forward buttons
+Spaltenüberschriften anzeigen	Show column headings
+Status der Dateilisten anzeigen	Show file-list status
+Befehlszeile anzeigen	Show command line
+Funktionstastenleiste anzeigen	Show function key bar
+Dateifenster übereinander	Stack file panels
+Mit Num + und Num * auch Ordner markieren	Include folders when selecting with Num + and Num *
+Schnellsuche starten	Start quick search
+Über das Tastenkürzel	Use the shortcut
+Beim Tippen	When typing
+Mit Alt	With Alt
+Mit Strg+Alt	With Ctrl+Alt
+Versteckte Dateien anzeigen	Show hidden files
+Windows-Farbschema verwenden	Use Windows color scheme
+Helles Farbschema	Light color scheme
+Strg-Klick markiert einzelne Einträge. Umschalt-Klick markiert einen Bereich.	Ctrl-click selects individual items. Shift-click selects a range.
+Befehl filtern	Filter commands
+Befehl für Tastenkürzel filtern	Filter commands by shortcut
+Belegbare Befehle	Assignable commands
+Ohne Belegung	Unassigned
+Aktuelle Belegungen	Current shortcuts
+Entfernen	Remove
+ entfernen	 remove
+Aufnahme abbrechen	Cancel recording
+Tastenkürzel aufzeichnen	Record shortcut
+Tastenkombination drücken · Esc bricht ab	Press a shortcut · Esc cancels
+Belegung ersetzen	Replace shortcut
+Zuweisen	Assign
+Standardbelegung laden	Restore default shortcuts
+Schrift in den Dateilisten	Font in file lists
+Schriftfamilie	Font family
+Schriftgröße	Font size
+Abbrechen	Cancel
+Anwenden	Apply
+Speichern	Save
+Schließen	Close
+Ausführen	Run
+Vorschau	Preview
+Text kopieren	Copy text
+Eigenes Fenster	Separate window
+Inhalt	Content
+Schnellansicht schließen	Close quick view
+Dateivorschau	File preview
+Hexbytes suchen	Find hex bytes
+Text suchen	Find text
+Ab Anfang	From start
+Byte-Offset (dezimal oder 0x)	Byte offset (decimal or 0x)
+Springen	Go to
+Quelldaten anzeigen	Show source data
+Einpassen	Fit
+Bild verkleinern	Zoom out
+Bild vergrößern	Zoom in
+Originalgröße	Actual size
+Vollbild	Full screen
+Namensmaske	Name mask
+Erweiterungsmaske	Extension mask
+RegEx=>Ersetzung (optional)	Regex=>replacement (optional)
+Umbenennen	Rename
+Neuer Name	New name
+Keine Namensänderungen.	No names changed.
+Umbenennvorlage bearbeiten	Edit rename template
+Aktion konnte nicht ausgeführt werden	Action could not be completed
+[N] Name, [E] Erweiterung, [A] ganzer Name, [B] Elternordner, [C10+5:3] Zähler, [YMD] Datum, [hms] Uhrzeit, [U]/[L]/[F]/[n] Schreibweise, [X] Zwischenablage, [=Plugin.Feld] WDX-Wert.	[N] name, [E] extension, [A] full name, [B] parent folder, [C10+5:3] counter, [YMD] date, [hms] time, [U]/[L]/[F]/[n] case, [X] clipboard, [=Plugin.Field] WDX value.
+Suchen nach (optional)	Find (optional)
+Ersetzen durch	Replace with
+Regulärer Ausdruck	Regular expression
+Schreibweise beachten	Match case
+Nur erster Treffer	First match only
+Erweiterung einbeziehen	Include extension
+Ganzen Namen ersetzen	Replace entire name
+Platzhalter * und ?	Wildcards * and ?
+markiert	selected
+Ordner	folders
+ · Gleiche ausgeblendet	 · identical entries hidden
+ · Auswahlansicht	 · selection view
+ · Nur Programme	 · programs only
+frei von	free of
+FTP · Namensliste	FTP · Name list
+Archiv	Archive
+Windows-Shell	Windows Shell
+Dateien ziehen	Drag files
+Das Ziel hat die Verschiebung nicht eindeutig bestätigt. Prüfe Quelle und Ziel.	The destination did not clearly confirm the move. Check the source and destination.
+Erweiterte Suche	Advanced search
+Suchprofile	Search profiles
+Suchtreffer	Search results
+Datei am Ziel vorhanden	File exists at the destination
+Quelldatei	Source file
+Zieldatei	Destination file
+Neuer Zielname	New destination name
+Neuer Dateiname im selben Ordner	New file name in the same folder
+Dateifilter	File filter
+Fortsetzen	Resume
+Überspringen	Skip
+Weitere Windows-Orte …	More Windows locations …
+Wähle einen virtuellen Windows-Ordner für das aktive Dateifenster.	Choose a virtual Windows folder for the active panel.
+Windows-Netzwerk	Windows network
+Windows-Bibliotheken	Windows libraries
+Installierte Anwendungen	Installed applications
+Alle ältesten Dateien je Gruppe markieren	Select all oldest files in each group
+Alle neuesten Dateien je Gruppe markieren	Select all newest files in each group
+Dateien älter als die neueste markieren	Select files older than the newest
+Dateien neuer als die älteste markieren	Select files newer than the oldest
+Alle kleinsten Dateien je Gruppe markieren	Select all smallest files in each group
+Alle größten Dateien je Gruppe markieren	Select all largest files in each group
+Dateien größer als die kleinste markieren	Select files larger than the smallest
+Dateien kleiner als die größte markieren	Select files smaller than the largest
+Erstellungszeit übernehmen	Preserve creation time
+WFX-Spaltensätze	WFX column sets
+WFX-Spaltensatz bearbeiten	Edit WFX column set
+Standardansicht	Default view
+Neu anlegen	Create new
+Für dieses WFX-Plugin verwenden	Use for this WFX plugin
+Löschen	Delete
+Treffer übernehmen	Use results
+Älteste Datei je Gruppe markieren	Select the oldest file in each group
+Neueste Datei je Gruppe markieren	Select the newest file in each group
+Programmargumente prüfen	Review program arguments
+Bearbeite die Windows-Argumente und starte das Programm mit Ausführen.	Edit the Windows arguments and select Run to start the program.
+Ausgewählte Verzeichnisjunctions als Links kopieren	Copy selected directory junctions as links
+Plugin-Standardansicht	Plugin default view
+Bei WFX gilt ohne Vorzeichen die Plugin-Vorgabe. + sortiert aufsteigend, - absteigend.	For WFX, omitting the sign uses the plugin default. + sorts ascending, - sorts descending.
+Die angegebene WFX-Spalte fehlt in der Detailansicht.	The specified WFX column is absent from the details view.

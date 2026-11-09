@@ -27,10 +27,17 @@ use std::sync::atomic::Ordering;
 use zeroize::Zeroizing;
 
 pub enum Pending {
+    Language([profile::Language; 3]),
+    ShellTransfer(Vec<PathBuf>, arco_windows::ShellAction, bool),
+    ShellName(PathBuf, bool, bool),
+    ShellElevation,
     KnownFolder,
+    VirtualShellFolder,
     QuickFind,
+    TabFileFilter(usize, u64),
     SelectionFile(PathBuf, Option<Vec<PathBuf>>),
     DuplicateSearch(PathBuf),
+    DuplicateFields(PathBuf),
     HashClipboard(PathBuf, String, Vec<Hash>),
     AdvancedSearch(crate::app::AdvancedSearchSetup),
     EverythingPath,
@@ -76,6 +83,16 @@ pub enum Pending {
     ButtonbarEdit(usize, Option<usize>),
     ButtonbarFile(usize, bool),
     ButtonbarImport(usize, Vec<arco_core::profile::ButtonbarButton>),
+    ButtonbarMenu(
+        usize,
+        Vec<(String, Vec<arco_core::profile::ButtonbarButton>)>,
+    ),
+    ButtonbarProgram {
+        path: PathBuf,
+        working: Option<PathBuf>,
+        window: profile::ProgramWindow,
+        list_file: Option<tempfile::TempPath>,
+    },
     WdxSearchPlugin(WdxSearchTarget, Vec<plugin::Registration>),
     WdxSearchField(
         WdxSearchTarget,
@@ -91,7 +108,7 @@ pub enum Pending {
     WdxSearchProfileDelete(String),
     WdxRemove(Vec<plugin::WdxColumn>),
     Create(PathBuf, bool),
-    Rename(Vec<PathBuf>, bool),
+    Rename(Vec<PathBuf>, bool, rename::Times),
     RenameSetup(crate::app::RenameSetup),
     ApplyRename(rename::Plan),
     Transfer(Vec<PathBuf>, TransferDestination, Transfer),
@@ -227,6 +244,13 @@ const KNOWN_FOLDERS: &[(&str, arco_windows::KnownFolder)] = &[
     ("Benutzerordner", arco_windows::KnownFolder::Profile),
 ];
 
+const VIRTUAL_SHELL_FOLDERS: &[(&str, &str)] = &[
+    ("Windows-Netzwerk", arco_windows::SHELL_NETWORK),
+    ("Windows-Bibliotheken", arco_windows::SHELL_LIBRARIES),
+    ("Installierte Anwendungen", arco_windows::SHELL_APPLICATIONS),
+    ("Papierkorb", arco_windows::SHELL_RECYCLE_BIN),
+];
+
 fn asks_target_password(archive: &ArchiveTab) -> bool {
     is_zip(&archive.file)
         || (archive.catalog.contains_encrypted_entries() && archive.password().is_none())
@@ -234,6 +258,7 @@ fn asks_target_password(archive: &ArchiveTab) -> bool {
 
 pub const COMMANDS: &[(&str, &str)] = &[
     ("Suchen", "search"),
+    ("Suchen in separatem Fenster", "search-separate"),
     ("Nach Plugin-Feld suchen", "search-wdx"),
     ("WDX-Suchprofile", "wdx-search-profiles"),
     ("WDX-Feld ändern", "wdx-edit"),
@@ -278,6 +303,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("Nur markierte Einträge umschalten", "only-marked"),
     ("Nur Programme anzeigen", "only-programs"),
     ("Alle Dateien anzeigen", "clear-filter"),
+    ("Dateitypen im Tab filtern", "tab-file-filter"),
     ("Mehrfach umbenennen", "multi-rename"),
     ("Umbenennvorlagen", "rename-templates"),
     ("Namensliste bearbeiten", "rename-names"),
@@ -348,6 +374,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("Lister in eigenem Fenster", "view-separate"),
     ("Windows-Desktop im Dateifenster", "shell-desktop"),
     ("Dieser PC im Dateifenster", "shell-computer"),
+    ("Weitere Windows-Orte …", "shell-virtual-folders"),
     ("Letzten lokalen Ordner öffnen", "shell-local"),
     ("WDX-Metadaten abfragen", "wdx-inspect"),
     ("WDX-Spalten verwalten", "wdx-columns"),
@@ -379,6 +406,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("Spaltensatz auswählen", "column-sets"),
     ("Ansichtsmodus auswählen", "view-modes"),
     ("Automatische Ansichtsregeln", "auto-view-rules"),
+    ("TC-Ansichten importieren", "view-rules-import"),
     ("Datei- und Auswahlfarben", "file-colors"),
     ("Automatische Ansichten umschalten", "auto-view-toggle"),
     ("Mehrfachsortierung", "multi-sort"),
@@ -408,6 +436,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("Mit Windows öffnen", "system-open"),
     ("Öffnen mit", "open-with"),
     ("Als Administrator starten", "run-admin"),
+    ("Dateiauftrag mit Windows-Rechteabfrage", "shell-elevation"),
     ("Als anderer Benutzer starten", "run-other-user"),
     ("Windows-Verknüpfung erstellen", "create-shortcut"),
     ("Hilfe", "help"),
@@ -511,6 +540,20 @@ impl App {
             return;
         }
         match command {
+            "tab-file-filter" => {
+                let side = self.active;
+                let filter = self.current().options.file_filter.clone();
+                self.dialog("input", Pending::TabFileFilter(side, self.panels[side].request), Dialog {
+                    title: "Dateitypen im Tab filtern",
+                    description: "Die Dateitypen bleiben mit dem Tab gespeichert. Ordner bleiben sichtbar. Mehrere Masken mit Leerzeichen trennen, Ausschlüsse nach | angeben.",
+                    value: &filter, placeholder: "*.txt *.md | *.bak", ..Default::default()
+                });
+                return;
+            }
+            "search-separate" => {
+                self.open_separate_search();
+                return;
+            }
             "shell-desktop" | "shell-computer" => {
                 let address = if command == "shell-desktop" {
                     arco_windows::SHELL_DESKTOP
@@ -518,6 +561,19 @@ impl App {
                     arco_windows::SHELL_COMPUTER
                 };
                 self.open_shell_panel(self.active, address);
+                return;
+            }
+            "shell-virtual-folders" => {
+                let options = VIRTUAL_SHELL_FOLDERS
+                    .iter()
+                    .map(|(label, _)| crate::locale::tr(label))
+                    .collect::<Vec<_>>();
+                self.dialog("confirm", Pending::VirtualShellFolder, Dialog {
+                    title: "Weitere Windows-Orte …",
+                    description: "Wähle einen virtuellen Windows-Ordner für das aktive Dateifenster.",
+                    options: &options,
+                    ..Dialog::default()
+                });
                 return;
             }
             "shell-local" if self.current().shell.is_some() => {
@@ -583,7 +639,22 @@ impl App {
         let side = self.active;
         let hidden = self.profile.show_hidden;
         let ftp = self.current().ftp.is_some();
-        let passive_ftp = self.panels[1 - side].current().ftp.is_some();
+        let passive = self.panels[1 - side].current();
+        let passive_ftp = passive.ftp.is_some();
+        if ((self.current().deferred.is_some() || passive.deferred.is_some())
+            && matches!(command, "copy" | "move" | "sync"))
+            || (self.current().deferred.is_some() && command == "search")
+        {
+            self.status("Öffne den gespeicherten virtuellen Ordner zuerst mit Enter.");
+            return;
+        }
+        if self.shell_command(command) {
+            return;
+        }
+        if command == "shell-elevation" {
+            self.open_shell_elevation();
+            return;
+        }
         if ftp && command == "edit" {
             self.edit_ftp_file();
             return;
@@ -817,7 +888,10 @@ impl App {
             "starter" => self.starter(),
             "starter-edit" => self.buttonbar_list(2),
             "buttonbar-templates" => self.buttonbar_templates(),
-            "clear-filter" | "only-programs" => self.current_mut().set_programs_only(command == "only-programs", hidden),
+            "clear-filter" | "only-programs" => {
+                self.current_mut().set_programs_only(command == "only-programs", hidden);
+                self.save();
+            }
             "only-marked" => {
                 if !self.current_mut().toggle_selected_filter(hidden) {
                     self.status("Markiere zuerst die Einträge für die Auswahlansicht.");
@@ -866,11 +940,15 @@ impl App {
                 self.profile.light_mode = !self.effective_light_theme();
                 self.profile.system_theme = false;
                 self.sync_ui_settings();
+                self.publish(0);
+                self.publish(1);
                 self.save();
             }
             "system-theme" => {
                 self.profile.system_theme = !self.profile.system_theme;
                 self.sync_ui_settings();
+                self.publish(0);
+                self.publish(1);
                 self.save();
             }
             "hidden" => {
@@ -878,6 +956,16 @@ impl App {
                 self.sync_ui_settings();
             }
             "settings" => self.open_settings(),
+            "language" => {
+                let mut languages = crate::locale::LANGUAGES;
+                languages.sort_by_key(|language| *language != self.profile.language);
+                self.dialog("confirm", Pending::Language(languages), Dialog {
+                    title: "Oberflächensprache",
+                    description: "Wähle die Sprache für Arco Commander.",
+                    options: &languages.map(crate::locale::label),
+                    ..Dialog::default()
+                });
+            }
             "close-settings" => self.close_settings(),
             "close-drives" => self.ui().set_drive_side(-1),
             "edit" => self.with_file(|app, path| app.report(arco_windows::edit(&path, app.profile.editor.as_deref()))),
@@ -941,7 +1029,7 @@ impl App {
                 if let Some(plan) = self.undo.clone() { self.rename_review(plan); }
                 else { self.status("Keine Umbenennung in dieser Sitzung verfügbar."); }
             }
-            "search" if self.current().is_local() => self.open_advanced_search(),
+            "search" if self.current().is_local() || self.current().archive.is_some() => self.open_advanced_search(),
             "search" => {
                 let archive = self.current().archive.clone();
                 let search_text = archive.as_ref().is_none_or(|archive| archive_view::supports_text_search(&archive.file));
@@ -1008,7 +1096,7 @@ impl App {
                 self.dialog("confirm", Pending::DuplicateSearch(self.current().path.clone()), Dialog {
                     title: "Duplikate suchen",
                     description: "Durchsucht den aktiven Ordner einschließlich Unterordnern.",
-                    options: &["Identischer Inhalt", "Gleicher Name", "Gleiche Größe", "Name und Größe", "Name und Inhalt"],
+                    options: &["Identischer Inhalt", "Gleicher Name", "Gleiche Größe", "Name und Größe", "Name und Inhalt", "Gleiche Plugin-Felder …"],
                     ..Default::default()
                 });
             }
@@ -1130,12 +1218,12 @@ impl App {
         self.pending = Some(pending);
         let ui = self.ui();
         ui.set_dialog_transfer_filters(Default::default());
-        ui.set_dialog_title(data.title.into());
-        ui.set_dialog_description(data.description.into());
+        ui.set_dialog_title(crate::locale::tr(data.title).into());
+        ui.set_dialog_description(crate::locale::tr(data.description).into());
         ui.set_dialog_value(data.value.into());
         ui.set_dialog_second(data.second.into());
-        ui.set_dialog_placeholder(data.placeholder.into());
-        ui.set_dialog_second_placeholder(data.second_placeholder.into());
+        ui.set_dialog_placeholder(crate::locale::tr(data.placeholder).into());
+        ui.set_dialog_second_placeholder(crate::locale::tr(data.second_placeholder).into());
         ui.set_dialog_secret(data.secret);
         ui.set_dialog_second_secret(data.second_secret);
         ui.set_dialog_options(strings(data.options.iter().copied()));
@@ -1182,6 +1270,30 @@ impl App {
         transfer_filter: usize,
     ) -> io::Result<()> {
         match pending {
+            Pending::Language(languages) => {
+                let Some(language) = languages.get(option).copied() else {
+                    return Ok(());
+                };
+                crate::locale::select(language).map_err(io::Error::other)?;
+                self.profile.language = language;
+                self.sync_tools_menu();
+                self.save();
+                self.publish(0);
+                self.publish(1);
+                self.status("Bereit");
+            }
+            Pending::TabFileFilter(side, request) => {
+                if self.panels[side].request != request {
+                    return Ok(());
+                }
+                let value = value.trim();
+                profile::validate_tc_tab_filter(value)?;
+                self.panels[side]
+                    .current_mut()
+                    .set_file_filter(value.into(), self.profile.show_hidden);
+                self.save();
+                self.publish(side);
+            }
             Pending::KnownFolder => {
                 if let Some((_, folder)) = KNOWN_FOLDERS.get(option) {
                     self.load(
@@ -1189,6 +1301,11 @@ impl App {
                         arco_windows::known_folder(*folder)?,
                         Navigation::Jump,
                     );
+                }
+            }
+            Pending::VirtualShellFolder => {
+                if let Some((_, address)) = VIRTUAL_SHELL_FOLDERS.get(option) {
+                    self.open_shell_panel(self.active, address);
                 }
             }
             Pending::TransferManager => self.transfer_manager_action(option)?,
@@ -1203,7 +1320,9 @@ impl App {
             Pending::TransferConflict(ticket) => ticket.answer(option, second == "all", value),
             Pending::ViewSetup(setup) => self.submit_view_setup(setup, value, option)?,
             Pending::Associations(setup) => self.submit_association(setup, value, option)?,
-            Pending::Administration(setup) => self.submit_administration(setup, value, option)?,
+            Pending::Administration(setup) => {
+                self.submit_administration(setup, value, second, option)?
+            }
             Pending::TextCompare(_, _) | Pending::BinaryCompare(_, _) => (),
             Pending::EverythingPath => self.save_everything_path(value)?,
             Pending::PrintText(title, body) => {
@@ -1224,7 +1343,7 @@ impl App {
             }
             Pending::EditMetadata(paths) => self.apply_metadata_edit(paths, value)?,
             Pending::AdvancedSearch(_) => (),
-            Pending::SearchReview(review) => self.use_search_results(*review),
+            Pending::SearchReview(review) => self.use_search_results(*review, option),
             Pending::QuickFind => self.quick_find(value, option)?,
             Pending::SelectionFile(root, paths) => self.selection_file(root, paths, value)?,
             Pending::HashClipboard(path, expected, methods) => {
@@ -1250,23 +1369,25 @@ impl App {
             }
             Pending::DuplicateSearch(path) => {
                 use tools::DuplicateMode::*;
-                let mode = [Content, Name, Size, NameAndSize, NameAndContent][option.min(4)];
+                let Some(&mode) = [Content, Name, Size, NameAndSize, NameAndContent].get(option)
+                else {
+                    self.duplicate_fields_dialog(path);
+                    return Ok(());
+                };
                 let ignore = self.ignore_list();
+                let side = self.active;
+                let request = self.panels[side].request;
                 self.start_job("Suche nach Duplikaten …", false, move |job| {
-                    let groups = tools::duplicates(&[path], mode, ignore.as_deref(), &job.cancel)?;
-                    let mut text = String::new();
-                    for (index, group) in groups.iter().enumerate() {
-                        writeln!(text, "Gruppe {}", index + 1).unwrap();
-                        for path in group {
-                            writeln!(text, "  {}", display_path(path)).unwrap();
-                        }
-                    }
-                    Ok(Outcome::Text(
-                        format!("{} Duplikatgruppen", groups.len()),
-                        text,
-                    ))
+                    let groups = tools::duplicates(
+                        std::slice::from_ref(&path),
+                        mode,
+                        ignore.as_deref(),
+                        &job.cancel,
+                    )?;
+                    crate::app::duplicate_result(side, request, path, groups, &job.cancel)
                 });
             }
+            Pending::DuplicateFields(path) => self.find_duplicate_fields(path, value, option)?,
             Pending::Buttonbar => self.buttonbar_list(option),
             Pending::Starter => self.run_button(2, option),
             Pending::ButtonbarTemplates(names) => {
@@ -1286,7 +1407,20 @@ impl App {
                 self.confirm_buttonbar_import(bar, buttons)?
             }
             Pending::ButtonbarAction(bar, index) => self.buttonbar_action(bar, index, option)?,
-            Pending::ButtonbarEdit(bar, index) => self.save_button(bar, index, value)?,
+            Pending::ButtonbarEdit(bar, index) => self.save_button(bar, index, value, second)?,
+            Pending::ButtonbarMenu(bar, levels) => self.select_buttonbar_menu(bar, levels, option),
+            Pending::ButtonbarProgram {
+                path,
+                working,
+                window,
+                list_file,
+            } => Self::start_button_program(
+                &path,
+                arco_windows::parse_windows_arguments(value)?,
+                working,
+                window,
+                list_file,
+            )?,
             Pending::PackerProfiles(names) => self.choose_packer_profile(names, option),
             Pending::PackerProfileAction(name) => {
                 if option == 1 {
@@ -1413,47 +1547,16 @@ impl App {
                     )))
                 });
             }
-            Pending::Rename(paths, multi) => {
-                let plan = if multi {
-                    let clipboard = if rename::uses_clipboard(value)? {
-                        match arco_windows::paste_text() {
-                            Ok(text) => text.lines().next().map(str::to_owned),
-                            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-                            Err(error) => return Err(error),
-                        }
-                    } else {
-                        None
-                    };
-                    let pattern = if second.is_empty() {
-                        None
-                    } else {
-                        let (find, replacement) = second
-                            .split_once("=>")
-                            .ok_or_else(|| io::Error::other("Ersetzung benötigt Muster=>Ersatz"))?;
-                        Some((Regex::new(find).map_err(io::Error::other)?, replacement))
-                    };
-                    if !rename::wdx_fields(value)?.is_empty() {
-                        self.plan_wdx_rename(
-                            paths,
-                            value,
-                            pattern.map(|(pattern, replace)| (pattern, replace.to_owned())),
-                            clipboard,
-                        )?;
-                        return Ok(());
-                    }
-                    rename::Plan::new_with_clipboard(
-                        &paths,
-                        value,
-                        pattern
-                            .as_ref()
-                            .map(|(pattern, replace)| (pattern, *replace)),
-                        clipboard.as_deref(),
-                        |_, _| None,
-                    )?
+            Pending::Rename(paths, multi, times) => {
+                if multi {
+                    let search = rename::SearchOptions::from_legacy(second)?.compile()?;
+                    self.plan_multi_rename(paths, value, None, search, times)?;
                 } else {
-                    rename::Plan::single(&paths[0], tools::output_name(value)?)?
-                };
-                self.rename_review(plan);
+                    self.rename_review(rename::Plan::single(
+                        &paths[0],
+                        tools::output_name(value)?,
+                    )?);
+                }
             }
             Pending::RenameSetup(setup) => self.submit_rename_setup(setup, value, option)?,
             Pending::ApplyRename(plan) => {
@@ -1469,7 +1572,10 @@ impl App {
                         self.profile
                             .search_profiles
                             .values()
-                            .filter(|options| options.everything().is_none())
+                            .filter(|options| {
+                                options.everything().is_none()
+                                    && options.wdx_profile.trim().is_empty()
+                            })
                             .nth(index)
                     })
                     .map(arco_core::advanced_search::Options::compile)
@@ -1504,6 +1610,13 @@ impl App {
                     ignore: self.ignore_list(),
                 })?;
             }
+            Pending::ShellTransfer(paths, action, elevated) => {
+                self.queue_shell_transfer(paths, action, elevated)
+            }
+            Pending::ShellName(path, folder, elevated) => {
+                self.submit_shell_name(path, folder, elevated, value)?
+            }
+            Pending::ShellElevation => self.choose_shell_elevation(option)?,
             Pending::Delete(paths, permanent) => {
                 self.current_mut().remember_selection();
                 self.start_job("Löschen …", true, move |job| {
@@ -1632,6 +1745,7 @@ impl App {
                 self.start_job(title, true, move |job| {
                     let mut report = TransferReport::default();
                     let mut mime = Vec::new();
+                    let mut armored = Vec::new();
                     for path in paths {
                         if job.cancel.load(Ordering::Relaxed) {
                             report.cancelled = true;
@@ -1639,6 +1753,10 @@ impl App {
                         }
                         job.progress(format!("{title} · {}", display_path(&path)));
                         let format = selected.or_else(|| Format::from_path(&path));
+                        if decode && let Some(format @ (Format::Uue | Format::Xxe)) = format {
+                            armored.push((path, format));
+                            continue;
+                        }
                         if decode && matches!(format, Some(Format::Mime)) {
                             mime.push(path);
                             continue;
@@ -1675,6 +1793,25 @@ impl App {
                             Err(error) => report
                                 .errors
                                 .push(format!("{}: {error}", display_path(&path))),
+                        }
+                    }
+                    if !report.cancelled && !armored.is_empty() {
+                        job.progress(format!("{title} · UUE- und XXE-Teildateien"));
+                        for (source, result) in transport_encoding::decode_armored_batch(
+                            &armored,
+                            &directory,
+                            &job.cancel,
+                        ) {
+                            match result {
+                                Ok(()) => report.completed += 1,
+                                Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                                    report.cancelled = true;
+                                    break;
+                                }
+                                Err(error) => report
+                                    .errors
+                                    .push(format!("{}: {error}", display_path(&source))),
+                            }
                         }
                     }
                     if !report.cancelled && !mime.is_empty() {
@@ -2521,7 +2658,9 @@ impl App {
             .profile
             .search_profiles
             .iter()
-            .filter(|(_, options)| options.everything().is_none())
+            .filter(|(_, options)| {
+                options.everything().is_none() && options.wdx_profile.trim().is_empty()
+            })
             .map(|(name, _)| name.as_str())
             .collect();
         if !local_profiles.is_empty() {
@@ -2593,16 +2732,20 @@ impl App {
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
+        let separate = multi
+            && template
+                .as_ref()
+                .is_none_or(|item| item.extension.is_some());
         let data = if multi {
             Dialog {
                 title: "Mehrfach umbenennen",
-                description: "[N] Name, [E] Erweiterung, [F] ganzer Name, [C10+5:3] Zähler, [Y]-[M]-[D] Änderungsdatum, [U]/[L]/[n] Groß- und Kleinschreibung, [X] oder [X+] Zwischenablage, [=Plugin.Feld] WDX-Wert.",
-                value: template.as_ref().map_or("[F]", |item| item.mask.as_str()),
-                second: template
-                    .as_ref()
-                    .map_or("", |item| item.replacement.as_str()),
+                description: if separate {
+                    "[N] Name, [E] Erweiterung, [A] ganzer Name, [B] Elternordner, [C10+5:3] Zähler, [YMD] Datum, [hms] Uhrzeit, [U]/[L]/[F]/[n] Schreibweise, [X] Zwischenablage, [=Plugin.Feld] WDX-Wert."
+                } else {
+                    "Vorlage mit gemeinsamer Maske. [N] Name, [E] Erweiterung, [F] ganzer Name."
+                },
+                value: template.as_ref().map_or("[N]", |item| item.mask.as_str()),
                 placeholder: "Namensmaske",
-                second_placeholder: "RegEx=>Ersetzung (optional)",
                 ..Default::default()
             }
         } else {
@@ -2613,12 +2756,186 @@ impl App {
                 ..Default::default()
             }
         };
-        self.dialog("input", Pending::Rename(paths, multi), data);
+        if multi {
+            let search = match template
+                .as_ref()
+                .map(|template| {
+                    template.search.clone().map_or_else(
+                        || rename::SearchOptions::from_legacy(&template.replacement),
+                        Ok,
+                    )
+                })
+                .transpose()
+            {
+                Ok(search) => search.unwrap_or_else(|| rename::SearchOptions {
+                    wildcards: true,
+                    ..Default::default()
+                }),
+                Err(error) => {
+                    self.status(error.to_string());
+                    return;
+                }
+            };
+            let ui = self.ui();
+            ui.set_rename_separate(separate);
+            ui.set_rename_extension(
+                template
+                    .as_ref()
+                    .and_then(|item| item.extension.as_deref())
+                    .unwrap_or("[E]")
+                    .into(),
+            );
+            ui.set_rename_search(crate::RenameSearch {
+                find: search.find.into(),
+                replacement: search.replace.into(),
+                regex: search.regex,
+                wildcards: search.wildcards,
+                match_case: search.match_case,
+                first_only: search.first_only,
+                include_extension: !separate || search.include_extension,
+                substitute: search.substitute,
+            });
+        }
+        self.dialog(
+            if multi { "multi-rename" } else { "input" },
+            Pending::Rename(paths, multi, rename::Times::now()),
+            data,
+        );
+    }
+
+    pub(crate) fn submit_multi_rename(
+        &mut self,
+        mask: &str,
+        extension: &str,
+        search: crate::RenameSearch,
+    ) {
+        if !matches!(self.pending, Some(Pending::Rename(_, true, _))) {
+            return;
+        }
+        let Some(Pending::Rename(paths, true, times)) = self.pending.take() else {
+            return;
+        };
+        let extension = self.ui().get_rename_separate().then_some(extension);
+        let search = rename::SearchOptions {
+            find: search.find.to_string(),
+            replace: search.replacement.to_string(),
+            regex: search.regex,
+            wildcards: search.wildcards,
+            match_case: search.match_case,
+            first_only: search.first_only,
+            include_extension: search.include_extension,
+            substitute: search.substitute,
+        };
+        match search.compile().and_then(|search| {
+            self.plan_multi_rename(paths.clone(), mask, extension, search, times)
+        }) {
+            Ok(()) => {
+                if self.pending.is_none() {
+                    self.close_dialog();
+                }
+            }
+            Err(error) => {
+                self.pending = Some(Pending::Rename(paths, true, times));
+                self.ui().set_dialog_description(error.to_string().into());
+            }
+        }
+    }
+
+    pub(crate) fn edit_multi_rename(&mut self) {
+        if let Some(Pending::Rename(_, true, times)) = &mut self.pending {
+            times.edited = chrono::Local::now().naive_local();
+        }
+    }
+
+    fn plan_multi_rename(
+        &mut self,
+        paths: Vec<PathBuf>,
+        mask: &str,
+        extension: Option<&str>,
+        search: Option<rename::Search>,
+        times: rename::Times,
+    ) -> io::Result<()> {
+        let mut needs_clipboard = false;
+        let mut needs_capture = false;
+        let mut fields = Vec::new();
+        for expression in std::iter::once(mask).chain(extension) {
+            needs_clipboard |= rename::uses_clipboard(expression)?;
+            needs_capture |= rename::uses_capture_time(expression)?;
+            for field in rename::wdx_fields(expression)? {
+                if !fields.contains(&field) {
+                    fields.push(field);
+                }
+            }
+        }
+        let clipboard = if needs_clipboard {
+            match arco_windows::paste_text() {
+                Ok(text) => text.lines().next().map(str::to_owned),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
+        if !fields.is_empty() {
+            self.plan_wdx_rename(paths, mask, extension, &fields, search, times, clipboard)?;
+            return Ok(());
+        }
+        if needs_capture {
+            let mask = mask.to_owned();
+            let extension = extension.map(str::to_owned);
+            self.start_job(
+                "Lese Aufnahmedaten für die Umbenennung …",
+                false,
+                move |job| {
+                    let plan = rename::Plan::new_with_search_at(
+                        &paths,
+                        &mask,
+                        extension.as_deref(),
+                        search.as_ref(),
+                        rename::PreviewContext {
+                            times,
+                            cancel: Some(&job.cancel),
+                        },
+                        clipboard.as_deref(),
+                        |_, _| None,
+                    )?;
+                    files::check_cancel(&job.cancel)?;
+                    Ok(Outcome::RenamePreview(plan))
+                },
+            );
+            return Ok(());
+        }
+        let plan = rename::Plan::new_with_search_at(
+            &paths,
+            mask,
+            extension,
+            search.as_ref(),
+            rename::PreviewContext {
+                times,
+                cancel: None,
+            },
+            clipboard.as_deref(),
+            |_, _| None,
+        )?;
+        self.rename_review(plan);
+        Ok(())
     }
 
     pub(crate) fn rename_review(&mut self, plan: rename::Plan) {
+        let description = if plan.skipped_capture() == 0 {
+            String::new()
+        } else {
+            format!(
+                "{} ohne lesbares Aufnahmedatum übersprungen.",
+                plan.skipped_capture()
+            )
+        };
         if plan.entries().is_empty() {
-            self.status("Keine Namensänderungen.");
+            if description.is_empty() {
+                self.status("Keine Namensänderungen.");
+            } else {
+                self.status(format!("Keine Namensänderungen. {description}"));
+            }
             return;
         }
         let mut body = String::new();
@@ -2630,6 +2947,7 @@ impl App {
             Pending::ApplyRename(plan),
             Dialog {
                 title: "Umbenennung prüfen",
+                description: &description,
                 value: &body,
                 ..Default::default()
             },
@@ -3583,6 +3901,7 @@ fn compatibility_command(name: &str) -> Option<&'static str> {
         "cm_copyfiledetailstoclip" | "2036" => Some("copy-details"),
         "cm_rereadsource" => Some("refresh"),
         "cm_searchfor" => Some("search"),
+        "cm_searchstandalone" | "545" => Some("search-separate"),
         "cm_multirenamefiles" | "multirename" => Some("multi-rename"),
         "cm_filesync" => Some("sync"),
         "cm_ftpconnect" | "550" => Some("ftp-profiles"),

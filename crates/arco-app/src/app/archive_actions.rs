@@ -43,7 +43,11 @@ pub(super) fn check_archive(archive: &ArchiveTab) -> io::Result<()> {
     }
 }
 
-pub(super) fn read_archive_preview(file: &Path, member: &Path) -> io::Result<preview::Content> {
+pub(super) fn stage_archive_preview(
+    file: &Path,
+    member: &Path,
+    cancel: &AtomicBool,
+) -> io::Result<(tempfile::TempDir, PathBuf)> {
     let storage = tempfile::tempdir()?;
     let path = extract_preview(
         file,
@@ -51,9 +55,9 @@ pub(super) fn read_archive_preview(file: &Path, member: &Path) -> io::Result<pre
         storage.path(),
         &Selection::preview(member)?,
         None,
-        &AtomicBool::new(false),
+        cancel,
     )?;
-    preview::read_raw(&path)
+    Ok((storage, path))
 }
 
 fn extract_preview(

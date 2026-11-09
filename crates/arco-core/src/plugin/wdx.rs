@@ -40,6 +40,26 @@ impl WdxKey {
     }
 }
 
+impl Eq for WdxKey {}
+
+impl PartialEq for WdxKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl PartialOrd for WdxKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for WdxKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.compare(other)
+    }
+}
+
 pub fn wdx_order(a: Option<&WdxValue>, b: Option<&WdxValue>, descending: bool) -> Ordering {
     match (a, b) {
         (Some(a), Some(b)) if descending => b.key.compare(&a.key),

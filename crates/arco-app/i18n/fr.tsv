@@ -1,0 +1,309 @@
+Dateien	Fichiers
+Anzeigen	Afficher
+Intern anzeigen	Afficher avec le lecteur interne
+Lister in eigenem Fenster	Lister dans une fenêtre séparée
+Bearbeiten	Modifier
+Dateikommentar bearbeiten	Modifier le commentaire du fichier
+Attribute und Zeitstempel ändern	Modifier les attributs et les dates
+Textdatei drucken	Imprimer le fichier texte
+Dateiliste drucken	Imprimer la liste des fichiers
+Dateiliste mit Unterordnern drucken	Imprimer la liste avec les sous-dossiers
+Kopieren	Copier
+Transfermanager	Gestionnaire de transferts
+In markierte Zielordner kopieren	Copier vers les dossiers cibles sélectionnés
+Dateinamen als Text kopieren	Copier les noms de fichiers en texte
+Dateidetails als TSV kopieren	Copier les détails des fichiers au format TSV
+Dateien kodieren (MIME, UUE, XXE)	Encoder les fichiers (MIME, UUE, XXE)
+Dateien dekodieren (MIME, UUE, XXE, BinHex)	Décoder les fichiers (MIME, UUE, XXE, BinHex)
+Verschieben	Déplacer
+Neuer Ordner	Nouveau dossier
+Papierkorb	Corbeille
+Windows-Kontextmenü	Menu contextuel Windows
+Mit Windows öffnen	Ouvrir avec Windows
+Öffnen mit …	Ouvrir avec …
+Interne Dateiaktionen …	Actions internes sur les fichiers …
+Windows-Verknüpfung erstellen …	Créer un raccourci Windows …
+Datenträgerbezeichnung ändern …	Modifier le nom du volume …
+Als Administrator starten	Exécuter en tant qu’administrateur
+Dateiauftrag mit Windows-Rechteabfrage …	Opération de fichiers avec élévation Windows …
+Als anderer Benutzer starten …	Exécuter en tant qu’autre utilisateur …
+Eigenschaften	Propriétés
+Markieren	Sélection
+Auswahl in Dateiliste speichern	Enregistrer la sélection dans un fichier
+Auswahl aus Dateiliste laden	Charger la sélection depuis un fichier
+Auswahl aus Zwischenablage laden	Charger la sélection depuis le presse-papiers
+Alles markieren	Tout sélectionner
+Nach Maske markieren	Sélectionner par masque
+Auswahl umkehren	Inverser la sélection
+Auswahl wiederherstellen	Rétablir la sélection
+Dateifenster vergleichen	Comparer les panneaux
+Dateifenster einschließlich Ordner vergleichen	Comparer les panneaux avec les dossiers
+Vergleichen und gleiche Dateien ausblenden	Comparer et masquer les fichiers identiques
+Befehle	Commandes
+Suchen	Rechercher
+Suchen in separatem Fenster	Rechercher dans une fenêtre séparée
+Schnellsuche	Recherche rapide
+Prüfsumme aus Zwischenablage prüfen	Vérifier la somme de contrôle du presse-papiers
+Nach Plugin-Feld suchen	Rechercher par champ d’extension
+WDX-Suchprofile	Profils de recherche WDX
+WDX-Feld ändern …	Modifier un champ WDX …
+Dateien vergleichen	Comparer les fichiers
+Verzeichnisse synchronisieren	Synchroniser les dossiers
+Synchronisierungsprofile	Profils de synchronisation
+Mehrfach umbenennen	Renommer par lot
+Umbenennvorlagen …	Modèles de renommage …
+Namensliste bearbeiten …	Modifier la liste des noms …
+Namensliste im externen Editor bearbeiten …	Modifier la liste des noms dans un éditeur externe …
+Ordnerfavoriten	Dossiers favoris
+Aktuellen Ordner zu Favoriten hinzufügen …	Ajouter le dossier actuel aux favoris …
+Ordnerfavoriten verwalten …	Gérer les dossiers favoris …
+Befehlspalette	Palette de commandes
+Archive	Archives
+Öffnen	Ouvrir
+Packen	Compresser
+Mit Profil packen …	Compresser avec un profil …
+Entpacken	Extraire
+Prüfen	Tester
+Netz	Réseau
+Netzlaufwerk verbinden …	Connecter un lecteur réseau …
+Netzlaufwerk trennen …	Déconnecter un lecteur réseau …
+Lokale Windows-Freigaben …	Partages Windows locaux …
+Ordner freigeben …	Partager un dossier …
+FTP-Verbindungen …	Connexions FTP …
+FTP-Schnellverbindung …	Connexion FTP rapide …
+FTP-Verzeichnis anzeigen	Afficher le dossier FTP
+FTP-Ordner wechseln	Changer de dossier FTP
+FTP herunterladen	Télécharger depuis le serveur FTP
+FTP hochladen	Envoyer vers le serveur FTP
+FTP-Unix-Rechte ändern …	Modifier les droits Unix FTP …
+Offene FTP-Bearbeitungen …	Fichiers FTP en cours de modification …
+FTP mit lokalem Ordner abgleichen	Synchroniser le serveur FTP avec un dossier local
+FTP trennen	Déconnecter le serveur FTP
+WFX-Dateisystem öffnen …	Ouvrir un système de fichiers WFX …
+WFX verlassen	Quitter WFX
+Ansicht	Affichage
+Windows-Ordner öffnen …	Ouvrir un dossier Windows …
+Kurz- und Detailansicht wechseln	Basculer entre les vues compacte et détaillée
+Miniaturansicht	Miniatures
+Kommentaransicht	Commentaires des fichiers
+Spaltensätze …	Jeux de colonnes …
+Ansichtsmodi …	Modes d’affichage …
+Automatische Ansichten umschalten	Basculer les modes d’affichage automatiques
+Mehrfachsortierung …	Tri sur plusieurs colonnes …
+Unsortierte Dateiliste	Liste de fichiers non triée
+Ordnerbaum umschalten	Afficher ou masquer l’arborescence
+Windows-Desktop im Dateifenster	Bureau Windows dans le panneau
+Dieser PC im Dateifenster	Ce PC dans le panneau
+Gemeinsamer Ordnerbaum	Arborescence commune
+Ordnerbaum je Fenster	Arborescence par panneau
+Separate Ordnerbäume ausblenden	Masquer les arborescences séparées
+Schnellansicht	Aperçu rapide
+Ordnergrößen berechnen	Calculer la taille des dossiers
+Zweigansicht	Vue à plat
+Zweigansicht der Auswahl	Vue à plat de la sélection
+Nur markierte Einträge umschalten	Basculer l’affichage de la sélection seule
+Nur Programme anzeigen	Afficher uniquement les programmes
+Dateitypen im Tab filtern …	Filtrer les types de fichiers dans l’onglet …
+Alle Dateien anzeigen	Afficher tous les fichiers
+Tab-Gruppen verwalten …	Gérer les groupes d’onglets …
+Ordner-Tabs als .tab exportieren …	Exporter les onglets de dossiers en .tab …
+Kürzlich geschlossene Tabs …	Onglets fermés récemment …
+Markierte Ordner in Tabs öffnen	Ouvrir les dossiers sélectionnés dans des onglets
+Markierte Ordner auf Gegenseite in Tabs öffnen	Ouvrir les dossiers sélectionnés dans les onglets du panneau opposé
+Versteckte Dateien umschalten	Afficher ou masquer les fichiers cachés
+Ignorierliste umschalten	Activer ou désactiver la liste d’exclusion
+Fenster tauschen	Permuter les panneaux
+Fenster angleichen	Afficher le même dossier dans les panneaux
+Anordnung wechseln	Changer la disposition
+Farbschema wechseln	Changer le thème de couleurs
+Windows-Farbschema umschalten	Basculer le thème de couleurs Windows
+Konfigurieren	Configuration
+Everything-Suche	Recherche Everything
+Eigene Buttonbars	Barres de boutons personnalisées
+NTFS-Kopieroptionen …	Options de copie NTFS …
+Buttonbar- und Startervorlagen …	Modèles de barre de boutons et de lanceur …
+Einstellungen	Paramètres
+Sprache …	Langue …
+Ignorierliste bearbeiten …	Modifier la liste d’exclusion …
+Ignorierliste importieren …	Importer la liste d’exclusion …
+Plugin-Verwaltung …	Gérer les extensions …
+Externe Packerprofile …	Profils de compression externes …
+WDX-Spalten verwalten …	Gérer les colonnes WDX …
+Automatische Ansichtsregeln …	Règles d’affichage automatiques …
+TC-Ansichten importieren …	Importer les vues de TC …
+Datei- und Auswahlfarben …	Couleurs des fichiers et de la sélection …
+Interne Dateizuordnungen …	Associations de fichiers internes …
+Starter	Lanceur
+Programme und Befehle …	Programmes et commandes …
+Starter bearbeiten …	Modifier le lanceur …
+Hilfe	Aide
+Tastatur und Befehle	Clavier et commandes
+Systeminformationen	Informations système
+Windows-Version	Version de Windows
+Oberflächensprache	Langue de l’interface
+Wähle die Sprache für Arco Commander.	Choisissez la langue d’Arco Commander.
+Bereit	Prêt
+Aktualisieren	Actualiser
+Dateien packen	Compresser les fichiers
+Archiv entpacken	Extraire l’archive
+FTP-Verbindungen	Connexions FTP
+Dateien suchen	Rechercher des fichiers
+Dateiinhalt vergleichen	Comparer le contenu des fichiers
+Werkzeuge	Outils
+Laufwerk	Lecteur
+Zum Laufwerksstamm	Aller à la racine du lecteur
+Übergeordneter Ordner	Dossier parent
+Zurück	Précédent
+Weiter	Suivant
+Vorwärts	Avancer
+Pfad eingeben	Saisir un chemin
+Neuer Tab	Nouvel onglet
+Tab schließen	Fermer l’onglet
+Ordner-Tab verwalten	Gérer l’onglet de dossier
+Schnellfilter	Filtre rapide
+ Schnellfilter	 filtre rapide
+ Dateiliste	 liste des fichiers
+Erw.	Ext.
+Größe	Taille
+Datum	Date
+Links	Gauche
+Rechts	Droite
+LINKS	GAUCHE
+RECHTS	DROITE
+Kommentar	Commentaire
+Linkes Laufwerk wählen	Choisir le lecteur de gauche
+Rechtes Laufwerk wählen	Choisir le lecteur de droite
+Arco-Befehlszeile	Ligne de commande Arco
+Terminal im aktiven Ordner öffnen	Ouvrir le terminal dans le dossier actif
+Bedienung	Utilisation
+Tastatur	Clavier
+Schrift	Police
+Obere Symbolleiste anzeigen	Afficher la barre d’outils supérieure
+Symbolleiste zwischen den Dateifenstern anzeigen	Afficher la barre d’outils entre les panneaux
+Laufwerksbuttons anzeigen	Afficher les boutons de lecteurs
+Laufwerksliste anzeigen	Afficher la liste des lecteurs
+Ordner-Tabs anzeigen	Afficher les onglets de dossiers
+Aktuellen Pfad anzeigen	Afficher le chemin actuel
+Anklickbare Pfadsegmente	Segments de chemin cliquables
+Zurück- und Vorwärtsbuttons anzeigen	Afficher les boutons Précédent et Suivant
+Spaltenüberschriften anzeigen	Afficher les en-têtes de colonnes
+Status der Dateilisten anzeigen	Afficher l’état des listes de fichiers
+Befehlszeile anzeigen	Afficher la ligne de commande
+Funktionstastenleiste anzeigen	Afficher la barre des touches de fonction
+Dateifenster übereinander	Superposer les panneaux de fichiers
+Mit Num + und Num * auch Ordner markieren	Inclure les dossiers avec les touches + et * du pavé numérique
+Schnellsuche starten	Lancer la recherche rapide
+Über das Tastenkürzel	Avec le raccourci
+Beim Tippen	Pendant la saisie
+Mit Alt	Avec Alt
+Mit Strg+Alt	Avec Ctrl+Alt
+Versteckte Dateien anzeigen	Afficher les fichiers cachés
+Windows-Farbschema verwenden	Utiliser le thème de couleurs Windows
+Helles Farbschema	Thème clair
+Strg-Klick markiert einzelne Einträge. Umschalt-Klick markiert einen Bereich.	Ctrl+clic sélectionne des éléments. Maj+clic sélectionne une plage.
+Befehl filtern	Filtrer les commandes
+Befehl für Tastenkürzel filtern	Filtrer les commandes par raccourci
+Belegbare Befehle	Commandes configurables
+Ohne Belegung	Aucun raccourci
+Aktuelle Belegungen	Raccourcis actuels
+Entfernen	Supprimer
+ entfernen	 supprimer
+Aufnahme abbrechen	Annuler l’enregistrement
+Tastenkürzel aufzeichnen	Enregistrer le raccourci
+Tastenkombination drücken · Esc bricht ab	Appuyez sur les touches · Échap annule
+Belegung ersetzen	Remplacer le raccourci
+Zuweisen	Attribuer
+Standardbelegung laden	Rétablir les raccourcis par défaut
+Schrift in den Dateilisten	Police des listes de fichiers
+Schriftfamilie	Famille de police
+Schriftgröße	Taille de police
+Abbrechen	Annuler
+Anwenden	Appliquer
+Speichern	Enregistrer
+Schließen	Fermer
+Ausführen	Exécuter
+Vorschau	Aperçu
+Text kopieren	Copier le texte
+Eigenes Fenster	Fenêtre séparée
+Inhalt	Contenu
+Schnellansicht schließen	Fermer l’aperçu rapide
+Dateivorschau	Aperçu du fichier
+Hexbytes suchen	Rechercher des octets hexadécimaux
+Text suchen	Rechercher du texte
+Ab Anfang	Depuis le début
+Byte-Offset (dezimal oder 0x)	Décalage en octets (décimal ou 0x)
+Springen	Aller à
+Quelldaten anzeigen	Afficher les données source
+Einpassen	Ajuster
+Bild verkleinern	Réduire le zoom
+Bild vergrößern	Agrandir le zoom
+Originalgröße	Taille réelle
+Vollbild	Plein écran
+Namensmaske	Masque du nom
+Erweiterungsmaske	Masque de l’extension
+RegEx=>Ersetzung (optional)	Regex=>remplacement (facultatif)
+Umbenennen	Renommer
+Neuer Name	Nouveau nom
+Keine Namensänderungen.	Aucun nom modifié.
+Umbenennvorlage bearbeiten	Modifier le modèle de renommage
+Aktion konnte nicht ausgeführt werden	Impossible d’effectuer l’action
+[N] Name, [E] Erweiterung, [A] ganzer Name, [B] Elternordner, [C10+5:3] Zähler, [YMD] Datum, [hms] Uhrzeit, [U]/[L]/[F]/[n] Schreibweise, [X] Zwischenablage, [=Plugin.Feld] WDX-Wert.	[N] nom, [E] extension, [A] nom complet, [B] dossier parent, [C10+5:3] compteur, [YMD] date, [hms] heure, [U]/[L]/[F]/[n] casse, [X] presse-papiers, [=Plugin.Champ] valeur WDX.
+Suchen nach (optional)	Rechercher (facultatif)
+Ersetzen durch	Remplacer par
+Regulärer Ausdruck	Expression régulière
+Schreibweise beachten	Respecter la casse
+Nur erster Treffer	Première occurrence uniquement
+Erweiterung einbeziehen	Inclure l’extension
+Ganzen Namen ersetzen	Remplacer le nom entier
+Platzhalter * und ?	Jokers * et ?
+markiert	sélectionnés
+Ordner	dossiers
+ · Gleiche ausgeblendet	 · éléments identiques masqués
+ · Auswahlansicht	 · vue de la sélection
+ · Nur Programme	 · programmes uniquement
+frei von	libres sur
+FTP · Namensliste	FTP · Liste des noms
+Archiv	Archive
+Windows-Shell	Shell Windows
+Dateien ziehen	Glisser des fichiers
+Das Ziel hat die Verschiebung nicht eindeutig bestätigt. Prüfe Quelle und Ziel.	La destination n’a pas confirmé clairement le déplacement. Vérifiez la source et la destination.
+Erweiterte Suche	Recherche avancée
+Suchprofile	Profils de recherche
+Suchtreffer	Résultats de recherche
+Datei am Ziel vorhanden	Le fichier existe à la destination
+Quelldatei	Fichier source
+Zieldatei	Fichier de destination
+Neuer Zielname	Nouveau nom de destination
+Neuer Dateiname im selben Ordner	Nouveau nom dans le même dossier
+Dateifilter	Filtre de fichiers
+Fortsetzen	Reprendre
+Überspringen	Ignorer
+Weitere Windows-Orte …	Autres emplacements Windows …
+Wähle einen virtuellen Windows-Ordner für das aktive Dateifenster.	Choisissez un dossier virtuel Windows pour le panneau actif.
+Windows-Netzwerk	Réseau Windows
+Windows-Bibliotheken	Bibliothèques Windows
+Installierte Anwendungen	Applications installées
+Alle ältesten Dateien je Gruppe markieren	Sélectionner tous les fichiers les plus anciens de chaque groupe
+Alle neuesten Dateien je Gruppe markieren	Sélectionner tous les fichiers les plus récents de chaque groupe
+Dateien älter als die neueste markieren	Sélectionner les fichiers plus anciens que le plus récent
+Dateien neuer als die älteste markieren	Sélectionner les fichiers plus récents que le plus ancien
+Alle kleinsten Dateien je Gruppe markieren	Sélectionner tous les fichiers les plus petits de chaque groupe
+Alle größten Dateien je Gruppe markieren	Sélectionner tous les fichiers les plus volumineux de chaque groupe
+Dateien größer als die kleinste markieren	Sélectionner les fichiers plus volumineux que le plus petit
+Dateien kleiner als die größte markieren	Sélectionner les fichiers plus petits que le plus volumineux
+Erstellungszeit übernehmen	Conserver la date de création
+WFX-Spaltensätze	Jeux de colonnes WFX
+WFX-Spaltensatz bearbeiten	Modifier le jeu de colonnes WFX
+Standardansicht	Vue par défaut
+Neu anlegen	Créer
+Für dieses WFX-Plugin verwenden	Utiliser pour ce plugin WFX
+Löschen	Supprimer
+Treffer übernehmen	Utiliser les résultats
+Älteste Datei je Gruppe markieren	Sélectionner le fichier le plus ancien de chaque groupe
+Neueste Datei je Gruppe markieren	Sélectionner le fichier le plus récent de chaque groupe
+Programmargumente prüfen	Vérifier les arguments du programme
+Bearbeite die Windows-Argumente und starte das Programm mit Ausführen.	Modifiez les arguments Windows puis sélectionnez Exécuter pour lancer le programme.
+Ausgewählte Verzeichnisjunctions als Links kopieren	Copier les jonctions de répertoire sélectionnées en tant que liens
+Plugin-Standardansicht	Vue par défaut du plugin
+Bei WFX gilt ohne Vorzeichen die Plugin-Vorgabe. + sortiert aufsteigend, - absteigend.	Pour WFX, l’absence de signe utilise le réglage du plugin. + trie par ordre croissant, - par ordre décroissant.
+Die angegebene WFX-Spalte fehlt in der Detailansicht.	La colonne WFX indiquée est absente de la vue détaillée.

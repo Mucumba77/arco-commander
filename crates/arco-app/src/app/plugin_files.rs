@@ -484,6 +484,8 @@ impl App {
         tasks: Vec<(String, Operation)>,
     ) {
         let label = format!("{} · {} Plugin-Aufträge", entry.name, tasks.len());
+        let ignore = (self.profile.ignore_enabled && !self.profile.ignore_rules.trim().is_empty())
+            .then(|| self.profile.ignore_rules.clone());
         self.enqueue_virtual_transfer(&label, true, move |job| {
             if entry.interface == Interface::Wfx {
                 let mut operations: Vec<_> = tasks
@@ -519,7 +521,7 @@ impl App {
                     }
                     Ok(decision)
                 };
-                let mut report = plugin::wfx_batch(
+                let mut report = plugin::wfx_batch_filtered(
                     &entry.path,
                     operations,
                     &job.cancel,
@@ -527,6 +529,7 @@ impl App {
                     &mut |prompt| job.prompt(&entry.name, prompt),
                     arco_windows::rename_noreplace,
                     Some(&resolve),
+                    ignore.as_deref().map(|rules| (entry.name.as_str(), rules)),
                 );
                 report.skipped += skipped;
                 return Ok(Outcome::Report(entry.name, report));
@@ -675,6 +678,7 @@ fn resolve_wfx_destinations(
     for (label, mut operation) in operations.drain(..) {
         files::check_cancel(&job.cancel)?;
         let file_destination = operation.file_destination().is_some();
+        let appendable = operation.can_append();
         let mut overwrite = None;
         let Some((target, source)) = wfx_destination(&mut operation) else {
             kept.push((label, operation));
@@ -712,10 +716,18 @@ fn resolve_wfx_destinations(
             WfxSource::Remote(path, directory) => (directory, None, path.to_owned()),
         };
         if let Some(existing) = rows.get(&name.to_lowercase()) {
-            let can_replace = file_destination && !source.0 && existing.wfx_version.is_some();
             let existing_path = format!("{}\\{}", parent.trim_end_matches('\\'), existing.name);
+            let can_replace = file_destination
+                && !source.0
+                && !source.2.eq_ignore_ascii_case(&existing_path)
+                && existing.wfx_version.is_some();
+            let supports = |rule| match rule {
+                Conflict::Replace | Conflict::Newer | Conflict::Larger => can_replace,
+                Conflict::Append => can_replace && appendable,
+                _ => true,
+            };
             let decision = if let Some(rule) = remaining
-                && (rule != Conflict::Replace || can_replace)
+                && supports(rule)
             {
                 ConflictDecision::Apply(rule)
             } else {
@@ -736,20 +748,23 @@ fn resolve_wfx_destinations(
                         &job.cancel,
                         &mut |prompt| job.prompt(&plugin.name, prompt),
                     );
-                    let size = match rows {
-                        Ok(rows) => rows
-                            .into_iter()
-                            .find(|row| row.name == name)
-                            .and_then(|row| wfx_file_size(&row.value)),
+                    let source_row = match rows {
+                        Ok(rows) => rows.into_iter().find(|row| row.name == name),
                         Err(error) if error.kind() == io::ErrorKind::Interrupted => {
                             return Err(error);
                         }
                         Err(_) => None,
                     };
+                    let size = source_row
+                        .as_ref()
+                        .and_then(|row| wfx_file_size(&row.value));
+                    let modified = source_row
+                        .and_then(|row| row.wfx_version)
+                        .and_then(plugin::WfxVersion::modified_time);
                     let mut side = ConflictSide::virtual_entry(
                         format!("{} · {}", plugin.name, source.2),
                         size,
-                        None,
+                        modified,
                     );
                     if size.is_none() {
                         side.info = "WFX-Datei · Größe unbekannt".into();
@@ -767,15 +782,34 @@ fn resolve_wfx_destinations(
                     (Conflict::Rename, "Unter freiem Namen speichern"),
                 ];
                 if can_replace {
-                    actions.push((Conflict::Replace, "Überschreiben"));
+                    actions.extend([
+                        (Conflict::Replace, "Überschreiben"),
+                        (Conflict::Newer, "Nur mit neuerer Datei überschreiben"),
+                        (Conflict::Larger, "Nur mit größerer Datei überschreiben"),
+                    ]);
+                    if appendable {
+                        actions.push((Conflict::Append, "An Zieldatei anhängen"));
+                    }
                 }
+                let target_side = if let Some(version) = existing.wfx_version {
+                    ConflictSide::virtual_entry(
+                        format!("{} · {existing_path}", plugin.name),
+                        Some(version.size),
+                        version.modified_time(),
+                    )
+                } else {
+                    ConflictSide {
+                        path: format!("{} · {existing_path}", plugin.name),
+                        info: existing.value.clone(),
+                        preview: String::new(),
+                    }
+                };
                 let (decision, all) = ask_conflict(
                     job,
                     source_side,
                     ConflictSide {
-                        path: format!("{} · {existing_path}", plugin.name),
-                        info: existing.value.clone(),
                         preview: target_preview,
+                        ..target_side
                     },
                     actions,
                 )?;
@@ -784,8 +818,15 @@ fn resolve_wfx_destinations(
                 }
                 decision
             };
-            if matches!(decision, ConflictDecision::Apply(Conflict::Replace)) && can_replace {
-                overwrite = existing.wfx_version;
+            let rule = match decision {
+                ConflictDecision::Apply(Conflict::Replace) => Some(plugin::WfxOverwrite::Replace),
+                ConflictDecision::Apply(Conflict::Newer) => Some(plugin::WfxOverwrite::Newer),
+                ConflictDecision::Apply(Conflict::Larger) => Some(plugin::WfxOverwrite::Larger),
+                ConflictDecision::Apply(Conflict::Append) => Some(plugin::WfxOverwrite::Append),
+                _ => None,
+            };
+            if let Some(rule) = rule {
+                overwrite = existing.wfx_version.map(|version| (version, rule));
                 name = existing.name.clone();
                 *target = existing_path;
             } else {
@@ -816,10 +857,11 @@ fn resolve_wfx_destinations(
                 ..Default::default()
             },
         );
-        if let Some(expected) = overwrite {
+        if let Some((expected, rule)) = overwrite {
             operation = WfxOperation::Overwrite {
                 operation: Box::new(operation),
                 expected,
+                rule,
             };
         }
         kept.push((label, operation));
@@ -864,6 +906,83 @@ mod tests {
     #[cfg(windows)]
     #[test]
     #[ignore = "requires the Ghisler sample WFX fixture in ARCO_TEST_WFX_SAMPLE"]
+    fn recursive_wfx_filters_copy_and_move_without_removing_excluded_sources() {
+        use std::fs;
+        let plugin_path = PathBuf::from(std::env::var_os("ARCO_TEST_WFX_SAMPLE").unwrap());
+        let fixture = tempfile::tempdir().unwrap();
+        let cancel = AtomicBool::new(false);
+        let remote = |path: &Path| format!("\\{}", display_path(path));
+        for index in 0..6 {
+            let source = fixture.path().join(format!("source{index}"));
+            let target = fixture.path().join(format!("target{index}"));
+            fs::create_dir_all(source.join("nested")).unwrap();
+            fs::create_dir_all(source.join("cache")).unwrap();
+            fs::write(source.join("nested/keep.txt"), b"keep").unwrap();
+            fs::write(source.join("nested/private.skip"), b"secret").unwrap();
+            fs::write(source.join("cache/file.txt"), b"cached").unwrap();
+            let operation = match index {
+                0 => WfxOperation::DownloadTree {
+                    remote: remote(&source),
+                    local: target.clone(),
+                },
+                1 => WfxOperation::UploadTree {
+                    local: source.clone(),
+                    remote: remote(&target),
+                },
+                2 => WfxOperation::CopyTree {
+                    from: remote(&source),
+                    to: remote(&target),
+                },
+                3 => WfxOperation::DownloadMove {
+                    remote: remote(&source),
+                    local: target.clone(),
+                    tree: true,
+                },
+                4 => WfxOperation::UploadMove {
+                    local: source.clone(),
+                    remote: remote(&target),
+                    tree: true,
+                },
+                _ => WfxOperation::MoveTree {
+                    from: remote(&source),
+                    to: remote(&target),
+                },
+            };
+            let resolve = |_: &str, _: files::FileConflict<'_>| panic!("no conflict expected");
+            let report = plugin::wfx_batch_filtered(
+                &plugin_path,
+                vec![(format!("{index}"), operation)],
+                &cancel,
+                |_| (),
+                &mut |_| panic!("no input expected"),
+                arco_windows::rename_noreplace,
+                Some(&resolve),
+                Some((
+                    "Sample",
+                    "*.skip\ncache\\\nSample:*.skip\nSample:cache\\\nOther:keep.txt",
+                )),
+            );
+            assert!(report.errors.is_empty(), "{index}: {report:?}");
+            assert_eq!(
+                (report.completed, report.ignored),
+                (1, 2),
+                "{index}: {report:?}"
+            );
+            assert_eq!(fs::read(target.join("nested/keep.txt")).unwrap(), b"keep");
+            assert!(!target.join("nested/private.skip").exists());
+            assert!(!target.join("cache").exists());
+            assert_eq!(source.join("nested/keep.txt").exists(), index < 3);
+            assert_eq!(
+                fs::read(source.join("nested/private.skip")).unwrap(),
+                b"secret"
+            );
+            assert_eq!(fs::read(source.join("cache/file.txt")).unwrap(), b"cached");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires the Ghisler sample WFX fixture in ARCO_TEST_WFX_SAMPLE"]
     fn wfx_overwrite_preserves_changed_targets_and_stages_file_transfers() {
         let plugin_path = PathBuf::from(std::env::var_os("ARCO_TEST_WFX_SAMPLE").unwrap());
         let fixture = tempfile::tempdir().unwrap();
@@ -886,7 +1005,8 @@ mod tests {
             .wfx_version
             .unwrap()
         };
-        let run = |operation, expected| {
+        use plugin::WfxOverwrite::{Append, Larger, Newer, Replace};
+        let run = |operation, expected, rule| {
             plugin::wfx_batch(
                 &plugin_path,
                 vec![(
@@ -894,6 +1014,7 @@ mod tests {
                     WfxOperation::Overwrite {
                         operation: Box::new(operation),
                         expected,
+                        rule,
                     },
                 )],
                 &cancel,
@@ -909,12 +1030,45 @@ mod tests {
         };
         let old = version();
         std::fs::write(&target, b"concurrent change").unwrap();
-        let report = run(upload(), old);
+        let report = run(upload(), old, Replace);
         assert_eq!(report.errors.len(), 1);
         assert_eq!(std::fs::read(&target).unwrap(), b"concurrent change");
-        let report = run(upload(), version());
+        let report = run(upload(), version(), Larger);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(std::fs::read(&target).unwrap(), b"concurrent change");
+        let report = run(upload(), version(), Replace);
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(std::fs::read(&target).unwrap(), b"new source");
+        let target_time = version().modified_time().unwrap();
+        let age = std::time::Duration::from_secs(60);
+        let handle = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .unwrap();
+        handle.set_modified(target_time - age).unwrap();
+        let report = run(upload(), version(), Newer);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.skipped, 1);
+        std::fs::write(&source, b"later").unwrap();
+        handle.set_modified(target_time + age).unwrap();
+        let report = run(upload(), version(), Newer);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(std::fs::read(&target).unwrap(), b"later");
+        let report = run(upload(), version(), Append);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(std::fs::read(&target).unwrap(), b"laterlater");
+        let report = run(
+            WfxOperation::Copy {
+                from: remote(&source),
+                to: remote_target.clone(),
+            },
+            version(),
+            Append,
+        );
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(std::fs::read(&target).unwrap(), b"laterlaterlater");
+        drop(handle);
         std::fs::write(&source, b"move contents").unwrap();
         let report = run(
             WfxOperation::Rename {
@@ -922,6 +1076,7 @@ mod tests {
                 to: remote_target,
             },
             version(),
+            Replace,
         );
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(std::fs::read(&target).unwrap(), b"move contents");

@@ -70,6 +70,25 @@ impl FileMasks {
         })
     }
 
+    pub fn from_tc(value: &str) -> io::Result<Self> {
+        let mut normalized = String::with_capacity(value.len());
+        let mut quoted = false;
+        for character in value.chars() {
+            match character {
+                '"' => quoted = !quoted,
+                ' ' | '\t' if !quoted => normalized.push(';'),
+                character => normalized.push(character),
+            }
+        }
+        if quoted {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Die Dateimaske enthält ein offenes Anführungszeichen.",
+            ));
+        }
+        Self::new(&normalized)
+    }
+
     pub fn includes(&self, path: &Path) -> bool {
         path.file_name().is_some_and(|name| {
             (self.include.is_empty() || self.include.is_match(name)) && !self.exclude.is_match(name)

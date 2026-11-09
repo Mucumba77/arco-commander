@@ -197,7 +197,7 @@ pub fn file_allocation(path: &Path) -> io::Result<FileAllocation> {
     })
 }
 
-fn query_file_info<T: Default>(
+pub(crate) fn query_file_info<T: Default>(
     file: &std::fs::File,
     class: FILE_INFO_BY_HANDLE_CLASS,
 ) -> io::Result<T> {

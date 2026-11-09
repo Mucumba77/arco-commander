@@ -19,6 +19,22 @@ mod windows {
 
     const VIEW_URL: &str = "https://arco-lister.localhost/";
     const MEDIA_HOST: &str = "arco-media.invalid";
+    const PLAYER_KEYS: &str = r#"<script nonce="arco-player">
+        const player = document.querySelector("audio, video");
+        document.addEventListener("keydown", event => {
+            if (event.altKey || event.metaKey) return;
+            if (event.key.toLowerCase() === "m" && !event.ctrlKey) {
+                if (!event.repeat) player.muted = !player.muted;
+            } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+                const step = event.shiftKey || event.ctrlKey ? .10 : .01;
+                const volume = player.volume + (event.key === "ArrowUp" ? step : -step);
+                player.volume = Math.min(1, Math.max(0, volume));
+            } else {
+                return;
+            }
+            event.preventDefault();
+        }, true);
+    </script>"#;
 
     struct Parent(Win32WindowHandle);
 
@@ -40,6 +56,7 @@ mod windows {
             path: &Path,
             preview: Rich,
             light: bool,
+            embedded: bool,
         ) -> io::Result<Self> {
             let (parent, initial) = window
                 .with_winit_window(|native| {
@@ -60,7 +77,11 @@ mod windows {
                 .with_visible(false)
                 .with_autoplay(false)
                 .with_browser_accelerator_keys(false)
-                .with_bounds(initial)
+                .with_bounds(if embedded {
+                    wry::Rect::default()
+                } else {
+                    initial
+                })
                 .with_navigation_handler(|url| url == VIEW_URL || url == "about:blank")
                 .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
                 .with_custom_protocol("arco-lister".into(), move |_, request| {
@@ -91,7 +112,7 @@ mod windows {
             let core = unsafe { webview.controller().CoreWebView2() }.map_err(io::Error::other)?;
             let settings = unsafe { core.Settings() }.map_err(io::Error::other)?;
             let configure = || unsafe {
-                settings.SetIsScriptEnabled(false)?;
+                settings.SetIsScriptEnabled(media_path.is_some())?;
                 settings.SetIsWebMessageEnabled(false)?;
                 settings.SetAreHostObjectsAllowed(false)?;
                 settings.SetAreDevToolsEnabled(false)?;
@@ -112,7 +133,9 @@ mod windows {
                 .map_err(io::Error::other)?;
             }
             webview.load_url(VIEW_URL).map_err(io::Error::other)?;
-            webview.set_visible(true).map_err(io::Error::other)?;
+            if !embedded {
+                webview.set_visible(true).map_err(io::Error::other)?;
+            }
             Ok(Self {
                 webview,
                 _profile: profile,
@@ -123,6 +146,24 @@ mod windows {
             if let Some(bounds) = window.with_winit_window(bounds) {
                 let _ = self.webview.set_bounds(bounds);
             }
+        }
+
+        pub(crate) fn place(&self, rect: Option<[i32; 4]>) -> io::Result<()> {
+            if let Some([x, y, width, height]) = rect {
+                self.webview
+                    .set_bounds(wry::Rect {
+                        position: wry::dpi::PhysicalPosition::new(x, y).into(),
+                        size: wry::dpi::PhysicalSize::new(
+                            width.max(1) as u32,
+                            height.max(1) as u32,
+                        )
+                        .into(),
+                    })
+                    .map_err(io::Error::other)?;
+            }
+            self.webview
+                .set_visible(rect.is_some())
+                .map_err(io::Error::other)
         }
     }
 
@@ -156,9 +197,9 @@ mod windows {
                     "https://{MEDIA_HOST}/{}",
                     utf8_percent_encode(name, NON_ALPHANUMERIC)
                 );
-                media_rule = format!("; media-src {url}");
+                media_rule = format!("; media-src {url}; script-src 'nonce-arco-player'");
                 format!(
-                    r#"<main class="player"><{element} controls preload="metadata" controlslist="nodownload noremoteplayback"><source src="{url}" type="{mime}"></{element}><p>{}</p></main>"#,
+                    r#"<main class="player"><{element} controls preload="metadata" controlslist="nodownload noremoteplayback"><source src="{url}" type="{mime}"></{element}><p>{}</p></main>{PLAYER_KEYS}"#,
                     ammonia::clean_text(name)
                 )
             }
@@ -170,25 +211,59 @@ mod windows {
             body {{ margin: 18px; overflow-wrap: anywhere; background: Canvas; color: CanvasText; }}
             img, table {{ max-width: 100%; }} pre {{ white-space: pre-wrap; }} td, th {{ padding: .25rem .5rem; }}
             .rtf {{ white-space: pre-wrap; tab-size: 4; }} .player {{ display: grid; place-items: center; min-height: 80vh; }}
+            .rtf-table {{ border-collapse: collapse; }} .rtf-table td {{ border: 1px solid GrayText; vertical-align: top; }}
+            .rtf-list {{ list-style: none; margin: 0; padding: 0; }}
+            .rtf-list > li {{ display: grid; grid-template-columns: max-content minmax(0,1fr); column-gap: .5em; }}
             video {{ width: 100%; max-height: 72vh; }} audio {{ width: min(100%, 36rem); }}
             </style></head><body>{body}</body></html>"#,
         );
         Ok((media, html))
     }
+
+    #[cfg(test)]
+    #[test]
+    fn only_the_media_document_allows_the_fixed_player_script() {
+        let path = Path::new(r"C:\Videos\a & b.mp4");
+        let (_, rich) = document(path, Rich::Html("<p>document</p>".into()), true).unwrap();
+        assert!(!rich.contains("script-src"));
+        let (_, media) = document(
+            path,
+            Rich::Media {
+                element: "video",
+                mime: "video/mp4",
+            },
+            false,
+        )
+        .unwrap();
+        assert!(media.contains("script-src 'nonce-arco-player'"));
+        assert!(media.contains("nonce=\"arco-player\""));
+        assert!(media.contains("a%20%26%20b%2Emp4"));
+        assert!(media.contains("a&#32;&amp;&#32;b.mp4"));
+    }
 }
 
 #[cfg(windows)]
-pub(super) use windows::Surface;
+pub(in crate::app) use windows::Surface;
 
 #[cfg(not(windows))]
-pub(super) struct Surface;
+pub(in crate::app) struct Surface;
 
 #[cfg(not(windows))]
 impl Surface {
-    pub(super) fn new(_: &slint::Window, _: &Path, _: Rich, _: bool) -> io::Result<Self> {
+    pub(in crate::app) fn new(
+        _: &slint::Window,
+        _: &Path,
+        _: Rich,
+        _: bool,
+        _: bool,
+    ) -> io::Result<Self> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "Die formatierte Vorschau benötigt Windows und WebView2.",
         ))
+    }
+
+    pub(in crate::app) fn place(&self, _: Option<[i32; 4]>) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
     }
 }

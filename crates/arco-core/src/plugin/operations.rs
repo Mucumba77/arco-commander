@@ -1,6 +1,8 @@
 use super::{Interface, Operation, PromptHandler, Row, inspect, inspect_host, inspect_interactive};
+use crate::ignore::IgnoreList;
 use crate::{archive_view, archives, files, tools};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs::{self, File, Metadata};
 use std::io;
@@ -23,6 +25,8 @@ pub enum WfxOperation {
     Overwrite {
         operation: Box<WfxOperation>,
         expected: WfxVersion,
+        #[serde(default)]
+        rule: WfxOverwrite,
     },
     Download {
         remote: String,
@@ -92,7 +96,30 @@ pub struct WfxVersion {
     pub attributes: u32,
 }
 
+impl WfxVersion {
+    pub fn modified_time(self) -> Option<std::time::SystemTime> {
+        use std::time::{Duration, UNIX_EPOCH};
+        let seconds = self.modified / 10_000_000;
+        let nanos = (self.modified % 10_000_000) as u32 * 100;
+        let epoch = UNIX_EPOCH.checked_sub(Duration::from_secs(11_644_473_600))?;
+        (self.modified != 0).then(|| epoch.checked_add(Duration::new(seconds, nanos)))?
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+pub enum WfxOverwrite {
+    #[default]
+    Replace,
+    Newer,
+    Larger,
+    Append,
+}
+
 impl WfxOperation {
+    pub fn can_append(&self) -> bool {
+        matches!(self, Self::Upload { .. } | Self::Copy { .. })
+    }
+
     pub fn file_destination(&self) -> Option<&str> {
         match self {
             Self::Upload { remote, .. }
@@ -366,6 +393,7 @@ struct LocalMove {
     source: PathBuf,
     staged: PathBuf,
     entries: Vec<(PathBuf, Metadata)>,
+    excluded: HashSet<PathBuf>,
 }
 
 impl StagedWfx {
@@ -379,13 +407,16 @@ impl StagedWfx {
             source,
             staged,
             entries,
+            excluded,
         }) = self.local_move
         {
-            remove_local_snapshot(&source, &staged, &entries, cancel).map_err(|error| {
-                io::Error::other(format!(
-                    "WFX-Ziel übertragen. Lokale Quelle nicht vollständig entfernt: {error}"
-                ))
-            })?;
+            remove_local_snapshot(&source, &staged, &entries, &excluded, cancel).map_err(
+                |error| {
+                    io::Error::other(format!(
+                        "WFX-Ziel übertragen. Lokale Quelle nicht vollständig entfernt: {error}"
+                    ))
+                },
+            )?;
         }
         if let Some(DownloadOutput {
             staged,
@@ -503,22 +534,35 @@ fn stage_wfx(
     cancel: &AtomicBool,
     conflicts: bool,
 ) -> io::Result<StagedWfx> {
+    stage_wfx_filtered(operation, cancel, conflicts, None, &mut 0)
+}
+
+fn stage_wfx_filtered(
+    operation: WfxOperation,
+    cancel: &AtomicBool,
+    conflicts: bool,
+    ignore: Option<&IgnoreList>,
+    ignored: &mut usize,
+) -> io::Result<StagedWfx> {
     if let WfxOperation::Overwrite {
         operation,
         expected,
+        rule,
     } = operation
     {
         if operation.file_destination().is_none()
             || (!conflicts && matches!(*operation, WfxOperation::UploadMove { .. }))
+            || (rule == WfxOverwrite::Append && !operation.can_append())
         {
             return Err(invalid(
                 "Nur einzelne WFX-Dateien können überschrieben werden.",
             ));
         }
-        let mut staged = stage_wfx(*operation, cancel, conflicts)?;
+        let mut staged = stage_wfx_filtered(*operation, cancel, conflicts, ignore, ignored)?;
         staged.operation = WfxOperation::Overwrite {
             operation: Box::new(staged.operation),
             expected,
+            rule,
         };
         return Ok(staged);
     }
@@ -576,17 +620,19 @@ fn stage_wfx(
             check_absolute(&local)?;
             let workspace = tempfile::tempdir()?;
             let staged = workspace.path().join(leaf(&local)?);
-            let entries = if tree {
-                snapshot_tree(&local, &staged, cancel)?
+            let (entries, excluded) = if tree {
+                snapshot_tree_filtered(&local, &staged, cancel, ignore)?
             } else {
                 let metadata = regular(&local)?;
                 snapshot(&local, &staged, &metadata, cancel)?;
-                vec![(PathBuf::new(), metadata)]
+                (vec![(PathBuf::new(), metadata)], HashSet::new())
             };
+            *ignored += excluded.len();
             let local_move = moving.then(|| LocalMove {
                 source: local,
                 staged: staged.clone(),
                 entries,
+                excluded,
             });
             let operation = if moving {
                 WfxOperation::UploadMove {
@@ -625,12 +671,49 @@ pub fn wfx_batch(
     plugin: &Path,
     items: Vec<(String, WfxOperation)>,
     cancel: &AtomicBool,
-    mut progress: impl FnMut(String),
+    progress: impl FnMut(String),
     prompt: &mut PromptHandler<'_>,
     rename_directory: RenameDirectory,
     resolve: Option<&DownloadConflict<'_>>,
 ) -> files::TransferReport {
+    wfx_batch_filtered(
+        plugin,
+        items,
+        cancel,
+        progress,
+        prompt,
+        rename_directory,
+        resolve,
+        None,
+    )
+}
+
+pub fn wfx_batch_filtered(
+    plugin: &Path,
+    items: Vec<(String, WfxOperation)>,
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(String),
+    prompt: &mut PromptHandler<'_>,
+    rename_directory: RenameDirectory,
+    resolve: Option<&DownloadConflict<'_>>,
+    filter: Option<(&str, &str)>,
+) -> files::TransferReport {
     let mut report = files::TransferReport::default();
+    let ignore = match filter
+        .map(|(_, rules)| IgnoreList::parse(rules))
+        .transpose()
+    {
+        Ok(ignore) => ignore,
+        Err(error) => {
+            report.errors.push(error.to_string());
+            return report;
+        }
+    };
+    let remote_filter = filter.filter(|(name, _)| {
+        ignore
+            .as_ref()
+            .is_some_and(|ignore| ignore.has_scope(crate::ignore::Source::Wfx(name)))
+    });
     const CHUNK: usize = 48;
     for (group, items_group) in items.chunks(CHUNK).enumerate() {
         if files::check_cancel(cancel).is_err() {
@@ -640,7 +723,13 @@ pub fn wfx_batch(
         }
         let mut staged = Vec::new();
         for (label, operation) in items_group {
-            match stage_wfx(operation.clone(), cancel, resolve.is_some()) {
+            match stage_wfx_filtered(
+                operation.clone(),
+                cancel,
+                resolve.is_some(),
+                ignore.as_ref(),
+                &mut report.ignored,
+            ) {
                 Ok(operation) => staged.push((label, operation)),
                 Err(error) => report.errors.push(format!("{label}: {error}")),
             }
@@ -652,7 +741,7 @@ pub fn wfx_batch(
             .iter()
             .map(|(_, staged)| staged.operation.clone())
             .collect();
-        let rows = match wfx_group(plugin, wire, cancel, &mut progress, prompt) {
+        let rows = match wfx_group(plugin, wire, cancel, &mut progress, prompt, remote_filter) {
             Ok(rows) => rows,
             Err(error) => {
                 report.errors.push(format!(
@@ -666,7 +755,10 @@ pub fn wfx_batch(
         };
         let mut cleanup = Vec::new();
         for (row, (label, staged)) in rows.into_iter().zip(staged) {
-            if !row.value.is_empty() {
+            report.ignored += row.wfx_ignored;
+            if row.wfx_skipped {
+                report.skipped += 1;
+            } else if !row.value.is_empty() {
                 report.errors.push(format!("{label}: {}", row.value));
             } else {
                 match staged.finish(cancel, Some(rename_directory), resolve) {
@@ -683,7 +775,14 @@ pub fn wfx_batch(
         }
         if !cleanup.is_empty() {
             let (labels, operations): (Vec<_>, Vec<_>) = cleanup.into_iter().unzip();
-            match wfx_group(plugin, operations, cancel, &mut progress, prompt) {
+            match wfx_group(
+                plugin,
+                operations,
+                cancel,
+                &mut progress,
+                prompt,
+                remote_filter,
+            ) {
                 Ok(rows) => {
                     for (row, label) in rows.into_iter().zip(labels) {
                         if row.value.is_empty() {
@@ -712,13 +811,21 @@ fn wfx_group(
     cancel: &AtomicBool,
     progress: impl FnMut(String),
     prompt: &mut PromptHandler<'_>,
+    filter: Option<(&str, &str)>,
 ) -> io::Result<Vec<Row>> {
     let count = operations.len();
     let rows = inspect_interactive(
         Interface::Wfx,
         plugin,
         Path::new(""),
-        Operation::WfxBatch(operations),
+        match filter {
+            Some((plugin_name, ignore)) => Operation::WfxFilteredBatch {
+                operations,
+                plugin_name: plugin_name.into(),
+                ignore: ignore.into(),
+            },
+            None => Operation::WfxBatch(operations),
+        },
         cancel,
         progress,
         Some(prompt),
@@ -934,18 +1041,40 @@ fn snapshot(
     output.sync_all()
 }
 
+#[cfg(test)]
 fn snapshot_tree(
     source: &Path,
     target: &Path,
     cancel: &AtomicBool,
 ) -> io::Result<Vec<(PathBuf, Metadata)>> {
+    snapshot_tree_filtered(source, target, cancel, None).map(|(entries, _)| entries)
+}
+
+fn snapshot_tree_filtered(
+    source: &Path,
+    target: &Path,
+    cancel: &AtomicBool,
+    ignore: Option<&IgnoreList>,
+) -> io::Result<(Vec<(PathBuf, Metadata)>, HashSet<PathBuf>)> {
     if !files::regular_metadata(source)?.is_dir() {
         return Err(invalid("Ein regulärer Ordner wird benötigt."));
     }
     let mut entries = Vec::new();
+    let mut excluded = HashSet::new();
     for (index, entry) in walkdir::WalkDir::new(source)
         .follow_links(false)
         .into_iter()
+        .filter_entry(|entry| {
+            if entry.depth() > 0
+                && ignore.is_some_and(|rules| rules.local(entry.path(), entry.file_type().is_dir()))
+            {
+                if let Ok(relative) = entry.path().strip_prefix(source) {
+                    excluded.insert(relative.to_path_buf());
+                }
+                return false;
+            }
+            true
+        })
         .enumerate()
     {
         files::check_cancel(cancel)?;
@@ -967,13 +1096,14 @@ fn snapshot_tree(
         }
         entries.push((relative.to_path_buf(), metadata));
     }
-    Ok(entries)
+    Ok((entries, excluded))
 }
 
 fn remove_local_snapshot(
     source: &Path,
     staged: &Path,
     entries: &[(PathBuf, Metadata)],
+    excluded: &HashSet<PathBuf>,
     cancel: &AtomicBool,
 ) -> io::Result<()> {
     let path_at = |root: &Path, relative: &Path| {
@@ -996,7 +1126,7 @@ fn remove_local_snapshot(
                 files::check_cancel(cancel)?;
                 let child = child?.path();
                 let relative = child.strip_prefix(source).map_err(io::Error::other)?;
-                if !expected.contains(relative) {
+                if !expected.contains(relative) && !excluded.contains(relative) {
                     return Err(io::Error::other(format!(
                         "Neuer Eintrag im Quellordner: {}",
                         child.display()
@@ -1015,6 +1145,10 @@ fn remove_local_snapshot(
             )));
         }
     }
+    let keep: HashSet<_> = excluded
+        .iter()
+        .flat_map(|path| path.ancestors().skip(1))
+        .collect();
     for (relative, metadata) in entries.iter().rev() {
         let path = path_at(source, relative);
         files::check_cancel(cancel)?;
@@ -1026,7 +1160,9 @@ fn remove_local_snapshot(
                     path.display()
                 )));
             }
-            fs::remove_dir(&path)?;
+            if !keep.contains(relative.as_path()) {
+                fs::remove_dir(&path)?;
+            }
         } else {
             files::ensure_unchanged(&path, metadata)?;
             fs::remove_file(&path)?;
@@ -1149,7 +1285,9 @@ mod tests {
             filetime::FileTime::from_last_modification_time(&fs::metadata(&changed).unwrap());
         fs::write(&changed, b"edited").unwrap();
         filetime::set_file_mtime(&changed, modified).unwrap();
-        assert!(remove_local_snapshot(&source, &staged, &entries, &cancel).is_err());
+        assert!(
+            remove_local_snapshot(&source, &staged, &entries, &HashSet::new(), &cancel).is_err()
+        );
         assert_eq!(fs::read(source.join("first.txt")).unwrap(), b"first");
         assert_eq!(fs::read(changed).unwrap(), b"edited");
         assert_eq!(

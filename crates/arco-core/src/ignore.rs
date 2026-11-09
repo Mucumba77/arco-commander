@@ -130,6 +130,10 @@ impl IgnoreList {
             .is_some_and(|path| self.matches(Source::Local, path, directory))
     }
 
+    pub(crate) fn has_scope(&self, source: Source<'_>) -> bool {
+        self.rules.iter().any(|(scope, _)| scope.accepts(source))
+    }
+
     pub fn matches(&self, source: Source<'_>, path: &str, directory: bool) -> bool {
         let path = normalize(path);
         let path = path.trim_end_matches('/');

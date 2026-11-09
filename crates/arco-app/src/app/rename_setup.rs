@@ -6,7 +6,6 @@ use arco_core::{
     profile::{self, RenameTemplate},
     rename,
 };
-use regex::Regex;
 use std::{fs, io, path::PathBuf};
 
 pub(crate) enum Setup {
@@ -114,15 +113,39 @@ impl App {
         let template = name
             .as_ref()
             .and_then(|name| self.profile.rename_templates.get(name));
-        let value = format!(
+        let mut value = format!(
             "{}\n{}\n{}",
             name.as_deref().unwrap_or("Meine Vorlage"),
-            template.map_or("[F]", |item| item.mask.as_str()),
+            template.map_or("[N]", |item| item.mask.as_str()),
             template.map_or("", |item| item.replacement.as_str())
         );
+        if let Some(extension) = template.map_or(Some("[E]"), |item| item.extension.as_deref()) {
+            value.push_str("\nErweiterung=");
+            value.push_str(extension);
+        }
+        if let Some(search) = template.and_then(|item| item.search.as_ref()) {
+            let flags = [
+                (search.regex, "regex"),
+                (search.wildcards, "platzhalter"),
+                (search.match_case, "schreibweise"),
+                (search.first_only, "erstes"),
+                (search.include_extension, "erweiterung"),
+                (search.substitute, "substitution"),
+            ]
+            .into_iter()
+            .filter_map(|(active, label)| active.then_some(label))
+            .collect::<Vec<_>>()
+            .join(",");
+            value.push_str(&format!(
+                "\nSuchen={}\nErsetzen={}\nOptionen={flags}",
+                search.find, search.replace
+            ));
+        } else if template.is_none() {
+            value.push_str("\nSuchen=\nErsetzen=\nOptionen=platzhalter");
+        }
         self.dialog("multiline", Pending::RenameSetup(Setup::Template(name)), Dialog {
             title: "Umbenennvorlage bearbeiten",
-            description: "Je Zeile Vorlagenname, Namensmaske und optional die Ersetzung RegEx=>Ersatz.",
+            description: "Zeile 1: Vorlagenname. Zeile 2: Namensmaske. Zeile 3: alte Ersetzung (Muster=>Ersatz) oder leer. Danach Erweiterung=, Suchen=, Ersetzen= und Optionen= mit regex, platzhalter, schreibweise, erstes, erweiterung oder substitution.",
             value: &value, ..Default::default()
         });
     }
@@ -209,29 +232,7 @@ impl App {
                 _ => (),
             },
             Setup::Template(original) => {
-                let mut lines = value.lines();
-                let name = lines.next().unwrap_or_default().trim();
-                let mask = lines.next().unwrap_or_default();
-                let replacement = lines.next().unwrap_or_default();
-                if name.is_empty()
-                    || name.chars().any(char::is_control)
-                    || name.chars().count() > 80
-                    || mask.is_empty()
-                    || mask.len() > 4096
-                    || replacement.len() > 4096
-                    || lines.any(|line| !line.is_empty())
-                {
-                    return Err(io::Error::other(
-                        "Ungültiger Vorlagenname oder ungültige Umbenennmaske.",
-                    ));
-                }
-                rename::uses_clipboard(mask)?;
-                if !replacement.is_empty() {
-                    let (find, _) = replacement
-                        .split_once("=>")
-                        .ok_or_else(|| io::Error::other("Ersetzung benötigt Muster=>Ersatz."))?;
-                    Regex::new(find).map_err(io::Error::other)?;
-                }
+                let (name, template) = parse_template(value)?;
                 let mut draft = self.profile_snapshot();
                 if original.as_deref() != Some(name) && draft.rename_templates.contains_key(name) {
                     return Err(io::Error::other("Diese Vorlage existiert bereits."));
@@ -239,13 +240,7 @@ impl App {
                 if let Some(original) = original {
                     draft.rename_templates.remove(&original);
                 }
-                draft.rename_templates.insert(
-                    name.into(),
-                    RenameTemplate {
-                        mask: mask.into(),
-                        replacement: replacement.into(),
-                    },
-                );
+                draft.rename_templates.insert(name.into(), template);
                 self.save_rename_templates(draft)?;
                 self.choose_rename_template();
             }
@@ -266,5 +261,116 @@ impl App {
         draft.save(&self.profile_path)?;
         self.profile = draft;
         Ok(())
+    }
+}
+
+fn parse_template(value: &str) -> io::Result<(&str, RenameTemplate)> {
+    let mut lines = value.lines();
+    let name = lines.next().unwrap_or_default().trim();
+    let mask = lines.next().unwrap_or_default();
+    let replacement = lines.next().unwrap_or_default();
+    let mut extension = None;
+    let mut find = None;
+    let mut replace = None;
+    let mut options = None;
+    for line in lines.filter(|line| !line.is_empty()) {
+        let (key, value) = line.split_once('=').ok_or_else(|| {
+            io::Error::other("Eine zusätzliche Vorlagenzeile benötigt Schlüssel=Wert.")
+        })?;
+        let destination = match key {
+            "Erweiterung" => &mut extension,
+            "Suchen" => &mut find,
+            "Ersetzen" => &mut replace,
+            "Optionen" => &mut options,
+            _ => {
+                return Err(io::Error::other(
+                    "Unbekannter Schlüssel in der Umbenennvorlage.",
+                ));
+            }
+        };
+        if destination.replace(value).is_some() {
+            return Err(io::Error::other(
+                "Ein Vorlagenschlüssel ist mehrfach angegeben.",
+            ));
+        }
+    }
+    if name.is_empty()
+        || name.chars().any(char::is_control)
+        || name.chars().count() > 80
+        || mask.is_empty()
+        || mask.len() > 4096
+        || replacement.len() > 4096
+        || extension.is_some_and(|value| value.len() > 4096)
+    {
+        return Err(io::Error::other(
+            "Ungültiger Vorlagenname oder ungültige Umbenennmaske.",
+        ));
+    }
+    rename::uses_clipboard(mask)?;
+    if let Some(extension) = extension {
+        rename::uses_clipboard(extension)?;
+    }
+    let search = if find.is_some() || replace.is_some() || options.is_some() {
+        if !replacement.is_empty() {
+            return Err(io::Error::other(
+                "Lass die dritte Zeile bei getrenntem Such- und Ersetzungstext leer.",
+            ));
+        }
+        let mut search = rename::SearchOptions {
+            find: find.unwrap_or_default().into(),
+            replace: replace.unwrap_or_default().into(),
+            ..Default::default()
+        };
+        for flag in options.unwrap_or_default().split(',').map(str::trim) {
+            match flag {
+                "" => (),
+                "regex" => search.regex = true,
+                "platzhalter" => search.wildcards = true,
+                "schreibweise" => search.match_case = true,
+                "erstes" => search.first_only = true,
+                "erweiterung" => search.include_extension = true,
+                "substitution" => search.substitute = true,
+                _ => {
+                    return Err(io::Error::other(
+                        "Unbekannte Suchoption in der Umbenennvorlage.",
+                    ));
+                }
+            }
+        }
+        search.compile()?;
+        Some(search)
+    } else {
+        rename::SearchOptions::from_legacy(replacement)?.compile()?;
+        None
+    };
+    Ok((
+        name,
+        RenameTemplate {
+            mask: mask.into(),
+            replacement: replacement.into(),
+            extension: extension.map(str::to_owned),
+            search,
+        },
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_template;
+
+    #[test]
+    fn rename_templates_accept_legacy_and_structured_search() {
+        let (_, legacy) = parse_template("Alt\n[F]\nfoo=>bar").unwrap();
+        assert_eq!(legacy.replacement, "foo=>bar");
+        assert!(legacy.extension.is_none() && legacy.search.is_none());
+
+        let (_, template) = parse_template(
+            "Neu\n[N]\n\nErweiterung=[E]\nSuchen=foo=>bar\nErsetzen=anderer Name\nOptionen=regex,erstes,erweiterung",
+        ).unwrap();
+        let search = template.search.unwrap();
+        assert_eq!(search.find, "foo=>bar");
+        assert_eq!(search.replace, "anderer Name");
+        assert!(search.regex && search.first_only && search.include_extension);
+        assert!(parse_template("Fehler\n[N]\nfoo=>bar\nSuchen=foo").is_err());
     }
 }

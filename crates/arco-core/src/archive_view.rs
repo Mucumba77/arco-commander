@@ -680,7 +680,7 @@ impl Catalog {
         Ok(())
     }
 
-    fn check_unchanged(&self) -> io::Result<()> {
+    pub fn check_unchanged(&self) -> io::Result<()> {
         files::ensure_unchanged(&self.file, &self.metadata)?;
         for (path, metadata) in &self.volumes {
             files::ensure_unchanged(path, metadata)?;
@@ -782,6 +782,68 @@ impl Catalog {
         }
         self.check_unchanged()?;
         Ok(files::Directory { entries, errors })
+    }
+
+    pub fn search_candidates(
+        &self,
+        roots: &[PathBuf],
+        query: &crate::advanced_search::Query,
+        show_hidden: bool,
+        cancel: &AtomicBool,
+        mut inspect: impl FnMut(&files::Entry) -> io::Result<bool>,
+    ) -> io::Result<crate::advanced_search::Found> {
+        self.check_unchanged()?;
+        for root in roots {
+            if !self.folders.contains_key(root)
+                && !root
+                    .parent()
+                    .and_then(|parent| self.folders.get(parent))
+                    .is_some_and(|rows| rows.iter().any(|row| row.path == *root))
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("Suchort fehlt im Archiv: {}", root.display()),
+                ));
+            }
+        }
+        let mut entries = Vec::new();
+        let mut errors = Vec::new();
+        let mut interrupted = false;
+        'folders: for (parent, rows) in &self.folders {
+            for row in rows {
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    break 'folders;
+                }
+                let in_scope = roots.iter().any(|root| {
+                    row.path == *root && row.kind == files::Kind::File
+                        || parent.strip_prefix(root).ok().is_some_and(|relative| {
+                            query
+                                .max_depth
+                                .is_none_or(|depth| relative.components().count() <= depth)
+                        })
+                });
+                if !in_scope || !(show_hidden || !row.hidden) || !query.matches_metadata(row) {
+                    continue;
+                }
+                match inspect(row) {
+                    Ok(true) => entries.push(row.clone()),
+                    Ok(false) => (),
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                        interrupted = true;
+                        break 'folders;
+                    }
+                    Err(error) if errors.len() < 100 => {
+                        errors.push(format!("{}: {error}", row.path.display()))
+                    }
+                    Err(_) => (),
+                }
+            }
+        }
+        self.check_unchanged()?;
+        Ok(crate::advanced_search::Found {
+            directory: files::Directory { entries, errors },
+            cancelled: interrupted || cancel.load(std::sync::atomic::Ordering::Relaxed),
+        })
     }
 }
 

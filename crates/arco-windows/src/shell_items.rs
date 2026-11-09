@@ -1,4 +1,7 @@
-use crate::{SHELL_COMPUTER, SHELL_DESKTOP, ShellFolder, ShellListing};
+use crate::{
+    SHELL_APPLICATIONS, SHELL_COMPUTER, SHELL_DESKTOP, SHELL_LIBRARIES, SHELL_NETWORK,
+    SHELL_RECYCLE_BIN, ShellFolder, ShellListing,
+};
 use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
@@ -9,12 +12,17 @@ use windows::Win32::System::Ole::{OleInitialize, OleUninitialize};
 use windows::Win32::System::SystemServices::SFGAO_FOLDER;
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
-    FOLDERID_Desktop, IEnumIDList, ILCombine, ILRemoveLastID, IShellFolder, IShellItemArray,
-    SHCONTF_FOLDERS, SHCONTF_INCLUDEHIDDEN, SHCONTF_NONFOLDERS, SHCreateShellItemArrayFromIDLists,
-    SHGetDesktopFolder, SHGetKnownFolderIDList, SHGetNameFromIDList, SHParseDisplayName, SIGDN,
-    SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_FILESYSPATH, SIGDN_NORMALDISPLAY,
+    FOLDERID_AppsFolder, FOLDERID_Desktop, FOLDERID_Libraries, FOLDERID_NetworkFolder,
+    FOLDERID_RecycleBinFolder, IEnumIDList, ILCombine, ILRemoveLastID, IShellFolder,
+    IShellItemArray, SHCONTF_FOLDERS, SHCONTF_INCLUDEHIDDEN, SHCONTF_NONFOLDERS,
+    SHCreateShellItemArrayFromIDLists, SHGetDesktopFolder, SHGetKnownFolderIDList,
+    SHGetNameFromIDList, SHParseDisplayName, SIGDN, SIGDN_DESKTOPABSOLUTEPARSING,
+    SIGDN_FILESYSPATH, SIGDN_NORMALDISPLAY,
 };
-use windows::core::PCWSTR;
+use windows::core::{GUID, PCWSTR};
+
+mod operations;
+pub use operations::shell_transfer;
 
 pub(crate) fn item_array(paths: &[PathBuf]) -> io::Result<IShellItemArray> {
     let ids = paths
@@ -50,6 +58,16 @@ impl Drop for Pidl {
 }
 
 fn parse_id(value: impl AsRef<std::ffi::OsStr>) -> io::Result<Pidl> {
+    let value = value.as_ref();
+    if let Some((_, folder)) = known_virtual_folder(value) {
+        let id =
+            Pidl(unsafe { SHGetKnownFolderIDList(&folder, 0, None) }.map_err(io::Error::other)?);
+        return if id.0.is_null() {
+            Err(io::Error::other("Windows hat keine Shell-ID geliefert."))
+        } else {
+            Ok(id)
+        };
+    }
     let name = crate::platform::wide(value)?;
     let mut id = Pidl(null_mut());
     unsafe { SHParseDisplayName(PCWSTR(name.as_ptr()), None::<&IBindCtx>, &mut id.0, 0, None) }
@@ -58,6 +76,17 @@ fn parse_id(value: impl AsRef<std::ffi::OsStr>) -> io::Result<Pidl> {
         return Err(io::Error::other("Windows hat keine Shell-ID geliefert."));
     }
     Ok(id)
+}
+
+fn known_virtual_folder(value: &std::ffi::OsStr) -> Option<(&'static str, GUID)> {
+    [
+        (SHELL_NETWORK, FOLDERID_NetworkFolder),
+        (SHELL_LIBRARIES, FOLDERID_Libraries),
+        (SHELL_APPLICATIONS, FOLDERID_AppsFolder),
+        (SHELL_RECYCLE_BIN, FOLDERID_RecycleBinFolder),
+    ]
+    .into_iter()
+    .find(|(address, _)| value.eq_ignore_ascii_case(std::ffi::OsStr::new(address)))
 }
 
 fn name(id: &Pidl, form: SIGDN) -> io::Result<OsString> {
@@ -167,6 +196,13 @@ fn list_namespace(
             }
         }
         ancestors.reverse();
+        if let Some((address, _)) = known_virtual_folder(parent.as_ref())
+            && let Some((current, _)) = ancestors.last_mut()
+        {
+            // Some providers, including AppsFolder, return a display parsing
+            // name that SHParseDisplayName cannot resolve on its own.
+            *current = address.into();
+        }
     }
     Ok(ShellListing {
         ancestors,
@@ -210,6 +246,28 @@ pub fn open_shell_item(parsing_name: &str) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn known_virtual_locations_resolve_to_shell_addresses() {
+        let _apartment = Ole::new().unwrap();
+        for alias in [
+            SHELL_NETWORK,
+            SHELL_LIBRARIES,
+            SHELL_APPLICATIONS,
+            SHELL_RECYCLE_BIN,
+        ] {
+            let id = parse_id(alias).unwrap_or_else(|error| panic!("{alias}: {error}"));
+            assert!(!id_is_empty(&id), "{alias}");
+            let (_, title) = describe(&id).unwrap();
+            assert!(!title.is_empty(), "{alias}");
+        }
+        let apps = shell_listing(SHELL_APPLICATIONS, false, &AtomicBool::new(false)).unwrap();
+        let (address, _) = apps.ancestors.last().unwrap();
+        assert_eq!(address, SHELL_APPLICATIONS);
+        assert!(!id_is_empty(&parse_id(address).unwrap()));
+    }
+
     #[test]
     fn desktop_namespace_contains_a_browsable_computer_branch() {
         let desktop = super::shell_folders(None, false).unwrap();

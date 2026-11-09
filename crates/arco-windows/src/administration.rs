@@ -1,16 +1,24 @@
+use crate::ShareAccess;
 use crate::{LocalShare, Volume, platform::wide};
+use std::collections::BTreeMap;
 use std::ffi::{OsString, c_void};
 use std::io;
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
-use windows_sys::Win32::Foundation::{ERROR_MORE_DATA, LocalFree};
+use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, LocalFree};
 use windows_sys::Win32::NetworkManagement::NetManagement::NetApiBufferFree;
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+    ConvertStringSidToSidW,
 };
-use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+use windows_sys::Win32::Security::{
+    GetTokenInformation, LookupAccountNameW, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
+};
+use windows_sys::Win32::Security::{
+    SidTypeAlias, SidTypeComputer, SidTypeGroup, SidTypeUser, SidTypeWellKnownGroup,
+};
 use windows_sys::Win32::Storage::FileSystem::{
     GetDriveTypeW, GetVolumeInformationW, GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
     NetShareAdd, NetShareDel, NetShareEnum, NetShareGetInfo, SHARE_INFO_2, SHARE_INFO_502,
@@ -148,14 +156,166 @@ fn current_account_sid() -> io::Result<String> {
         return Err(io::Error::last_os_error());
     }
     let user = unsafe { &*words.as_ptr().cast::<TOKEN_USER>() };
+    sid_string(user.User.Sid)
+}
+
+fn sid_string(account: PSID) -> io::Result<String> {
     let mut sid = null_mut();
-    if unsafe { ConvertSidToStringSidW(user.User.Sid, &mut sid) } == 0 {
+    if unsafe { ConvertSidToStringSidW(account, &mut sid) } == 0 {
         return Err(io::Error::last_os_error());
     }
     let _guard = LocalBuffer(sid.cast());
     net_text(sid)
         .into_string()
         .map_err(|_| io::Error::other("Windows lieferte eine ungültige SID."))
+}
+
+fn named_account_sid(account: &str) -> io::Result<String> {
+    let name = wide(account)?;
+    if account.starts_with("S-1-") {
+        let mut sid = LocalBuffer(null_mut());
+        if unsafe { ConvertStringSidToSidW(name.as_ptr(), &mut sid.0) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        return sid_string(sid.0);
+    }
+    let (mut sid_bytes, mut domain_length, mut kind) = (0, 0, 0);
+    unsafe {
+        LookupAccountNameW(
+            null(),
+            name.as_ptr(),
+            null_mut(),
+            &mut sid_bytes,
+            null_mut(),
+            &mut domain_length,
+            &mut kind,
+        )
+    };
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32) || sid_bytes == 0 {
+        return Err(error);
+    }
+    let mut sid = vec![0usize; (sid_bytes as usize).div_ceil(std::mem::size_of::<usize>())];
+    let mut domain = vec![0u16; domain_length as usize];
+    if unsafe {
+        LookupAccountNameW(
+            null(),
+            name.as_ptr(),
+            sid.as_mut_ptr().cast(),
+            &mut sid_bytes,
+            domain.as_mut_ptr(),
+            &mut domain_length,
+            &mut kind,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    if ![
+        SidTypeUser,
+        SidTypeGroup,
+        SidTypeAlias,
+        SidTypeWellKnownGroup,
+        SidTypeComputer,
+    ]
+    .contains(&kind)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Kein verwendbares Windows-Konto oder keine Gruppe.",
+        ));
+    }
+    sid_string(sid.as_mut_ptr().cast())
+}
+
+fn share_accounts(
+    accounts: &str,
+    default_access: ShareAccess,
+) -> io::Result<BTreeMap<String, ShareAccess>> {
+    if accounts.trim().is_empty() {
+        return Ok(BTreeMap::from([(current_account_sid()?, default_access)]));
+    }
+    let names: Vec<_> = accounts
+        .split(';')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect();
+    if names.is_empty()
+        || names.len() > 32
+        || names
+            .iter()
+            .any(|name| name.encode_utf16().count() > 280 || name.chars().any(char::is_control))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Gib bis zu 32 Konten oder Gruppen an.",
+        ));
+    }
+    let mut permissions = BTreeMap::new();
+    for name in names {
+        let (name, access) = if let Some((name, access)) = name.split_once('=') {
+            let access = match access.trim().to_lowercase().as_str() {
+                "lesen" | "read" => ShareAccess::Read,
+                "ändern" | "change" => ShareAccess::Change,
+                "vollzugriff" | "full" => ShareAccess::Full,
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Erwartet wird Konto=Lesen, Konto=Ändern oder Konto=Vollzugriff.",
+                    ));
+                }
+            };
+            (name.trim(), access)
+        } else {
+            (name, default_access)
+        };
+        if name.is_empty() || name.encode_utf16().count() > 256 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Ungültiger Windows-Kontoname.",
+            ));
+        }
+        let sid = named_account_sid(name).map_err(|error| {
+            io::Error::new(error.kind(), format!("Windows-Konto „{name}“: {error}"))
+        })?;
+        if permissions
+            .insert(sid, access)
+            .is_some_and(|previous| previous != access)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Widersprüchliche Rechte für „{name}“."),
+            ));
+        }
+    }
+    Ok(permissions)
+}
+
+fn share_security(access: ShareAccess, accounts: &str) -> io::Result<LocalBuffer> {
+    let mut sddl = String::from("D:P");
+    for (sid, access) in share_accounts(accounts, access)? {
+        let access = match access {
+            ShareAccess::Read => "0x1200a9",
+            ShareAccess::Change => "0x1301bf",
+            ShareAccess::Full => "FA",
+        };
+        use std::fmt::Write as _;
+        write!(sddl, "(A;;{access};;;{sid})").expect("write to string");
+    }
+    let sddl = wide(sddl)?;
+    let mut security = LocalBuffer(null_mut());
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            1,
+            &mut security.0,
+            null_mut(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(security)
 }
 
 fn validate_share_name(name: &str) -> io::Result<()> {
@@ -178,7 +338,12 @@ fn validate_share_name(name: &str) -> io::Result<()> {
     Ok(())
 }
 
-pub fn create_share(directory: &Path, name: &str, read_only: bool) -> io::Result<()> {
+pub fn create_share(
+    directory: &Path,
+    name: &str,
+    access: ShareAccess,
+    accounts: &str,
+) -> io::Result<()> {
     validate_share_name(name)?;
     if !directory.is_absolute() || !directory.is_dir() {
         return Err(io::Error::other("Wähle einen bestehenden lokalen Ordner."));
@@ -199,21 +364,7 @@ pub fn create_share(directory: &Path, name: &str, read_only: bool) -> io::Result
     }
     let mut name = wide(name)?;
     let mut path = wide(directory)?;
-    let sid = current_account_sid()?;
-    let access = if read_only { "0x1200a9" } else { "FA" };
-    let sddl = wide(format!("D:P(A;;{access};;;{sid})"))?;
-    let mut security = LocalBuffer(null_mut());
-    if unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.as_ptr(),
-            1,
-            &mut security.0,
-            null_mut(),
-        )
-    } == 0
-    {
-        return Err(io::Error::last_os_error());
-    }
+    let security = share_security(access, accounts)?;
     let info = SHARE_INFO_502 {
         shi502_netname: name.as_mut_ptr(),
         shi502_type: STYPE_DISKTREE,
@@ -317,12 +468,109 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires an elevated Windows account and the SMB Server service"]
+    fn reference_creates_checks_and_removes_real_smb_shares() {
+        struct ShareGuard(Option<LocalShare>);
+        impl Drop for ShareGuard {
+            fn drop(&mut self) {
+                if let Some(share) = &self.0 {
+                    let _ = remove_share(share);
+                }
+            }
+        }
+
+        let fixture = tempfile::tempdir().unwrap();
+        let canonical = fixture.path().canonicalize().unwrap();
+        let directory = canonical.to_str().unwrap().trim_start_matches(r"\\?\");
+        let suffix = fixture.path().file_name().unwrap().to_str().unwrap();
+        let account = current_account_sid().unwrap();
+        for (label, access) in [("read", ShareAccess::Read), ("write", ShareAccess::Change)] {
+            let name = format!("Arco-{label}-{suffix}");
+            let file = format!("{label}.txt");
+            std::fs::write(fixture.path().join(&file), b"share fixture").unwrap();
+            create_share(fixture.path(), &name, access, &account).unwrap();
+            let expected = LocalShare {
+                name: name.clone(),
+                path: PathBuf::from(directory),
+                special: false,
+            };
+            let mut guard = ShareGuard(Some(expected.clone()));
+            assert!(local_shares().unwrap().contains(&expected));
+            let unc = PathBuf::from(format!(r"\\localhost\{name}"));
+            assert_eq!(std::fs::read(unc.join(&file)).unwrap(), b"share fixture");
+            let write = std::fs::write(unc.join(&file), b"changed by SMB");
+            if matches!(access, ShareAccess::Read) {
+                assert_eq!(write.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+            } else {
+                write.unwrap();
+                assert_eq!(
+                    std::fs::read(fixture.path().join(&file)).unwrap(),
+                    b"changed by SMB"
+                );
+            }
+            remove_share(&expected).unwrap();
+            guard.0 = None;
+            assert!(!local_shares().unwrap().contains(&expected));
+        }
+    }
+
+    #[test]
     fn validates_share_names_and_resolves_the_local_account() {
         assert!(validate_share_name("Arco Test").is_ok());
         for name in ["", "C$", "ADMIN$", "Verzeichnis\\Ordner", "hinten."] {
             assert!(validate_share_name(name).is_err());
         }
         assert!(current_account_sid().unwrap().starts_with("S-1-"));
+    }
+
+    #[test]
+    fn share_permissions_resolve_and_deduplicate_principals_without_publishing() {
+        use windows_sys::Win32::Security::{ACCESS_ALLOWED_ACE, GetAce, GetSecurityDescriptorDacl};
+        let sid = current_account_sid().unwrap();
+        let account = format!(
+            "{}\\{}",
+            std::env::var("USERDOMAIN").unwrap(),
+            std::env::var("USERNAME").unwrap()
+        );
+        assert_eq!(named_account_sid(&account).unwrap(), sid);
+        assert_eq!(
+            share_accounts("", ShareAccess::Read).unwrap(),
+            BTreeMap::from([(sid.clone(), ShareAccess::Read)])
+        );
+        let accounts = format!("{account}; {sid}; S-1-5-32-545=Lesen");
+        assert_eq!(
+            share_accounts(&accounts, ShareAccess::Change)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(share_accounts("S-1-5-32-545)(A;;FA;;;WD", ShareAccess::Read).is_err());
+        assert!(
+            share_accounts(
+                &format!("{account}=Lesen;{sid}=Vollzugriff"),
+                ShareAccess::Read
+            )
+            .is_err()
+        );
+        let descriptor = share_security(ShareAccess::Change, &accounts).unwrap();
+        let (mut present, mut acl, mut defaulted) = (0, null_mut(), 0);
+        assert_ne!(
+            unsafe {
+                GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut acl, &mut defaulted)
+            },
+            0
+        );
+        assert_ne!(present, 0);
+        assert!(!acl.is_null());
+        assert_eq!(unsafe { (*acl).AceCount }, 2);
+        let mut masks = Vec::new();
+        for index in 0..2 {
+            let mut ace = null_mut();
+            assert_ne!(unsafe { GetAce(acl, index, &mut ace) }, 0);
+            masks.push(unsafe { (*ace.cast::<ACCESS_ALLOWED_ACE>()).Mask });
+        }
+        masks.sort();
+        assert_eq!(masks, [0x1200a9, 0x1301bf]);
     }
 
     #[test]

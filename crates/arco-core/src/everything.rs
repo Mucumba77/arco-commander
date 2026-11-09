@@ -129,14 +129,67 @@ fn run(
     cancel: &AtomicBool,
 ) -> io::Result<()> {
     files::check_cancel(cancel)?;
-    let mut command = Command::new(executable);
-    command.args(["-n", "100000", "-export-efu"]).arg(export);
-    if let Some(scope) = scope {
-        command.arg("-path").arg(index_path(scope));
+    if expression.contains(['\r', '\n', '\0']) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Die Everything-Abfrage enthält Steuerzeichen.",
+        ));
     }
+    let build_command = || {
+        let mut command = Command::new(executable);
+        command
+            .args(["-n", "100000", "-timeout", "5000", "-export-efu"])
+            .arg(export);
+        if let Some(scope) = scope {
+            command.arg("-path").arg(index_path(scope));
+        }
+        command
+    };
+    let mut command = build_command();
     if !expression.is_empty() {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // ES treats quotes in its raw command line as search syntax.
+            // This switch hands the remainder to the search parser without parsing more options.
+            command.arg("-search*").raw_arg(format!("<{expression}>"));
+        }
+        #[cfg(not(windows))]
         command.arg(format!("<{expression}>"));
     }
+    let status = run_command(command, cancel)?;
+    #[cfg(windows)]
+    let status = if status.code() == Some(6) && !expression.is_empty() {
+        use std::os::windows::process::CommandExt;
+        if !legacy_expression_safe(expression) {
+            return Err(io::Error::other(
+                "Die Everything-Abfrage benötigt eine es.exe mit Unterstützung für -search*.",
+            ));
+        }
+        let mut command = build_command();
+        command.raw_arg(format!("<{expression}>"));
+        run_command(command, cancel)?
+    } else {
+        status
+    };
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "Everything-Abfrage fehlgeschlagen (es.exe {status})."
+        )))
+    }
+}
+
+#[cfg(windows)]
+fn legacy_expression_safe(expression: &str) -> bool {
+    !expression
+        .split_whitespace()
+        .any(|token| token.trim_start_matches('"').starts_with(['-', '/']))
+}
+
+fn run_command(mut command: Command, cancel: &AtomicBool) -> io::Result<std::process::ExitStatus> {
+    files::check_cancel(cancel)?;
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -150,13 +203,7 @@ fn run(
     let start = Instant::now();
     loop {
         if let Some(status) = child.try_wait()? {
-            return if status.success() {
-                Ok(())
-            } else {
-                Err(io::Error::other(format!(
-                    "Everything-Abfrage fehlgeschlagen (es.exe {status})."
-                )))
-            };
+            return Ok(status);
         }
         let ready = files::check_cancel(cancel).and_then(|()| {
             if start.elapsed() >= Duration::from_secs(30) {
@@ -190,6 +237,16 @@ fn index_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn legacy_search_does_not_accept_es_options_as_terms() {
+        assert!(legacy_expression_safe(
+            r#"ext:txt "ein name" | path:C:\Daten"#
+        ));
+        assert!(!legacy_expression_safe(r#"ext:txt -clear-settings"#));
+        assert!(!legacy_expression_safe(r#"ext:txt "/exit""#));
+    }
 
     #[test]
     fn reads_unicode_file_lists_with_a_reordered_header() {

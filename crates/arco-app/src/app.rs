@@ -2,7 +2,7 @@ use crate::commands::{COMMANDS, Dialog, Pending};
 use crate::panel::{ArchiveTab, FtpTab, Location, Panel, ShellLocation, Tab};
 use crate::preview;
 use crate::shortcuts;
-use crate::{Colors, MainWindow, SettingsData, display_path, human_size};
+use crate::{Colors, MainWindow, SettingsData, display_path};
 use arco_core::archive_view::{self, Catalog};
 use arco_core::files::{self, Directory, Kind, Transfer, TransferReport};
 use arco_core::profile::{self, LayoutSettings, ListFont, Profile, TabLock, TcImport};
@@ -25,6 +25,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 mod administration;
 mod advanced_search;
+pub(crate) use advanced_search::run_search_worker;
 mod archive_actions;
 mod associations;
 mod buttonbars;
@@ -57,6 +58,7 @@ mod wfx_panel;
 mod wfx_prompts;
 mod wlx;
 pub(crate) use administration::Setup as AdministrationSetup;
+pub(crate) use advanced_search::duplicate_result;
 pub(crate) use advanced_search::{Review as AdvancedSearchReview, Setup as AdvancedSearchSetup};
 pub(crate) use archive_actions::{ArchiveInput, StagedPreview};
 pub(crate) use associations::Setup as AssociationSetup;
@@ -125,7 +127,7 @@ pub enum Outcome {
     },
     Ftp(FtpView),
     FtpEditReady(Box<FtpDraft>),
-    FtpEditUploaded(Box<FtpDraft>),
+    FtpEditUploaded(Box<FtpDraft>, Option<String>),
     Imported(TcImport),
     ImportedTabs(String, Box<arco_core::profile::TcTabs>),
     TabFile(Box<arco_core::profile::TcTabs>, bool),
@@ -137,6 +139,11 @@ pub enum Outcome {
         Box<arco_core::plugin::Registration>,
         Vec<arco_core::plugin::Row>,
         Option<WdxSearchTarget>,
+    ),
+    WfxColumnFields(
+        Box<arco_core::plugin::Registration>,
+        Option<String>,
+        Vec<arco_core::plugin::WfxField>,
     ),
     WdxSorted(Vec<files::Entry>),
     WdxEditable(wdx::EditTarget, Vec<arco_core::plugin::WdxEditableField>),
@@ -172,9 +179,11 @@ enum Event {
     PluginPrompt(PromptTicket),
     TransferConflict(ConflictTicket),
     WdxValues(wdx::Values),
+    WfxDefaultView(PathBuf, Option<Vec<arco_core::view_settings::Column>>),
     Thumbnails(thumbnails::Loaded),
     TreeLoaded(directory_tree::Loaded),
     QuickPreview(QuickTarget, wlx::QuickResult),
+    SeparateSearch(u64, Box<advanced_search::WindowAction>),
     Finished {
         outcome: Result<Outcome, String>,
         refresh: bool,
@@ -325,13 +334,17 @@ pub struct App {
     wdx_pending: Option<wdx::Running>,
     wdx_sort_request: Option<wdx::SortRequest>,
     wdx_next_side: usize,
-    thumbnail_jobs: [Option<Rc<crate::panel::FileModel>>; 2],
+    wfx_default_views: view_setup::WfxDefaultViews,
+    thumbnail_jobs: [Option<thumbnails::Running>; 2],
     trees: [Option<directory_tree::Tree>; 2],
     tree_loading: [bool; 2],
     pub undo: Option<rename::Plan>,
     pub viewer: Option<Viewer>,
     pub staged_preview: Option<StagedPreview>,
     listers: Vec<crate::ListerWindow>,
+    buttonbar_edit_path: Vec<usize>,
+    buttonbar_switches: [Vec<Vec<arco_core::profile::ButtonbarButton>>; 2],
+    separate_search: Option<advanced_search::SeparateSearch>,
     pub(crate) preview_image_path: Option<PathBuf>,
     quick_open: bool,
     quick_requested: Option<QuickTarget>,
@@ -339,6 +352,7 @@ pub struct App {
     quick_ready: bool,
     quick_cancel: Option<Arc<AtomicBool>>,
     quick_embedded: Option<Box<wlx::EmbeddedPreview>>,
+    quick_web: Rc<RefCell<wlx::QuickWeb>>,
     quick_skip_plugin: bool,
     plugin_previews: Vec<(String, arco_core::plugin::HostProcess)>,
     pub ftp: Option<FtpView>,
@@ -351,7 +365,7 @@ pub struct App {
     next_request: u64,
     loader_cancel: [Option<Arc<AtomicBool>>; 2],
     waiting_loads: [Option<DirectoryRequest>; 2],
-    drops: Option<(usize, Vec<PathBuf>)>,
+    drops: Option<(usize, arco_windows::FileDropAction, Vec<PathBuf>)>,
     last_pointer_open: Option<(Instant, (i32, i32))>,
     context_menu_open: bool,
     bindings: shortcuts::Bindings,
@@ -360,6 +374,7 @@ pub struct App {
     shortcut_hook: Option<arco_windows::ShortcutHook>,
     timer: Timer,
     drive_timer: Timer,
+    view_drive_revision: u64,
 }
 
 pub fn run(
@@ -401,6 +416,7 @@ pub fn run(
         wdx_pending: None,
         wdx_sort_request: None,
         wdx_next_side: 0,
+        wfx_default_views: view_setup::WfxDefaultViews::default(),
         thumbnail_jobs: [None, None],
         trees: [None, None],
         tree_loading: [false; 2],
@@ -408,6 +424,9 @@ pub fn run(
         viewer: None,
         staged_preview: None,
         listers: Vec::new(),
+        buttonbar_edit_path: Vec::new(),
+        buttonbar_switches: Default::default(),
+        separate_search: None,
         preview_image_path: None,
         quick_open: false,
         quick_requested: None,
@@ -415,6 +434,7 @@ pub fn run(
         quick_ready: false,
         quick_cancel: None,
         quick_embedded: None,
+        quick_web: Default::default(),
         quick_skip_plugin: false,
         plugin_previews: Vec::new(),
         ftp: None,
@@ -436,11 +456,22 @@ pub fn run(
         shortcut_hook: None,
         timer: Timer::default(),
         drive_timer: Timer::default(),
+        view_drive_revision: 0,
     }));
     let weak = Rc::downgrade(&app);
     window.on_action(move |name| {
         if let Some(app) = weak.upgrade() {
             app.borrow_mut().action(name.as_str());
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_tool_selected(move |index| {
+        if let Some(app) = weak.upgrade()
+            && let Some((_, command)) = usize::try_from(index.saturating_sub(1))
+                .ok()
+                .and_then(|index| COMMANDS.get(index))
+        {
+            app.borrow_mut().action(command);
         }
     });
     let weak = Rc::downgrade(&app);
@@ -469,6 +500,11 @@ pub fn run(
         if let Some(app) = weak.upgrade() {
             let mut app = app.borrow_mut();
             let side = side as usize;
+            if app.panels[side].current().deferred.is_some() {
+                app.set_active(side);
+                app.open_deferred_tab();
+                return;
+            }
             let path = app.panels[side]
                 .current()
                 .crumbs()
@@ -579,18 +615,37 @@ pub fn run(
     let weak = Rc::downgrade(&app);
     window.on_drag_row(move |side, row| {
         let Some(app) = weak.upgrade() else { return };
-        let paths = app.borrow().panels[side as usize]
-            .current()
-            .drag_paths(row as usize);
+        let side = side as usize;
+        let (location, paths) = {
+            let app = app.borrow();
+            let tab = app.panels[side].current();
+            (tab.location(), tab.drag_paths(row as usize))
+        };
         if paths.is_empty() {
             return;
         }
         let weak = Rc::downgrade(&app);
         Timer::single_shot(Duration::ZERO, move || {
-            if let Err(error) = arco_windows::drag_copy(&paths)
-                && let Some(app) = weak.upgrade()
-            {
-                app.borrow().status(format!("Dateien ziehen: {error}"));
+            let result = arco_windows::drag_files(&paths);
+            let Some(app) = weak.upgrade() else { return };
+            let mut app = app.borrow_mut();
+            match result {
+                Ok(arco_windows::FileDragOutcome::NoConfirmedMove) => (),
+                Ok(outcome) => {
+                    if app.panels[side].current().location() == location {
+                        app.refresh(side);
+                    }
+                    match outcome {
+                        arco_windows::FileDragOutcome::MoveUnconfirmed => {
+                            app.status("Das Ziel hat die Verschiebung nicht eindeutig bestätigt. Prüfe Quelle und Ziel.");
+                        }
+                        arco_windows::FileDragOutcome::MovePartiallyCompleted { completed, total } => {
+                            app.status(format!("Das Ziel hat die Übertragung bestätigt. Arco konnte {completed} von {total} Quellen sicher entfernen."));
+                        }
+                        _ => ()
+                    }
+                }
+                Err(error) => app.status(format!("Dateien ziehen: {error}")),
             }
         });
     });
@@ -634,6 +689,9 @@ pub fn run(
                 app.ui()
                     .global::<Colors>()
                     .set_light(app.effective_light_theme());
+                app.publish(0);
+                app.publish(1);
+                app.update_search_theme();
             }
         }
         #[cfg(windows)]
@@ -649,8 +707,8 @@ pub fn run(
         {
             let side = app.drop_side(window);
             app.drops
-                .get_or_insert_with(|| (side, Vec::new()))
-                .1
+                .get_or_insert_with(|| (side, arco_windows::file_drop_action(), Vec::new()))
+                .2
                 .push(path.clone());
         }
         EventResult::Propagate
@@ -668,6 +726,19 @@ pub fn run(
         if let Some(app) = weak.upgrade() {
             app.borrow_mut()
                 .submit(value.as_str(), second.as_str(), option);
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_submit_multi_rename(move |mask, extension, search| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut()
+                .submit_multi_rename(mask.as_str(), extension.as_str(), search);
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_rename_edited(move || {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut().edit_multi_rename();
         }
     });
     let weak = Rc::downgrade(&app);
@@ -783,6 +854,7 @@ pub fn run(
             for lister in app.listers.drain(..) {
                 lister.invoke_close_lister();
             }
+            app.close_separate_search();
         }
         slint::CloseRequestResponse::HideWindow
     });
@@ -791,9 +863,7 @@ pub fn run(
         window.set_drives(strings(
             arco_windows::drives().iter().map(|path| display_path(path)),
         ));
-        window.set_tools_menu(strings(
-            std::iter::once("Werkzeuge").chain(COMMANDS.iter().map(|(label, _)| *label)),
-        ));
+        state.sync_tools_menu();
         state.sync_shortcut_labels();
         state.sync_ui_settings();
         state.invalidate_wdx_columns();
@@ -817,6 +887,7 @@ pub fn run(
                 }
             });
         let window = window.as_weak();
+        let weak = Rc::downgrade(&app);
         state
             .drive_timer
             .start(TimerMode::Repeated, Duration::from_secs(2), move || {
@@ -828,6 +899,9 @@ pub fn run(
                     if !window.get_drives().iter().eq(drives.iter().cloned()) {
                         window.set_drives(ModelRc::new(VecModel::from(drives)));
                     }
+                }
+                if let Some(app) = weak.upgrade() {
+                    app.borrow_mut().poll_tc_drive_views();
                 }
             });
     }
@@ -921,8 +995,8 @@ impl App {
         let layout = &profile.layout;
         let ui = self.ui();
         ui.set_settings(SettingsData {
-            toolbar: layout.toolbar,
-            panel_toolbar: layout.panel_toolbar,
+            toolbar: layout.toolbar || !self.buttonbar_switches[0].is_empty(),
+            panel_toolbar: layout.panel_toolbar || !self.buttonbar_switches[1].is_empty(),
             drive_buttons: layout.drive_buttons,
             drive_list: layout.drive_list,
             folder_tabs: layout.folder_tabs,
@@ -956,6 +1030,7 @@ impl App {
         });
         ui.global::<Colors>()
             .set_light(self.effective_light_theme());
+        self.update_search_theme();
         self.apply_color_settings();
         ui.set_stacked(profile.stacked);
         self.publish_buttonbars();
@@ -1018,6 +1093,8 @@ impl App {
             .unwrap_or(14);
         self.set_hidden(value.show_hidden);
         self.sync_ui_settings();
+        self.publish(0);
+        self.publish(1);
         self.status("Einstellungen angewendet.");
         self.save();
         if close {
@@ -1079,7 +1156,16 @@ impl App {
     }
 
     pub fn status(&self, text: impl Into<SharedString>) {
-        self.ui().set_status(text.into());
+        self.ui()
+            .set_status(crate::locale::tr(text.into().as_str()).into());
+    }
+
+    pub(crate) fn sync_tools_menu(&self) {
+        self.ui().set_tools_menu(strings(
+            std::iter::once("Werkzeuge")
+                .chain(COMMANDS.iter().map(|(label, _)| *label))
+                .map(crate::locale::tr),
+        ));
     }
 
     pub fn set_active(&mut self, side: usize) {
@@ -1100,7 +1186,7 @@ impl App {
     }
 
     pub fn publish(&self, side: usize) {
-        let mut data = self.panels[side].snapshot();
+        let mut data = self.panels[side].snapshot(self.effective_light_theme());
         self.publish_columns(side, &mut data);
         if side == 0 {
             self.ui().set_left(data);
@@ -1144,6 +1230,7 @@ impl App {
         self.profile.panels = [self.panels[0].saved(), self.panels[1].saved()];
         self.profile.active_panel = self.active;
         self.profile.split_ratio = self.ui().get_split_ratio();
+        crate::window_placement::capture(self.ui().window(), &mut self.profile.window_placement);
         if let Err(error) = self.profile.save(&self.profile_path) {
             self.status(format!("Profil speichern: {error}"));
         }
@@ -1154,6 +1241,7 @@ impl App {
         snapshot.panels = self.panels.each_ref().map(Panel::saved);
         snapshot.active_panel = self.active;
         snapshot.split_ratio = self.ui().get_split_ratio();
+        crate::window_placement::capture(self.ui().window(), &mut snapshot.window_placement);
         snapshot
     }
 
@@ -1163,7 +1251,9 @@ impl App {
             return;
         }
         if index == panel.tab {
-            self.return_to_tab_base();
+            if !self.refresh_deferred_tab(self.active) {
+                self.return_to_tab_base();
+            }
             return;
         }
         panel.tab = index;
@@ -1278,6 +1368,9 @@ impl App {
         if self.panels[self.active].loading {
             return;
         }
+        if self.open_deferred_tab() {
+            return;
+        }
         let tab = self.current();
         if tab.parent_row(row) {
             self.go_up();
@@ -1321,6 +1414,9 @@ impl App {
 
     pub fn refresh(&mut self, side: usize) {
         self.invalidate_tree(side);
+        if self.refresh_deferred_tab(side) {
+            return;
+        }
         self.load_location(
             side,
             self.panels[side].current().location(),
@@ -1507,8 +1603,10 @@ impl App {
                 Event::PluginPrompt(ticket) => self.plugin_prompts.push_back(ticket),
                 Event::TransferConflict(ticket) => self.transfers.prompt = Some(ticket),
                 Event::WdxValues(values) => self.apply_wdx_values(values),
+                Event::WfxDefaultView(path, columns) => self.apply_wfx_default_view(path, columns),
                 Event::Thumbnails(loaded) => self.apply_thumbnails(loaded),
                 Event::TreeLoaded(loaded) => self.tree_loaded(loaded),
+                Event::SeparateSearch(id, action) => self.separate_search_action(id, *action),
                 Event::QuickPreview(target, result) => {
                     self.quick_running = false;
                     let cancelled = self
@@ -1545,7 +1643,7 @@ impl App {
         self.update_thumbnails();
         self.update_trees();
         self.update_quick_preview();
-        if let Some((side, paths)) = self.drops.take() {
+        if let Some((side, action, paths)) = self.drops.take() {
             if self.ui().get_dialog_kind().is_empty()
                 && !self.ui().get_settings_open()
                 && self.ui().get_drive_side() < 0
@@ -1555,7 +1653,18 @@ impl App {
                 if !self.current().is_local() {
                     self.status("Wechsle für Drag-and-drop in einen lokalen Zielordner.");
                 } else {
-                    self.transfer_dialog(paths, self.current().path.clone(), Transfer::Copy);
+                    let target = self.current().path.clone();
+                    match action {
+                        arco_windows::FileDropAction::Copy => {
+                            self.transfer_dialog(paths, target, Transfer::Copy)
+                        }
+                        arco_windows::FileDropAction::Move => {
+                            self.transfer_dialog(paths, target, Transfer::Move)
+                        }
+                        arco_windows::FileDropAction::Link => {
+                            self.create_dropped_shortcuts(paths, target)
+                        }
+                    }
                 }
             } else {
                 self.status(
@@ -1564,6 +1673,34 @@ impl App {
             }
         }
         self.update_wdx_sort();
+    }
+
+    fn create_dropped_shortcuts(&mut self, paths: Vec<PathBuf>, target: PathBuf) {
+        self.start_job("Verknüpfungen erstellen …", true, move |job| {
+            let mut report = files::TransferReport::default();
+            for path in paths {
+                if job.cancel.load(Ordering::Relaxed) {
+                    report.cancelled = true;
+                    break;
+                }
+                let result = (|| {
+                    let mut name = path
+                        .file_name()
+                        .ok_or(io::ErrorKind::InvalidInput)?
+                        .to_os_string();
+                    name.push(".lnk");
+                    let name = files::leaf_name(&name)?;
+                    arco_windows::create_shortcut(&path, &target.join(name))
+                })();
+                match result {
+                    Ok(()) => report.completed += 1,
+                    Err(error) => report
+                        .errors
+                        .push(format!("{}: {error}", display_path(&path))),
+                }
+            }
+            Ok(Outcome::Report("Verknüpfungen erstellt".into(), report))
+        });
     }
 
     pub fn toggle_quick_preview(&mut self) {
@@ -1590,8 +1727,13 @@ impl App {
         let entry = tab
             .display_row(tab.cursor)
             .filter(|entry| entry.kind == Kind::File)?;
+        let path = if tab.shell.is_some() {
+            tab.shell_entries.get(&entry.path)?.path.clone()?
+        } else {
+            entry.path.clone()
+        };
         Some(QuickTarget {
-            path: entry.path.clone(),
+            path,
             modified: entry.modified,
             size: entry.size,
             archive: tab.archive.as_ref().map(|archive| {
@@ -1665,15 +1807,7 @@ impl App {
                     ));
                     return;
                 }
-                let result = match &target.archive {
-                    Some((_, _, true)) => Err(io::Error::other(
-                        "Verschlüsselter Eintrag. Verwende F3 für die Passwortabfrage.",
-                    )),
-                    Some((archive, _, false)) => {
-                        archive_actions::read_archive_preview(archive, &target.path)
-                    }
-                    None => preview::read_raw(&target.path),
-                };
+                let result = wlx::read_quick_preview(&target, &cancel);
                 let _ = sender.send(Event::QuickPreview(
                     target,
                     wlx::QuickResult::Internal(result, plugin_error),
@@ -1682,8 +1816,7 @@ impl App {
         }
     }
 
-    fn show_quick_result(&self, result: io::Result<preview::Content>) {
-        let ui = self.ui();
+    fn show_quick_result(ui: &MainWindow, result: io::Result<preview::Content>) {
         match result {
             Ok(preview::Content::Page(mode, page)) => {
                 let mode = if mode == PreviewMode::Hex {
@@ -1750,6 +1883,7 @@ impl App {
                     shell,
                 } = *loaded;
                 let tab = panel.current_mut();
+                let restored = matches!(navigation, Navigation::Refresh) && tab.deferred.is_some();
                 let previous = tab.location();
                 let focus = if previous == target {
                     tab.display_row(tab.cursor).map(|entry| entry.path.clone())
@@ -1781,6 +1915,9 @@ impl App {
                     }
                     tab.change_location(&target, archive);
                     tab.manual_view = false;
+                } else if tab.deferred.is_some() && matches!(target, Location::Local(_)) {
+                    tab.change_location(&target, archive);
+                    tab.set_lock(tab.options.lock);
                 } else {
                     tab.archive = archive;
                     if let Location::Shell(shell) = &target {
@@ -1788,6 +1925,9 @@ impl App {
                     }
                 }
                 tab.ftp = ftp;
+                if restored {
+                    tab.set_lock(tab.options.lock);
+                }
                 tab.shell_entries = shell;
                 tab.view_scope = None;
                 if !tab.manual_view {
@@ -1798,32 +1938,7 @@ impl App {
                         &directory.entries,
                     );
                 }
-                tab.volume = space
-                    .map(|space| {
-                        format!(
-                            "{} frei von {}",
-                            human_size(space.available),
-                            human_size(space.total)
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        if let Some(ftp) = &tab.ftp {
-                            match ftp.listing.format {
-                                ftp::ListFormat::Mlsd => "FTP · MLSD",
-                                ftp::ListFormat::List => "FTP · LIST",
-                                ftp::ListFormat::Names => "FTP · Namensliste",
-                            }
-                            .into()
-                        } else if tab.archive.is_some() {
-                            "Archiv".into()
-                        } else if let Some(wfx) = &tab.wfx {
-                            format!("WFX · {}", wfx.plugin.name)
-                        } else if tab.shell.is_some() {
-                            "Windows-Shell".into()
-                        } else {
-                            String::new()
-                        }
-                    });
+                tab.space = space;
                 tab.clear_comparison_filter();
                 tab.ignore = self.ignore.clone();
                 tab.colors = self.file_colors.clone();
@@ -1863,8 +1978,10 @@ impl App {
                     self.publish(side);
                     return;
                 }
+                let can_fallback = panel.current().deferred.is_none();
                 self.status(format!("{}: {error}", target.display()));
                 if matches!(navigation, Navigation::Refresh)
+                    && can_fallback
                     && error.kind() == io::ErrorKind::NotFound
                     && let Location::Archive { file, folder } = target
                 {
@@ -1980,7 +2097,7 @@ impl App {
             }
             Outcome::Ftp(view) => self.show_ftp(view),
             Outcome::FtpEditReady(draft) => self.open_downloaded_ftp_draft(*draft),
-            Outcome::FtpEditUploaded(draft) => self.finish_ftp_upload(*draft),
+            Outcome::FtpEditUploaded(draft, log_error) => self.finish_ftp_upload(*draft, log_error),
             Outcome::Imported(import) => self.show_tc_import(import),
             Outcome::ImportedTabs(name, import) => self.review_tab_import(name, *import),
             Outcome::TabFile(import, replace) => self.apply_tab_file(*import, replace),
@@ -1993,6 +2110,9 @@ impl App {
             Outcome::PluginImport(import) => self.review_plugin_import(import),
             Outcome::WdxFields(entry, fields, search) => {
                 self.choose_wdx_field(*entry, fields, search)
+            }
+            Outcome::WfxColumnFields(plugin, name, fields) => {
+                self.edit_wfx_columns(*plugin, name, fields)
             }
             Outcome::WdxSorted(entries) => self.apply_wdx_order(entries),
             Outcome::WdxEditable(target, fields) => self.choose_wdx_edit_field(target, fields),
@@ -2049,7 +2169,7 @@ impl App {
         self.pending = None;
         let ui = self.ui();
         ui.set_dialog_kind("text".into());
-        ui.set_dialog_title(title.into());
+        ui.set_dialog_title(crate::locale::tr(title).into());
         ui.set_dialog_description("".into());
         ui.set_dialog_options(strings(std::iter::empty::<&str>()));
         ui.set_dialog_value(body.into());

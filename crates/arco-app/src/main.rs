@@ -2,9 +2,11 @@
 
 mod app;
 mod commands;
+mod locale;
 mod panel;
 mod preview;
 mod shortcuts;
+mod window_placement;
 
 use arco_core::profile::Profile;
 use slint::ComponentHandle;
@@ -14,16 +16,23 @@ use std::path::{Path, PathBuf};
 slint::include_modules!();
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == "--search-worker")
+    {
+        return app::run_search_worker().map_err(Into::into);
+    }
     let mut arguments = std::env::args_os().skip(1);
     let mut paths = [None, None];
     let mut profile = None;
     let mut portable = false;
+    let mut instance = None;
     while let Some(argument) = arguments.next() {
         match argument.to_str() {
             Some("--help" | "-h" | "/?") => {
                 arco_windows::attach_parent_console_for_help();
                 println!(
-                    "Arco Commander\n  --left PFAD | /L=PFAD\n  --right PFAD | /R=PFAD\n  --portable\n  --profile DATEI"
+                    "Arco Commander\n  --left PFAD | /L=PFAD\n  --right PFAD | /R=PFAD\n  --portable\n  --profile DATEI\n  --instance NAME"
                 );
                 return Ok(());
             }
@@ -31,6 +40,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some("--right") => paths[1] = Some(next_path(&mut arguments, "--right")?),
             Some("--portable") => portable = true,
             Some("--profile") => profile = Some(next_path(&mut arguments, "--profile")?),
+            Some("--instance") => {
+                let name = next_path(&mut arguments, "--instance")?;
+                let name = name.to_str().filter(|name| !name.is_empty() && name.len() <= 64
+                    && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')))
+                    .ok_or("Der Instanzname darf nur Buchstaben, Ziffern, Bindestriche und Unterstriche enthalten.")?;
+                instance = Some(name.to_ascii_lowercase());
+            }
             _ => {
                 let value = argument.to_string_lossy();
                 let (side, value) = value
@@ -45,14 +61,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let fallback = std::env::current_dir()?;
+    let profile_name = |base: &str| {
+        instance.as_ref().map_or_else(
+            || format!("{base}.json"),
+            |instance| format!("{base}-{instance}.json"),
+        )
+    };
     let profile = match profile {
         Some(path) => path,
-        None if portable => std::env::current_exe()?.with_file_name("arco-commander.json"),
+        None if portable => std::env::current_exe()?.with_file_name(profile_name("arco-commander")),
         None => std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(|| fallback.clone())
             .join("Arco Commander")
-            .join("profile.json"),
+            .join(profile_name("profile")),
     };
     let (mut saved, profile_error) = match Profile::load(&profile) {
         Ok(saved) => (saved, None),
@@ -77,12 +99,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let window = MainWindow::new()?;
+    locale::select(saved.language)?;
     window
         .window()
         .set_size(slint::LogicalSize::new(1200.0, 760.0));
+    let placement = saved.window_placement.clone();
     let _state = app::run(&window, saved, fallback, profile, profile_error);
+    window.show()?;
+    window_placement::restore(window.window(), &placement);
     window.invoke_focus_panels();
-    window.run()?;
+    slint::run_event_loop()?;
     Ok(())
 }
 

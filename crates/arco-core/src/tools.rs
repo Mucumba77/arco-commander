@@ -842,6 +842,44 @@ pub fn duplicates(
     let by_size = !matches!(mode, DuplicateMode::Name);
     let by_content = matches!(mode, DuplicateMode::Content | DuplicateMode::NameAndContent);
     let mut candidates = HashMap::<_, Vec<_>>::new();
+    for (path, metadata) in duplicate_files(paths, ignore, cancel)? {
+        let name = by_name.then(|| {
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_lowercase()
+        });
+        candidates
+            .entry((name, by_size.then_some(metadata.len())))
+            .or_default()
+            .push(path);
+    }
+    let mut groups = Vec::new();
+    for group in candidates.into_values().filter(|group| group.len() > 1) {
+        if by_content {
+            let mut hashes = HashMap::<String, Vec<PathBuf>>::new();
+            for path in group {
+                let before = files::regular_metadata(&path)?;
+                let hash = checksum(&path, Hash::Blake3, cancel)?;
+                files::ensure_unchanged(&path, &before)?;
+                hashes.entry(hash).or_default().push(path);
+            }
+            groups.extend(hashes.into_values().filter(|group| group.len() > 1));
+        } else {
+            groups.push(group);
+        }
+    }
+    groups.iter_mut().for_each(|group| group.sort());
+    groups.sort();
+    Ok(groups)
+}
+
+pub fn duplicate_files(
+    paths: &[PathBuf],
+    ignore: Option<&crate::ignore::IgnoreList>,
+    cancel: &AtomicBool,
+) -> io::Result<Vec<(PathBuf, fs::Metadata)>> {
+    let mut files_found = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for root in paths {
         for item in WalkDir::new(root)
@@ -862,33 +900,12 @@ pub fn duplicates(
             if metadata.is_file() && !files::is_link(&metadata) {
                 let path = fs::canonicalize(item.path())?;
                 if seen.insert(path) {
-                    let name = by_name.then(|| item.file_name().to_string_lossy().to_lowercase());
-                    candidates
-                        .entry((name, by_size.then_some(metadata.len())))
-                        .or_default()
-                        .push(item.into_path());
+                    files_found.push((item.into_path(), metadata));
                 }
             }
         }
     }
-    let mut groups = Vec::new();
-    for group in candidates.into_values().filter(|group| group.len() > 1) {
-        if by_content {
-            let mut hashes = HashMap::<String, Vec<PathBuf>>::new();
-            for path in group {
-                let before = files::regular_metadata(&path)?;
-                let hash = checksum(&path, Hash::Blake3, cancel)?;
-                files::ensure_unchanged(&path, &before)?;
-                hashes.entry(hash).or_default().push(path);
-            }
-            groups.extend(hashes.into_values().filter(|group| group.len() > 1));
-        } else {
-            groups.push(group);
-        }
-    }
-    groups.iter_mut().for_each(|group| group.sort());
-    groups.sort();
-    Ok(groups)
+    Ok(files_found)
 }
 
 pub fn split(

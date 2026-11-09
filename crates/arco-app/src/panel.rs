@@ -3,7 +3,7 @@ use crate::{FileRow, PanelData, PathItem, display_path, human_size};
 use arco_core::archive_view::Catalog;
 use arco_core::files::{self, Entry, Kind, SortKey, SortOrder};
 use arco_core::ignore::{IgnoreList, Source as IgnoreSource};
-use arco_core::profile::{SavedPanel, SavedTab, TabLock, TabView};
+use arco_core::profile::{SavedPanel, SavedTab, TabLock, TabView, VirtualTab};
 use arco_core::view_settings::{CompiledColor, Mode, Scope};
 use arco_windows::ftp;
 use chrono::{DateTime, Local};
@@ -233,6 +233,11 @@ impl Panel {
                 let mut tab = Tab::new(path);
                 if let Some(options) = saved.tab_options.get(index) {
                     tab.options = options.clone();
+                    tab.deferred = tab
+                        .options
+                        .virtual_tab
+                        .take()
+                        .filter(|location| location.tc_path().is_some());
                     let shell = tab.options.shell.take();
                     if cfg!(windows)
                         && let Some(address) = shell.as_deref()
@@ -242,6 +247,9 @@ impl Panel {
                         tab.shell = Some(ShellLocation::from_address(address));
                     }
                     tab.set_lock(options.lock);
+                    if tab.deferred.is_some() {
+                        tab.lock_base = None;
+                    }
                 }
                 tab
             })
@@ -280,10 +288,32 @@ impl Panel {
             .iter()
             .map(|tab| {
                 let mut options = tab.options.clone();
-                match tab.lock_base.clone().unwrap_or_else(|| tab.location()) {
-                    Location::Shell(shell) => options.shell = Some(shell.address().into()),
-                    Location::Local(_) => (),
-                    _ => options.lock = TabLock::Unlocked,
+                if let Some(deferred) = &tab.deferred {
+                    options.virtual_tab = Some(deferred.clone());
+                } else {
+                    match tab.lock_base.clone().unwrap_or_else(|| tab.location()) {
+                        Location::Shell(shell) => options.shell = Some(shell.address().into()),
+                        Location::Archive { file, folder } => {
+                            options.virtual_tab = Some(VirtualTab::Archive { file, folder })
+                        }
+                        Location::Wfx(wfx) => {
+                            options.virtual_tab = Some(VirtualTab::Wfx {
+                                plugin: wfx.plugin.name.clone(),
+                                directory: wfx.directory,
+                            })
+                        }
+                        Location::Ftp(ftp) => {
+                            if let Some(profile) = ftp.profile {
+                                options.virtual_tab = Some(VirtualTab::Ftp {
+                                    profile,
+                                    url: Some(ftp.directory.into()),
+                                });
+                            } else {
+                                options.lock = TabLock::Unlocked;
+                            }
+                        }
+                        Location::Local(_) => (),
+                    }
                 }
                 options
             })
@@ -311,27 +341,65 @@ impl Panel {
         }
     }
 
-    pub fn snapshot(&self) -> PanelData {
+    pub fn snapshot(&self, light: bool) -> PanelData {
         let tab = self.current();
+        let colors = tab.view_colors();
+        let [primary, secondary] = if light { colors.light } else { colors.dark };
         let tabs: Vec<_> = self
             .tabs
             .iter()
             .map(|tab| {
                 let mut item = path_item(&tab.location(), 14);
+                if let Some(deferred) = &tab.deferred {
+                    let label = match deferred {
+                        VirtualTab::Archive { file, .. } => file
+                            .file_name()
+                            .unwrap_or(file.as_os_str())
+                            .to_string_lossy(),
+                        VirtualTab::Wfx { plugin, .. }
+                        | VirtualTab::Ftp {
+                            profile: plugin, ..
+                        } => plugin.as_str().into(),
+                    };
+                    item.label = short_label(&label, 14);
+                    item.path = deferred
+                        .tc_path()
+                        .unwrap_or_default()
+                        .replace('\t', " · ")
+                        .into();
+                }
                 if !tab.options.title.is_empty() {
                     item.label = short_label(&tab.options.title, 14);
                 }
                 item.locked = tab.options.lock != TabLock::Unlocked;
+                if let Some(color) = tab.view_colors().tab {
+                    item.tint = crate::file_color(color);
+                    item.has_tint = true;
+                }
                 item
             })
             .collect();
-        let crumbs = tab
-            .crumbs()
-            .into_iter()
-            .map(|path| path_item(&path, 26))
-            .collect::<Vec<_>>();
+        let deferred_path = tab
+            .deferred
+            .as_ref()
+            .and_then(VirtualTab::tc_path)
+            .map(|path| path.replace('\t', " · "));
+        let crumbs = match &deferred_path {
+            Some(path) => vec![PathItem {
+                label: short_label(path, 48),
+                path: path.as_str().into(),
+                ..PathItem::default()
+            }],
+            None => tab
+                .crumbs()
+                .into_iter()
+                .map(|path| path_item(&path, 26))
+                .collect(),
+        };
         PanelData {
-            path: tab.location().display().into(),
+            path: deferred_path
+                .unwrap_or_else(|| tab.location().display())
+                .into(),
             rows: ModelRc::from(tab.model.clone()),
             tabs: ModelRc::new(VecModel::from(tabs)),
             crumbs: ModelRc::new(VecModel::from(crumbs)),
@@ -346,8 +414,12 @@ impl Panel {
                 _ => -1,
             },
             descending: tab.sort_order().descending,
-            volume: tab.volume.as_str().into(),
-            drive: if tab.ftp.is_some() || tab.wfx.is_some() || tab.shell.is_some() {
+            volume: tab.volume_label().into(),
+            drive: if tab.deferred.is_some()
+                || tab.ftp.is_some()
+                || tab.wfx.is_some()
+                || tab.shell.is_some()
+            {
                 "".into()
             } else {
                 tab.path
@@ -358,9 +430,28 @@ impl Panel {
                     .into()
             },
             local: tab.is_local(),
+            primary: primary.map(crate::file_color).unwrap_or_default(),
+            secondary: secondary.map(crate::file_color).unwrap_or_default(),
+            primary_ink: primary.map(readable_ink).unwrap_or_default(),
+            secondary_ink: secondary.map(readable_ink).unwrap_or_default(),
+            has_primary: primary.is_some(),
+            has_secondary: secondary.is_some(),
             ..PanelData::default()
         }
     }
+}
+
+fn readable_ink(rgb: u32) -> slint::Color {
+    let linear = |byte: u32| {
+        let value = f64::from(byte & 255) / 255.0;
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let luminance = 0.2126 * linear(rgb >> 16) + 0.7152 * linear(rgb >> 8) + 0.0722 * linear(rgb);
+    crate::file_color(if luminance > 0.179 { 0 } else { 0xffffff })
 }
 
 fn path_item(path: &Location, label_width: usize) -> PathItem {
@@ -374,7 +465,7 @@ fn path_item(path: &Location, label_width: usize) -> PathItem {
     PathItem {
         label: short_label(label, label_width),
         path: full.into(),
-        locked: false,
+        ..PathItem::default()
     }
 }
 
@@ -395,6 +486,7 @@ pub struct Tab {
     pub ftp: Option<FtpTab>,
     pub wfx: Option<WfxLocation>,
     pub shell: Option<ShellLocation>,
+    pub(crate) deferred: Option<VirtualTab>,
     pub shell_entries: BTreeMap<PathBuf, arco_windows::ShellFolder>,
     pub back: Vec<Location>,
     pub forward: Vec<Location>,
@@ -407,7 +499,7 @@ pub struct Tab {
     pub(crate) wdx_sorted: bool,
     pub extra: String,
     pub loaded: bool,
-    pub volume: String,
+    pub space: Option<arco_windows::DiskSpace>,
     entries: Rc<Vec<Entry>>,
     model: Rc<FileModel>,
     selection: Rc<RefCell<BTreeSet<PathBuf>>>,
@@ -437,30 +529,62 @@ impl Tab {
     }
 
     pub fn summary(&self) -> String {
+        use crate::locale::tr;
+
         let count = self.selection.borrow().len();
         format!(
-            "{} / {} · {count} / {} markiert · {} Ordner{}{}{}{}",
+            "{} / {} · {count} / {} {} · {} {}{}{}{}{}",
             human_size(self.selected_size),
             human_size(self.visible_size),
             self.model.visible.len(),
+            tr("markiert"),
             self.visible_folders,
+            tr("Ordner"),
             self.extra,
             if self.has_comparison_filter() {
-                " · Gleiche ausgeblendet"
+                tr(" · Gleiche ausgeblendet")
             } else {
                 ""
             },
             if self.selected_filter.is_some() {
-                " · Auswahlansicht"
+                tr(" · Auswahlansicht")
             } else {
                 ""
             },
             if self.programs_only {
-                " · Nur Programme"
+                tr(" · Nur Programme")
             } else {
                 ""
             },
         )
+    }
+
+    fn volume_label(&self) -> String {
+        use crate::locale::tr;
+
+        if let Some(space) = &self.space {
+            format!(
+                "{} {} {}",
+                human_size(space.available),
+                tr("frei von"),
+                human_size(space.total)
+            )
+        } else if let Some(ftp) = &self.ftp {
+            match ftp.listing.format {
+                ftp::ListFormat::Mlsd => "FTP · MLSD",
+                ftp::ListFormat::List => "FTP · LIST",
+                ftp::ListFormat::Names => tr("FTP · Namensliste"),
+            }
+            .into()
+        } else if self.archive.is_some() {
+            tr("Archiv").into()
+        } else if let Some(wfx) = &self.wfx {
+            format!("WFX · {}", wfx.plugin.name)
+        } else if self.shell.is_some() {
+            tr("Windows-Shell").into()
+        } else {
+            String::new()
+        }
     }
 
     pub fn new(path: PathBuf) -> Self {
@@ -482,6 +606,7 @@ impl Tab {
             ftp: None,
             wfx: None,
             shell: None,
+            deferred: None,
             shell_entries: BTreeMap::new(),
             back: Vec::new(),
             forward: Vec::new(),
@@ -494,7 +619,7 @@ impl Tab {
             wdx_sorted: false,
             extra: String::new(),
             loaded: false,
-            volume: String::new(),
+            space: None,
             entries,
             model,
             selection,
@@ -530,7 +655,11 @@ impl Tab {
     }
 
     pub fn is_local(&self) -> bool {
-        self.archive.is_none() && self.ftp.is_none() && self.wfx.is_none() && self.shell.is_none()
+        self.deferred.is_none()
+            && self.archive.is_none()
+            && self.ftp.is_none()
+            && self.wfx.is_none()
+            && self.shell.is_none()
     }
 
     pub fn detailed(&self) -> bool {
@@ -545,17 +674,34 @@ impl Tab {
         self.is_local() && self.view() == TabView::Comments
     }
 
-    fn view(&self) -> TabView {
+    pub(crate) fn view(&self) -> TabView {
         self.view_override
             .as_ref()
+            .filter(|mode| !mode.inherit_view)
             .map_or(self.options.view, |mode| mode.view)
     }
 
     pub(crate) fn column_set(&self) -> Option<&str> {
-        if let Some(mode) = &self.view_override {
+        if let Some(mode) = self
+            .view_override
+            .as_ref()
+            .filter(|mode| !mode.inherit_view)
+        {
             mode.columns.as_deref()
         } else {
             self.options.column_set.as_deref()
+        }
+    }
+
+    fn view_colors(&self) -> arco_core::view_settings::ModeColors {
+        let base = self.options.view_colors.unwrap_or_default();
+        let Some(colors) = self.view_override.as_ref().and_then(|mode| mode.colors) else {
+            return base;
+        };
+        arco_core::view_settings::ModeColors {
+            tab: colors.tab.or(base.tab),
+            light: std::array::from_fn(|i| colors.light[i].or(base.light[i])),
+            dark: std::array::from_fn(|i| colors.dark[i].or(base.dark[i])),
         }
     }
 
@@ -567,6 +713,7 @@ impl Tab {
         show_hidden: bool,
     ) {
         self.options.view = view;
+        self.options.view_colors = None;
         self.options.column_set = columns;
         if let Some(sort) = sort {
             self.options.sort = sort;
@@ -603,6 +750,17 @@ impl Tab {
     }
 
     pub fn change_location(&mut self, location: &Location, archive: Option<ArchiveTab>) {
+        let previous_plugin = self.wfx.as_ref().map(|wfx| &wfx.plugin.path);
+        let next_plugin = match location {
+            Location::Wfx(wfx) => Some(&wfx.plugin.path),
+            _ => None,
+        };
+        if previous_plugin != next_plugin {
+            self.options
+                .sort
+                .retain(|order| !matches!(order.key, SortKey::Wdx(_)));
+        }
+        self.deferred = None;
         self.path = match location {
             Location::Local(path) => path.clone(),
             Location::Archive { file, .. } => file.parent().unwrap_or(&self.path).to_path_buf(),
@@ -735,6 +893,14 @@ impl Tab {
 
     pub fn set_programs_only(&mut self, enabled: bool, show_hidden: bool) {
         self.programs_only = enabled;
+        self.options.file_filter.clear();
+        self.clear_selected_filter();
+        self.filter(String::new(), show_hidden);
+    }
+
+    pub fn set_file_filter(&mut self, value: String, show_hidden: bool) {
+        self.programs_only = false;
+        self.options.file_filter = value;
         self.clear_selected_filter();
         self.filter(String::new(), show_hidden);
     }
@@ -763,6 +929,9 @@ impl Tab {
     }
 
     fn rebuild(&mut self, show_hidden: bool, current: Option<&Path>) {
+        let file_filter = (!self.options.file_filter.is_empty())
+            .then(|| arco_core::sync::FileMasks::from_tc(&self.options.file_filter).ok())
+            .flatten();
         let filter = self.filter.to_lowercase();
         let expression = self.filter.strip_prefix('~');
         let regex = expression.and_then(|pattern| {
@@ -810,6 +979,10 @@ impl Tab {
                 };
                 (matched
                     && (show_hidden || !entry.hidden)
+                    && (entry.kind == Kind::Directory
+                        || file_filter
+                            .as_ref()
+                            .is_none_or(|masks| masks.includes(Path::new(&entry.name))))
                     && (!self.programs_only
                         || entry.kind == Kind::Directory
                         || entry.path.extension().is_some_and(|ext| {
@@ -1205,7 +1378,7 @@ impl FileModel {
         }
     }
 
-    fn entry(&self, index: usize) -> Option<&Entry> {
+    pub(crate) fn entry(&self, index: usize) -> Option<&Entry> {
         index
             .checked_sub(usize::from(self.parent))
             .and_then(|index| self.visible.get(index))
@@ -1227,13 +1400,26 @@ impl FileModel {
     pub(crate) fn thumbnail_requests(
         &self,
         visible: std::ops::Range<usize>,
+        plugin_supports: impl Fn(&Path) -> bool,
     ) -> Vec<(usize, ThumbnailRequest)> {
         let cached = self.thumbnails.borrow();
         visible
             .filter(|row| !cached.contains_key(row))
-            .filter_map(|row| Some((row, ThumbnailRequest::for_entry(self.entry(row)?)?)))
-            .take(8)
+            .filter_map(|row| {
+                Some((
+                    row,
+                    ThumbnailRequest::for_entry(self.entry(row)?, &plugin_supports)?,
+                ))
+            })
+            .take(arco_core::plugin::WLX_BITMAP_BATCH)
             .collect()
+    }
+
+    pub(crate) fn clear_thumbnails(&self) {
+        if !self.thumbnails.borrow().is_empty() {
+            self.thumbnails.borrow_mut().clear();
+            self.notify.reset();
+        }
     }
 
     pub(crate) fn apply_thumbnails(
@@ -1397,6 +1583,7 @@ impl Model for FileModel {
             dark_color: color
                 .map_or_else(slint::Color::default, |pair| crate::file_color(pair.dark)),
             wdx_values,
+            expression_values: Default::default(),
         })
     }
 

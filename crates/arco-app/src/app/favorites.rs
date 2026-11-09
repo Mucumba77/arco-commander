@@ -285,6 +285,10 @@ fn parse_favorite(value: &str) -> io::Result<DirectoryFavorite> {
     })
 }
 pub(crate) fn tc_profile(path: &Path) -> io::Result<arco_core::profile::TcImport> {
+    arco_core::profile::read_tc_ini(path, tc_path_variables(path))
+}
+
+pub(super) fn tc_path_variables(path: &Path) -> impl Fn(&str) -> Option<std::ffi::OsString> + '_ {
     fn executable(directory: &Path) -> Option<PathBuf> {
         ["TOTALCMD64.EXE", "TOTALCMD.EXE"]
             .into_iter()
@@ -303,7 +307,7 @@ pub(crate) fn tc_profile(path: &Path) -> io::Result<arco_core::profile::TcImport
         })
         .or_else(arco_windows::total_commander_install);
     let exe = directory.as_deref().and_then(executable);
-    arco_core::profile::read_tc_ini(path, |name| {
+    move |name| {
         let special = match name.to_ascii_uppercase().as_str() {
             "COMMANDER_PATH" => directory.as_deref(),
             "COMMANDER_INI" => Some(path),
@@ -323,5 +327,5 @@ pub(crate) fn tc_profile(path: &Path) -> io::Result<arco_core::profile::TcImport
             _ => return std::env::var_os(name),
         };
         special.map(|value| value.as_os_str().to_owned())
-    })
+    }
 }

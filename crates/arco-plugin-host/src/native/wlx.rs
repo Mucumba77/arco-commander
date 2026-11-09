@@ -1,11 +1,17 @@
 use super::{Library, ansi, required, symbol, wide};
+use arco_core::files;
+use arco_core::plugin::{Row, WLX_BITMAP_BATCH, WLX_BITMAP_HEIGHT, WLX_BITMAP_WIDTH, WlxBitmap};
 use std::cell::Cell;
 use std::ffi::OsStr;
-use std::io;
-use std::path::Path;
+use std::fs::File;
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows_sys::Win32::Graphics::Gdi::{COLOR_WINDOW, GetSysColorBrush};
+use windows_sys::Win32::Graphics::Gdi::{
+    BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, COLOR_WINDOW, CreateCompatibleDC, DIB_RGB_COLORS,
+    DeleteDC, DeleteObject, GetDIBits, GetObjectW, GetSysColorBrush, HBITMAP, HDC,
+};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::HiDpi::{GetWindowDpiAwarenessContext, SetThreadDpiAwarenessContext};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{SetFocus, VK_ESCAPE};
@@ -14,6 +20,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 type Load<T> = unsafe extern "system" fn(HWND, *mut T, i32) -> HWND;
 type Close = unsafe extern "system" fn(HWND);
 type SetDefaults = unsafe extern "system" fn(*mut Defaults);
+type GetBitmap<T> = unsafe extern "system" fn(*mut T, i32, i32, *mut u8, i32) -> HBITMAP;
 
 const FORCE_SHOW: i32 = 16;
 
@@ -47,22 +54,7 @@ pub fn view(
             "Datei für die WLX-Vorschau fehlt",
         ));
     }
-    if let Some(set) = symbol::<SetDefaults>(library, b"ListSetDefaultParams") {
-        let path = std::env::current_dir()?.join("lsplugin.ini");
-        let name = ansi(path.as_os_str())?;
-        let mut defaults = Defaults {
-            size: std::mem::size_of::<Defaults>() as i32,
-            version_low: 0,
-            version_high: 2,
-            ini: [0; 260],
-        };
-        let buffer = defaults
-            .ini
-            .get_mut(..name.len())
-            .ok_or_else(|| io::Error::other("Pfad für WLX-Einstellungen ist zu lang"))?;
-        buffer.copy_from_slice(&name);
-        unsafe { set(&mut defaults) };
-    }
+    set_defaults(library)?;
     let parent = Window::new(file, embedded)?;
     let child = if let Some(load) = symbol::<Load<u16>>(library, b"ListLoadW") {
         let mut filename = wide(file.as_os_str());
@@ -106,6 +98,157 @@ pub fn view(
                 DispatchMessageW(&message);
             },
         }
+    }
+}
+
+fn set_defaults(library: &Library) -> io::Result<()> {
+    if let Some(set) = symbol::<SetDefaults>(library, b"ListSetDefaultParams") {
+        let path = std::env::current_dir()?.join("lsplugin.ini");
+        let name = ansi(path.as_os_str())?;
+        let mut defaults = Defaults {
+            size: std::mem::size_of::<Defaults>() as i32,
+            version_low: 0,
+            version_high: 2,
+            ini: [0; 260],
+        };
+        let buffer = defaults
+            .ini
+            .get_mut(..name.len())
+            .ok_or_else(|| io::Error::other("Pfad für WLX-Einstellungen ist zu lang"))?;
+        buffer.copy_from_slice(&name);
+        unsafe { set(&mut defaults) };
+    }
+    Ok(())
+}
+
+pub fn thumbnails(library: &Library, files: &[PathBuf]) -> io::Result<Vec<Row>> {
+    if !(1..=WLX_BITMAP_BATCH).contains(&files.len())
+        || files.iter().any(|file| !file.is_absolute())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Ungültige WLX-Miniaturanfrage.",
+        ));
+    }
+    let wide_export = symbol::<GetBitmap<u16>>(library, b"ListGetPreviewBitmapW");
+    let ansi_export = symbol::<GetBitmap<u8>>(library, b"ListGetPreviewBitmap");
+    if wide_export.is_none() && ansi_export.is_none() {
+        return Ok(Vec::new());
+    }
+    set_defaults(library)?;
+    let dc = DeviceContext(unsafe { CreateCompatibleDC(null_mut()) });
+    if dc.0.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let mut rows = Vec::new();
+    for (index, file) in files.iter().enumerate() {
+        if super::cancelled() {
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        let image = (|| {
+            let before = files::regular_metadata(file)
+                .ok()
+                .filter(|meta| meta.is_file())?;
+            let mut content = Vec::new();
+            File::open(file)
+                .ok()?
+                .take(8192)
+                .read_to_end(&mut content)
+                .ok()?;
+            files::ensure_unchanged(file, &before).ok()?;
+            let (w, h) = (WLX_BITMAP_WIDTH as i32, WLX_BITMAP_HEIGHT as i32);
+            let len = content.len() as i32;
+            let bitmap = if let Some(preview) = wide_export {
+                let mut name = wide(file.as_os_str());
+                unsafe { preview(name.as_mut_ptr(), w, h, content.as_mut_ptr(), len) }
+            } else {
+                let mut name = ansi(file.as_os_str()).ok()?;
+                let preview = ansi_export?;
+                unsafe { preview(name.as_mut_ptr(), w, h, content.as_mut_ptr(), len) }
+            };
+            let bitmap = Bitmap(bitmap);
+            files::ensure_unchanged(file, &before).ok()?;
+            bitmap.rgba(&dc)
+        })();
+        if let Some(image) = image {
+            rows.push(image.into_row(index));
+        }
+    }
+    Ok(rows)
+}
+
+struct DeviceContext(HDC);
+impl Drop for DeviceContext {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { DeleteDC(self.0) };
+        }
+    }
+}
+
+struct Bitmap(HBITMAP);
+impl Drop for Bitmap {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { DeleteObject(self.0) };
+        }
+    }
+}
+
+impl Bitmap {
+    fn rgba(&self, dc: &DeviceContext) -> Option<WlxBitmap> {
+        if self.0.is_null() {
+            return None;
+        }
+        let mut bitmap = BITMAP::default();
+        if unsafe {
+            GetObjectW(
+                self.0,
+                std::mem::size_of::<BITMAP>() as i32,
+                (&raw mut bitmap).cast(),
+            )
+        } == 0
+        {
+            return None;
+        }
+        let width = u32::try_from(bitmap.bmWidth).ok()?;
+        let height = u32::try_from(bitmap.bmHeight).ok()?;
+        let mut rgba = vec![0; WlxBitmap::rgba_size(width, height)?];
+        let mut info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width as i32,
+                biHeight: -(height as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let lines = unsafe {
+            GetDIBits(
+                dc.0,
+                self.0,
+                0,
+                height,
+                rgba.as_mut_ptr().cast(),
+                &mut info,
+                DIB_RGB_COLORS,
+            )
+        };
+        if lines != height as i32 {
+            return None;
+        }
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+            pixel[3] = 255;
+        }
+        Some(WlxBitmap {
+            width,
+            height,
+            rgba,
+        })
     }
 }
 

@@ -145,7 +145,7 @@ pub fn decode(
         Format::Mime => mime::decode(source, directory, cancel),
         Format::BinHex => binhex::decode(source, directory, cancel),
         Format::Uue | Format::Xxe => {
-            decode_armored(source, directory, format, cancel).map(|path| vec![path])
+            decode_armored(source, directory, format, cancel).map(|(path, _)| vec![path])
         }
     }
 }
@@ -158,17 +158,55 @@ pub fn decode_mime_batch(
     mime::decode_batch(sources, directory, cancel)
 }
 
+pub fn decode_armored_batch(
+    sources: &[(PathBuf, Format)],
+    directory: &Path,
+    cancel: &AtomicBool,
+) -> Vec<(PathBuf, io::Result<()>)> {
+    let mut sources = sources.iter().collect::<Vec<_>>();
+    sources.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut consumed = std::collections::HashSet::new();
+    let key = |path: &Path| {
+        let key = path.to_string_lossy();
+        if cfg!(windows) {
+            key.to_lowercase()
+        } else {
+            key.into_owned()
+        }
+    };
+    let mut results = Vec::new();
+    for (source, format) in sources {
+        if consumed.contains(&key(source)) {
+            continue;
+        }
+        let result = decode_armored(source, directory, *format, cancel).map(|(_, parts)| {
+            consumed.extend(parts.iter().skip(1).map(|path| key(path)));
+        });
+        let cancelled = result
+            .as_ref()
+            .is_err_and(|error| error.kind() == io::ErrorKind::Interrupted);
+        results.push((source.clone(), result));
+        if cancelled {
+            break;
+        }
+    }
+    results.retain(|(source, result)| result.is_ok() || !consumed.contains(&key(source)));
+    results
+}
+
 fn decode_armored(
     source: &Path,
     directory: &Path,
     format: Format,
     cancel: &AtomicBool,
-) -> io::Result<PathBuf> {
+) -> io::Result<(PathBuf, Vec<PathBuf>)> {
+    if !matches!(format, Format::Uue | Format::Xxe) {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
     files::check_cancel(cancel)?;
-    let metadata = source_file(source)?;
-    let mut input = BufReader::new(File::open(source)?.take(metadata.len()));
+    let mut input = ArmoredParts::open(source)?;
     let mut line = Vec::new();
-    let name = read_header(&mut input, &mut line, cancel)?;
+    let name = read_header(&mut input.reader, &mut line, cancel)?;
     let directory = fs::canonicalize(directory)?;
     let target = directory.join(name);
     let mut staged = NamedTempFile::new_in(&directory)?;
@@ -176,7 +214,7 @@ fn decode_armored(
         let mut output = BufWriter::new(staged.as_file_mut());
         loop {
             files::check_cancel(cancel)?;
-            if !read_line(&mut input, &mut line)? {
+            if !input.read_line(&mut line)? {
                 return Err(invalid("Der kodierte Datenblock ist unvollständig."));
             }
             if line.is_empty() || line == b" " || line == [format.encode_char(0)] {
@@ -207,16 +245,99 @@ fn decode_armored(
             }
             output.write_all(&bytes[..length])?;
         }
-        if !read_line(&mut input, &mut line)? || line != b"end" {
+        if !input.read_line(&mut line)? || line != b"end" {
             return Err(invalid(
                 "Der kodierte Datenblock endet ohne Abschlusszeile.",
             ));
         }
         output.flush()?;
     }
-    files::ensure_unchanged(source, &metadata)?;
+    for (path, metadata) in &input.sources {
+        files::ensure_unchanged(path, metadata)?;
+    }
     publish(staged, &target, cancel)?;
-    Ok(target)
+    Ok((
+        target,
+        input.sources.into_iter().map(|(path, _)| path).collect(),
+    ))
+}
+
+struct ArmoredParts {
+    sources: Vec<(PathBuf, fs::Metadata)>,
+    reader: BufReader<io::Take<File>>,
+}
+
+impl ArmoredParts {
+    fn open(source: &Path) -> io::Result<Self> {
+        let metadata = source_file(source)?;
+        let reader = BufReader::new(File::open(source)?.take(metadata.len()));
+        Ok(Self {
+            sources: vec![(source.to_path_buf(), metadata)],
+            reader,
+        })
+    }
+
+    fn read_line(&mut self, line: &mut Vec<u8>) -> io::Result<bool> {
+        if read_line(&mut self.reader, line)? {
+            return Ok(true);
+        }
+        if self.sources.len() >= 2048 {
+            return Err(invalid("Zu viele UUE-/XXE-Teildateien."));
+        }
+        let Some(next) = next_armored_part(&self.sources.last().expect("initial source").0) else {
+            return Ok(false);
+        };
+        let metadata = match source_file(&next) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        self.reader = BufReader::new(File::open(&next)?.take(metadata.len()));
+        self.sources.push((next, metadata));
+        read_line(&mut self.reader, line)
+    }
+}
+
+fn next_armored_part(path: &Path) -> Option<PathBuf> {
+    let stem = path.file_stem()?.to_str()?;
+    let digits = stem
+        .as_bytes()
+        .iter()
+        .rev()
+        .take_while(|digit| digit.is_ascii_digit())
+        .count();
+    let mut next = if digits != 0 {
+        let (base, ordinal) = stem.split_at(stem.len() - digits);
+        let successor = ordinal.parse::<u64>().ok()?.checked_add(1)?;
+        format!("{base}{successor:0digits$}")
+    } else {
+        let suffix = stem.as_bytes().get(stem.len().checked_sub(2)?..)?;
+        if !suffix.iter().all(|letter| letter.is_ascii_alphabetic())
+            || suffix[0].is_ascii_lowercase() != suffix[1].is_ascii_lowercase()
+        {
+            return None;
+        }
+        let offset = if suffix[0].is_ascii_lowercase() {
+            b'a'
+        } else {
+            b'A'
+        };
+        let successor = u16::from(suffix[0] - offset) * 26 + u16::from(suffix[1] - offset) + 1;
+        if successor >= 26 * 26 {
+            return None;
+        }
+        format!(
+            "{}{}{}",
+            &stem[..stem.len() - 2],
+            char::from(offset + (successor / 26) as u8),
+            char::from(offset + (successor % 26) as u8)
+        )
+    };
+    if let Some(extension) = path.extension() {
+        next.push('.');
+        next.push_str(extension.to_str()?);
+    }
+    Some(path.with_file_name(next))
 }
 
 fn source_file(source: &Path) -> io::Result<fs::Metadata> {
@@ -330,6 +451,44 @@ fn invalid(message: &'static str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numbered_and_lettered_armored_parts_are_decoded_once_and_require_every_part() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        let cancel = AtomicBool::new(false);
+        let first = root.join("mail001.uue");
+        let second = root.join("mail002.uue");
+        let third = root.join("mail003.uue");
+        fs::write(&first, b"begin 644 cat.txt\n#0V%T\n").unwrap();
+        fs::write(&third, b"`\nend\n").unwrap();
+        assert!(decode(&first, root, Format::Uue, &cancel).is_err());
+        assert!(!root.join("cat.txt").exists());
+        fs::write(&second, b"#0V%T\n").unwrap();
+        let result = decode_armored_batch(
+            &[
+                (third, Format::Uue),
+                (first.clone(), Format::Uue),
+                (second, Format::Uue),
+            ],
+            root,
+            &cancel,
+        );
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, first);
+        assert!(result[0].1.is_ok());
+        assert_eq!(fs::read(root.join("cat.txt")).unwrap(), b"CatCat");
+
+        let first = root.join("postaaz");
+        let second = root.join("postaba");
+        fs::write(&first, b"begin 644 xxe.txt\n1Eq3o\n").unwrap();
+        fs::write(&second, b"+\nend\n").unwrap();
+        assert_eq!(
+            decode(&first, root, Format::Xxe, &cancel).unwrap(),
+            [root.canonicalize().unwrap().join("xxe.txt")]
+        );
+        assert_eq!(fs::read(root.join("xxe.txt")).unwrap(), b"Cat");
+    }
 
     #[test]
     fn transport_encoding_matches_known_vectors_and_round_trips_binary() {

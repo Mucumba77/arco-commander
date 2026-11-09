@@ -2,7 +2,7 @@ use super::{App, Outcome};
 use crate::commands::{Dialog, Pending};
 use crate::display_path;
 use arco_core::files::{self, Kind};
-use arco_windows::{LocalShare, Volume};
+use arco_windows::{LocalShare, ShareAccess, Volume};
 use std::io;
 use std::path::PathBuf;
 
@@ -50,7 +50,7 @@ impl App {
             .to_string_lossy()
             .into_owned();
         let description = format!(
-            "Ordner: {}\nDie Freigabe erhält Berechtigungen für dein aktuelles Windows-Konto. Windows berücksichtigt zusätzlich die Rechte des Ordners.",
+            "Ordner: {}\nLeerlassen gewährt Zugriff für dein aktuelles Konto. In einer Liste kannst du Rechte je Eintrag angeben, etwa PC\\Benutzer=Lesen. Windows prüft zusätzlich die Rechte des Ordners.",
             display_path(&path)
         );
         self.dialog(
@@ -61,7 +61,8 @@ impl App {
                 description: &description,
                 value: &label,
                 placeholder: "Freigabename",
-                options: &["Nur lesen", "Lesen und schreiben"],
+                second_placeholder: "Konten und Gruppen, durch Semikolon getrennt (optional)",
+                options: &["Nur lesen", "Ändern", "Vollzugriff"],
                 ..Default::default()
             },
         );
@@ -114,6 +115,7 @@ impl App {
         &mut self,
         setup: Setup,
         value: &str,
+        second: &str,
         option: usize,
     ) -> io::Result<()> {
         match setup {
@@ -142,9 +144,14 @@ impl App {
             }
             Setup::Create(directory) => {
                 let name = value.trim().to_owned();
+                let accounts = second.trim().to_owned();
+                let access = [ShareAccess::Read, ShareAccess::Change, ShareAccess::Full]
+                    .get(option)
+                    .copied()
+                    .ok_or_else(|| io::Error::other("Wähle die Freigaberechte."))?;
                 self.start_job("Erstelle Windows-Freigabe …", false, move |job| {
                     files::check_cancel(&job.cancel)?;
-                    arco_windows::create_share(&directory, &name, option == 0)?;
+                    arco_windows::create_share(&directory, &name, access, &accounts)?;
                     Ok(Outcome::LocalShares(arco_windows::local_shares()?))
                 });
             }

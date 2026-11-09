@@ -80,6 +80,8 @@ pub struct Options {
     pub depth: String,
     pub roots: String,
     pub selected_only: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub wdx_profile: String,
 }
 
 enum Name {
@@ -196,7 +198,11 @@ impl Options {
 }
 
 impl Query {
-    pub fn matches(&self, entry: &Entry, cancel: &AtomicBool) -> io::Result<bool> {
+    pub fn requires_content(&self) -> bool {
+        self.content.is_some()
+    }
+
+    pub fn matches_metadata(&self, entry: &Entry) -> bool {
         let named = match &self.name {
             Name::Masks(masks) => masks.includes(&entry.path),
             Name::Regex(regex) => regex.is_match(&entry.name.to_string_lossy()),
@@ -211,7 +217,7 @@ impl Query {
             || entry.attributes & self.required != self.required
             || entry.attributes & self.excluded != 0
         {
-            return Ok(false);
+            return false;
         }
         if self.from.is_some() || self.to.is_some() {
             let date = entry
@@ -222,8 +228,15 @@ impl Query {
                 .is_some_and(|from| date.is_none_or(|date| date < from))
                 || self.to.is_some_and(|to| date.is_none_or(|date| date > to))
             {
-                return Ok(false);
+                return false;
             }
+        }
+        true
+    }
+
+    pub fn matches(&self, entry: &Entry, cancel: &AtomicBool) -> io::Result<bool> {
+        if !self.matches_metadata(entry) {
+            return Ok(false);
         }
         let Some(content) = &self.content else {
             return Ok(true);

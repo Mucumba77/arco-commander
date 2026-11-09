@@ -9,7 +9,7 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use tempfile::NamedTempFile;
 
 const MAX_EDIT_SIZE: u64 = 64 * 1024 * 1024;
@@ -275,35 +275,32 @@ impl App {
         let Some(draft) = self.ftp_drafts.iter().find(|draft| draft.path == path) else {
             return Ok(());
         };
-        if self.job.is_some() {
-            return Err(io::Error::other("Ein Auftrag läuft bereits."));
+        if option != 1 && self.ftp_upload_pending(path) {
+            return Err(io::Error::other(
+                "Die Rückübertragung ist bereits im Transfermanager vorgemerkt.",
+            ));
         }
         match option {
             0 => {
                 let mut draft = draft.clone();
-                self.start_job(
-                    "Prüfe und übertrage FTP-Änderungen …",
-                    false,
-                    move |job| match draft.upload(&job.cancel) {
-                        Ok(true) => Ok(Outcome::FtpEditUploaded(Box::new(draft))),
-                        Ok(false) => Ok(Outcome::Notice(
-                            "Die Arbeitskopie enthält keine neuen Änderungen.".into(),
+                let label = format!("FTP-Änderungen hochladen · {}", draft.entry.name);
+                self.enqueue_ftp_upload(label, path.to_owned(), move |job| {
+                    match draft.upload(&job.cancel) {
+                        Ok(true) => Ok(Outcome::FtpEditUploaded(Box::new(draft), None)),
+                        Ok(false) => Ok(Outcome::Report(
+                            "FTP-Arbeitskopie unverändert".into(),
+                            files::TransferReport {
+                                skipped: 1,
+                                ..Default::default()
+                            },
                         )),
-                        Err(error) => {
-                            let label = if error.kind() == io::ErrorKind::Interrupted
-                                || job.cancel.load(Ordering::Relaxed)
-                            {
-                                "FTP-Übertragung abgebrochen"
-                            } else {
-                                "FTP-Übertragung konnte nicht abgeschlossen werden"
-                            };
-                            Ok(Outcome::Text(
-                                label.into(),
-                                format!("{error}\n\nArbeitskopie: {}", display_path(&draft.path)),
-                            ))
-                        }
-                    },
-                );
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => Err(error),
+                        Err(error) => Err(io::Error::other(format!(
+                            "{error}\nArbeitskopie: {}",
+                            display_path(&draft.path),
+                        ))),
+                    }
+                })?;
             }
             1 => {
                 open_edit(path)?;
@@ -332,6 +329,11 @@ impl App {
     }
 
     pub(crate) fn delete_ftp_draft(&mut self, path: &Path) -> io::Result<()> {
+        if self.ftp_upload_pending(path) {
+            return Err(io::Error::other(
+                "Die Rückübertragung ist im Transfermanager vorgemerkt.",
+            ));
+        }
         if self.ftp_drafts.iter().any(|draft| draft.path == path) {
             match check_workspace(path) {
                 Ok(()) => (),
@@ -352,7 +354,7 @@ impl App {
         Ok(())
     }
 
-    pub(super) fn finish_ftp_upload(&mut self, uploaded: Draft) {
+    pub(super) fn finish_ftp_upload(&mut self, uploaded: Draft, log_error: Option<String>) {
         for side in 0..self.panels.len() {
             if !self.panels[side].loading
                 && self.panels[side]
@@ -364,10 +366,12 @@ impl App {
                 self.refresh(side);
             }
         }
-        self.status(format!(
-            "FTP-Änderungen hochgeladen · {}",
-            uploaded.entry.name
-        ));
+        let status = format!("FTP-Änderungen hochgeladen · {}", uploaded.entry.name);
+        if let Some(error) = log_error {
+            self.status(format!("{status} · Transferprotokoll: {error}"));
+        } else {
+            self.status(status);
+        }
         if let Some(draft) = self
             .ftp_drafts
             .iter_mut()
@@ -378,10 +382,23 @@ impl App {
     }
 
     pub(super) fn close_ftp_drafts(&mut self, session: &Arc<Session>) -> usize {
+        let paths: Vec<_> = self
+            .ftp_drafts
+            .iter()
+            .filter(|draft| Arc::ptr_eq(&draft.location.session, session))
+            .map(|draft| draft.path.clone())
+            .collect();
+        self.remove_waiting_ftp_uploads(&paths);
         let before = self.ftp_drafts.len();
         self.ftp_drafts
             .retain(|draft| !Arc::ptr_eq(&draft.location.session, session));
         before - self.ftp_drafts.len()
+    }
+
+    pub(super) fn ftp_session_upload_running(&self, session: &Arc<Session>) -> bool {
+        self.ftp_drafts.iter().any(|draft| {
+            Arc::ptr_eq(&draft.location.session, session) && self.ftp_upload_running(&draft.path)
+        })
     }
 }
 
@@ -404,6 +421,15 @@ mod tests {
         );
         let cancel = AtomicBool::new(false);
         let directory = session.initial_directory();
+        let restored = session
+            .restore_directory(Some(&format!("{address}/legacy%20folder")))
+            .unwrap();
+        assert_eq!(restored.path(), "/legacy%20folder/");
+        assert!(
+            session
+                .restore_directory(Some("ftp://another-host.invalid/legacy%20folder/"))
+                .is_err()
+        );
         let name = "Entwurf mit Leerzeichen.txt";
         let server_file = server_root.join(name);
         fs::write(&server_file, b"first version").unwrap();

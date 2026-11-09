@@ -21,6 +21,7 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("Alt+F5", "zip-pack"),
     ("Alt+F6", "zip-extract"),
     ("Alt+F7", "search"),
+    ("Alt+Shift+F7", "search-separate"),
     ("Alt+F9", "zip-extract"),
     ("Alt+Shift+F9", "zip-test"),
     ("Shift+F4", "new-file"),
@@ -286,9 +287,6 @@ pub fn chord(key: &str, control: bool, alt: bool, shift: bool) -> String {
 }
 
 pub fn from_event(event: &KeyEvent, modifiers: ModifiersState) -> Option<String> {
-    if modifiers.super_key() {
-        return None;
-    }
     let physical = match event.physical_key {
         PhysicalKey::Code(code) => format!("{code:?}"),
         _ => String::new(),
@@ -319,12 +317,17 @@ pub fn from_event(event: &KeyEvent, modifiers: ModifiersState) -> Option<String>
         }
     };
     valid_key(&key).then(|| {
-        chord(
+        let chord = chord(
             &key,
             modifiers.control_key(),
             modifiers.alt_key(),
             modifiers.shift_key(),
-        )
+        );
+        if modifiers.super_key() {
+            format!("Win+{chord}")
+        } else {
+            chord
+        }
     })
 }
 
@@ -345,7 +348,7 @@ pub fn is_modifier(event: &KeyEvent) -> bool {
 }
 
 pub fn valid_chord(value: &str) -> bool {
-    let mut key = value;
+    let mut key = value.strip_prefix("Win+").unwrap_or(value);
     for prefix in ["Ctrl+", "Alt+", "Shift+"] {
         key = key.strip_prefix(prefix).unwrap_or(key);
     }
@@ -358,6 +361,9 @@ pub fn valid_chord(value: &str) -> bool {
 }
 
 pub fn tc_chord(value: &str) -> Option<String> {
+    let (windows, value) = value
+        .strip_prefix("WIN+")
+        .map_or((false, value), |value| (true, value));
     let (mods, key) = value.split_once('+').unwrap_or(("", value));
     let mut seen = 0u8;
     for modifier in mods.bytes() {
@@ -395,6 +401,11 @@ pub fn tc_chord(value: &str) -> Option<String> {
         key => key,
     };
     let chord = chord(key, seen & 1 != 0, seen & 2 != 0, seen & 4 != 0);
+    let chord = if windows {
+        format!("Win+{chord}")
+    } else {
+        chord
+    };
     valid_chord(&chord).then_some(chord)
 }
 
@@ -478,6 +489,9 @@ mod tests {
         assert_eq!(tc_chord("S+F10").as_deref(), Some("Shift+F10"));
         assert_eq!(tc_chord("A+UP").as_deref(), Some("Alt+Up"));
         assert_eq!(tc_chord("C+NUM+").as_deref(), Some("Ctrl+NumpadAdd"));
+        assert_eq!(tc_chord("WIN+CS+F2").as_deref(), Some("Win+Ctrl+Shift+F2"));
+        assert_eq!(tc_chord("WIN+C").as_deref(), Some("Win+C"));
+        assert!(!valid_chord("Win+Win+F1"));
         assert_eq!(tc_chord("CC+F2"), None);
         assert_eq!(tc_chord("A+F4"), None);
         assert_eq!(tc_chord("F10"), None);

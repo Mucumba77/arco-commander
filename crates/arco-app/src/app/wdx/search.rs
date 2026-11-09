@@ -1,4 +1,4 @@
-use super::scan_paths;
+use super::{scan_paths, scan_paths_with};
 use crate::app::{App, Outcome};
 use crate::commands::{Dialog, Pending};
 use crate::panel::Location;
@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 const MAX_CONDITIONS: usize = 16;
 
@@ -27,6 +28,109 @@ struct SearchCondition {
     field: WdxField,
     expression: String,
     matcher: WdxMatcher,
+}
+
+pub(in crate::app) struct ProfileFilter {
+    masks: arco_core::sync::FileMasks,
+    conditions: Vec<SearchCondition>,
+    all: bool,
+}
+
+impl ProfileFilter {
+    pub(in crate::app) fn compile(
+        profile: &WdxSearchProfile,
+        plugins: &[Registration],
+    ) -> io::Result<Self> {
+        if profile.conditions.is_empty() || profile.conditions.len() > MAX_CONDITIONS {
+            return Err(io::Error::other(
+                "Das WDX-Suchprofil enthält eine ungültige Anzahl von Bedingungen.",
+            ));
+        }
+        let masks = arco_core::sync::FileMasks::new(&profile.masks)?;
+        let conditions = profile
+            .conditions
+            .iter()
+            .map(|field| {
+                let plugin = plugins
+                    .iter()
+                    .find(|entry| {
+                        entry.interface == Interface::Wdx
+                            && entry.enabled
+                            && entry
+                                .path
+                                .as_os_str()
+                                .eq_ignore_ascii_case(field.plugin.as_os_str())
+                    })
+                    .ok_or_else(|| {
+                        io::Error::other(format!(
+                            "WDX-Plugin fehlt oder ist deaktiviert: {}",
+                            field.plugin.display()
+                        ))
+                    })?;
+                Ok(SearchCondition {
+                    plugin: plugin.clone(),
+                    field: field.selection.clone(),
+                    expression: field.expression.clone(),
+                    matcher: WdxMatcher::parse(&field.expression)?,
+                })
+            })
+            .collect::<io::Result<_>>()?;
+        Ok(Self {
+            masks,
+            conditions,
+            all: profile.all,
+        })
+    }
+
+    fn hits(
+        condition: &SearchCondition,
+        paths: &[&Path],
+        cancel: &AtomicBool,
+    ) -> io::Result<HashSet<PathBuf>> {
+        let mut hits = HashSet::new();
+        scan_paths_with(
+            &condition.plugin,
+            &condition.field,
+            paths,
+            cancel,
+            |_| {},
+            |path, value| {
+                if condition.matcher.matches(&value) {
+                    hits.insert(path.to_path_buf());
+                }
+            },
+        )?;
+        Ok(hits)
+    }
+
+    pub(in crate::app) fn accepts_name(&self, entry: &files::Entry) -> bool {
+        entry.kind == files::Kind::File && self.masks.includes(Path::new(&entry.name))
+    }
+
+    pub(in crate::app) fn filter(
+        &self,
+        entries: &mut Vec<files::Entry>,
+        cancel: &AtomicBool,
+    ) -> io::Result<()> {
+        entries.retain(|entry| self.accepts_name(entry));
+        apply_conditions(entries, &self.conditions, self.all, |condition, paths| {
+            Self::hits(condition, paths, cancel)
+        })
+    }
+
+    pub(in crate::app) fn matches_file(
+        &self,
+        path: &Path,
+        cancel: &AtomicBool,
+    ) -> io::Result<bool> {
+        for condition in &self.conditions {
+            let hit = !Self::hits(condition, &[path], cancel)?.is_empty();
+            if hit != self.all {
+                return Ok(hit);
+            }
+        }
+        Ok(self.all)
+    }
 }
 
 impl App {
@@ -406,41 +510,11 @@ impl App {
             .wdx_search_profiles
             .get(name)
             .ok_or_else(|| io::Error::other("Das WDX-Suchprofil fehlt."))?;
-        if saved.conditions.is_empty() || saved.conditions.len() > MAX_CONDITIONS {
-            return Err(io::Error::other(
-                "Das WDX-Suchprofil enthält eine ungültige Anzahl von Bedingungen.",
-            ));
-        }
-        files::compile_masks(&saved.masks)?;
+        let filter = ProfileFilter::compile(saved, &self.profile.plugins)?;
         target.masks.clone_from(&saved.masks);
         target.all = saved.all;
         target.name = Some(name.into());
-        for field in &saved.conditions {
-            let plugin = self
-                .profile
-                .plugins
-                .iter()
-                .find(|entry| {
-                    entry.interface == Interface::Wdx
-                        && entry.enabled
-                        && entry
-                            .path
-                            .as_os_str()
-                            .eq_ignore_ascii_case(field.plugin.as_os_str())
-                })
-                .ok_or_else(|| {
-                    io::Error::other(format!(
-                        "WDX-Plugin fehlt oder ist deaktiviert: {}",
-                        field.plugin.display()
-                    ))
-                })?;
-            target.conditions.push(SearchCondition {
-                plugin: plugin.clone(),
-                field: field.selection.clone(),
-                expression: field.expression.clone(),
-                matcher: WdxMatcher::parse(&field.expression)?,
-            });
-        }
+        target.conditions = filter.conditions;
         self.review_wdx_search(target);
         Ok(())
     }
@@ -458,6 +532,16 @@ impl App {
     }
 
     pub(crate) fn delete_wdx_search_profile(&mut self, name: &str) -> io::Result<()> {
+        if let Some((profile, _)) = self
+            .profile
+            .search_profiles
+            .iter()
+            .find(|(_, options)| options.wdx_profile.trim() == name)
+        {
+            return Err(io::Error::other(format!(
+                "Entferne zuerst den WDX-Verweis im gemeinsamen Suchprofil „{profile}“."
+            )));
+        }
         self.update_wdx_search_profiles(|profiles| {
             profiles.remove(name);
         })?;
@@ -476,8 +560,15 @@ impl App {
         }
         let mut profile = self.profile_snapshot();
         update(&mut profile.wdx_search_profiles);
+        if !profile
+            .wdx_search_profiles
+            .contains_key(profile.search_last.wdx_profile.trim())
+        {
+            profile.search_last.wdx_profile.clear();
+        }
         profile.save(&self.profile_path)?;
         self.profile = profile;
+        self.publish_search_profiles();
         Ok(())
     }
 }

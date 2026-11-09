@@ -12,15 +12,24 @@ use zeroize::{Zeroize, Zeroizing};
 mod operations;
 mod registry;
 mod wdx;
+mod wfx_content;
+mod wlx_bitmap;
 pub use operations::{
-    DownloadConflict, WFX_TREE_DEPTH, WFX_TREE_ENTRIES, WcxOperation, WfxOperation, WfxVersion,
-    operate, operate_interactive, wfx_batch,
+    DownloadConflict, WFX_TREE_DEPTH, WFX_TREE_ENTRIES, WcxOperation, WfxOperation, WfxOverwrite,
+    WfxVersion, operate, operate_interactive, wfx_batch, wfx_batch_filtered,
 };
 pub use registry::*;
 pub use wdx::{WdxKey, WdxMatcher, WdxValue, wdx_order};
+pub use wfx_content::{
+    WFX_CONTENT_BATCH, WFX_CONTENT_COLUMNS, WfxDefaultView, WfxField, wfx_content_fields,
+    wfx_content_paths, wfx_content_values, wfx_default_view,
+};
+pub use wlx_bitmap::{
+    WLX_BITMAP_BATCH, WLX_BITMAP_HEIGHT, WLX_BITMAP_WIDTH, WlxBitmap, wlx_thumbnails,
+};
 
-pub const PROTOCOL_VERSION: u32 = 9;
-pub const MAX_REQUEST: u64 = 128 * 1024;
+pub const PROTOCOL_VERSION: u32 = 12;
+pub const MAX_REQUEST: u64 = 768 * 1024;
 const MAX_REPLY: u64 = 24 * 1024 * 1024;
 const HOST_TIMEOUT: Duration = Duration::from_secs(90);
 
@@ -40,6 +49,17 @@ pub enum Operation {
     Wcx(WcxOperation),
     Wfx(WfxOperation),
     WfxBatch(Vec<WfxOperation>),
+    WfxFilteredBatch {
+        operations: Vec<WfxOperation>,
+        plugin_name: String,
+        ignore: String,
+    },
+    WfxContentFields,
+    WfxDefaultView,
+    WfxContentValues {
+        fields: Vec<WdxField>,
+        names: Vec<String>,
+    },
     WdxFields,
     WdxEditableFields,
     WdxSet {
@@ -58,6 +78,9 @@ pub enum Operation {
     },
     WlxEmbedded {
         parent: usize,
+    },
+    WlxThumbnails {
+        files: Vec<PathBuf>,
     },
 }
 
@@ -85,6 +108,24 @@ pub struct Row {
     pub value: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wfx_version: Option<WfxVersion>,
+    #[serde(default)]
+    pub wfx_skipped: bool,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub wfx_ignored: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wfx_content: Vec<Option<WdxValue>>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub wfx_descending: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wfx_default_view: Option<WfxDefaultView>,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -362,9 +403,17 @@ fn inspect_interactive(
     );
     let file_operation = matches!(
         operation,
-        Operation::Wcx(_) | Operation::Wfx(_) | Operation::WfxBatch(_)
+        Operation::Wcx(_)
+            | Operation::Wfx(_)
+            | Operation::WfxBatch(_)
+            | Operation::WfxFilteredBatch { .. }
     ) || report_after_cancel;
-    let timeout = if file_operation {
+    let timeout = if matches!(
+        operation,
+        Operation::WlxThumbnails { .. } | Operation::WfxDefaultView
+    ) {
+        Duration::from_secs(10)
+    } else if file_operation {
         Duration::from_secs(3600)
     } else {
         HOST_TIMEOUT
@@ -608,6 +657,7 @@ fn start_host(
             | Operation::WdxEditableFields
             | Operation::WdxSet { .. }
             | Operation::WdxEdit { .. }
+            | Operation::WlxThumbnails { .. }
     ) || interface == Interface::Wfx
     {
         file.to_path_buf()

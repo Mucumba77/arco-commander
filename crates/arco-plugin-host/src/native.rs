@@ -73,12 +73,30 @@ pub fn inspect(request: Request) -> io::Result<Vec<Row>> {
         (Interface::Wfx, Operation::Run) => {
             wfx::inspect(&library, &request.plugin, request.file.as_os_str())
         }
+        (Interface::Wfx, Operation::WfxContentFields) => {
+            wfx::content::fields(&library, &request.plugin)
+        }
+        (Interface::Wfx, Operation::WfxDefaultView) => {
+            wfx::content::default_view(&library, &request.plugin)
+        }
+        (Interface::Wfx, Operation::WfxContentValues { fields, names }) => {
+            wfx::content::values(&library, &request.plugin, &request.file, fields, names)
+        }
         (Interface::Wfx, Operation::Wfx(operation)) => {
             wfx::operate(&library, &request.plugin, operation)
         }
         (Interface::Wfx, Operation::WfxBatch(operations)) => {
             wfx::batch(&library, &request.plugin, operations)
         }
+        (
+            Interface::Wfx,
+            Operation::WfxFilteredBatch {
+                operations,
+                plugin_name,
+                ignore,
+            },
+        ) => wfx::batch_filtered(&library, &request.plugin, operations, plugin_name, ignore),
+        (Interface::Wlx, Operation::WlxThumbnails { files }) => wlx::thumbnails(&library, files),
         _ => Err(io::Error::other(
             "Die Plugin-Operation passt nicht zur Schnittstelle.",
         )),
@@ -106,7 +124,11 @@ fn probe(library: &Library, interface: Interface) -> io::Result<Vec<Row>> {
             has("ContentGetValue"),
             has("ContentGetSupportedField"),
         ),
-        Interface::Wlx => (has("ListLoadW"), has("ListLoad"), true),
+        Interface::Wlx => (
+            has("ListLoadW") || has("ListGetPreviewBitmapW"),
+            has("ListLoad") || has("ListGetPreviewBitmap"),
+            true,
+        ),
     };
     if !common || !(wide || ansi) {
         return Err(io::Error::other(format!(
@@ -136,6 +158,14 @@ fn probe(library: &Library, interface: Interface) -> io::Result<Vec<Row>> {
         Interface::Wdx => Some(b"ContentGetDetectString".as_slice()),
         _ => None,
     };
+    if interface == Interface::Wlx {
+        let bitmap = has("ListGetPreviewBitmapW") || has("ListGetPreviewBitmap");
+        rows.push(Row {
+            name: "Miniaturansicht".into(),
+            value: if bitmap { "ja" } else { "nein" }.into(),
+            ..Default::default()
+        });
+    }
     type DetectString = unsafe extern "system" fn(*mut u8, i32);
     if let Some(detect) = detect.and_then(|name| symbol::<DetectString>(library, name)) {
         let mut bytes = [0u8; 8192];
@@ -786,7 +816,11 @@ impl NativeWdxField {
 }
 
 fn wdx_fields(library: &Library) -> io::Result<Vec<NativeWdxField>> {
-    let fields: GetField = required(library, b"ContentGetSupportedField")?;
+    content_fields(library, b"ContentGetSupportedField")
+}
+
+fn content_fields(library: &Library, export: &[u8]) -> io::Result<Vec<NativeWdxField>> {
+    let fields: GetField = required(library, export)?;
     let mut result = Vec::new();
     for index in 0..256 {
         let mut name = [0; 256];
@@ -852,6 +886,16 @@ fn wdx_column_values(
 }
 
 fn read_wdx_value(get: GetValue, filename: *mut c_void, index: i32, unit: i32) -> Option<WdxValue> {
+    read_content_value(get, filename, index, unit, true)
+}
+
+fn read_content_value(
+    get: GetValue,
+    filename: *mut c_void,
+    index: i32,
+    unit: i32,
+    fulltext: bool,
+) -> Option<WdxValue> {
     // Native values require alignment for integers and floating-point values.
     let mut value = [0u64; 512];
     let code = unsafe {
@@ -864,6 +908,9 @@ fn read_wdx_value(get: GetValue, filename: *mut c_void, index: i32, unit: i32) -
             0,
         )
     };
+    if !fulltext && !matches!(code, 1..=8 | 10 | 11) {
+        return None;
+    }
     let display = wdx_value(code, &value)?;
     let key = match code {
         1 => WdxKey::Integer(i64::from(value[0] as i32)),

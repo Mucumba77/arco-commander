@@ -1,10 +1,21 @@
-use crate::files::{Entry, Kind, SortOrder};
-use crate::plugin::WdxColumn;
+use crate::files::{Entry, Kind, SortKey, SortOrder};
+use crate::plugin::{WdxColumn, WfxField};
 use crate::profile::TabView;
 use crate::sync::FileMasks;
 use globset::{GlobBuilder, GlobMatcher};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, io, path::Path};
+use std::{
+    collections::BTreeMap,
+    io,
+    path::{Path, PathBuf},
+};
+
+mod tc;
+mod tc_columns;
+mod tc_drives;
+pub use tc::{TcViews, parse_wfx_default_view, read_tc_views};
+pub use tc_columns::TcColumnExpression;
+pub use tc_drives::{request_tc_drive_type, tc_drive_changed_since, tc_drive_revision};
 
 pub const MAX_COLUMNS: usize = 29;
 
@@ -16,7 +27,9 @@ pub enum Field {
     Modified,
     Attributes,
     Comment,
+    TcExpression(TcColumnExpression),
     Wdx(WdxColumn),
+    Wfx(WfxField),
 }
 
 impl Field {
@@ -27,7 +40,9 @@ impl Field {
             Self::Modified => "time",
             Self::Attributes => "attributes",
             Self::Comment => "comment",
+            Self::TcExpression(expression) => expression.sort_key().map_or("", SortKey::column),
             Self::Wdx(_) => "wdx",
+            Self::Wfx(_) => "wfx",
         }
     }
 
@@ -38,9 +53,19 @@ impl Field {
             Self::Modified => "Änderungsdatum",
             Self::Attributes => "Attribute",
             Self::Comment => "Kommentar",
+            Self::TcExpression(_) => "TC-Ausdruck",
             Self::Wdx(column) => return column.selection.label(),
+            Self::Wfx(field) => return field.selection.label(),
         }
         .into()
+    }
+
+    pub fn needs_comment(&self) -> bool {
+        match self {
+            Self::Comment => true,
+            Self::TcExpression(expression) => expression.uses_comment(),
+            _ => false,
+        }
     }
 }
 
@@ -49,14 +74,72 @@ pub struct Column {
     pub field: Field,
     pub title: String,
     pub width: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_aligned: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Mode {
     pub view: TabView,
+    pub inherit_view: bool,
     pub columns: Option<String>,
     pub sort: Vec<SortOrder>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub colors: Option<ModeColors>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModeColors {
+    pub tab: Option<u32>,
+    pub light: [Option<u32>; 2],
+    pub dark: [Option<u32>; 2],
+}
+
+impl ModeColors {
+    pub(crate) fn from_tc(
+        fields: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> (Option<Self>, bool) {
+        let mut fields = fields.into_iter();
+        let mut partial = false;
+        let mut color = || match fields
+            .next()
+            .as_ref()
+            .map(AsRef::as_ref)
+            .unwrap_or_default()
+        {
+            "" | "-1" => None,
+            field => match field.parse::<u32>() {
+                Ok(bgr) if bgr <= 0xffffff => Some(swap_red_blue(bgr)),
+                _ => {
+                    partial = true;
+                    None
+                }
+            },
+        };
+        let colors = Self {
+            tab: color(),
+            light: [color(), color()],
+            dark: [color(), color()],
+        };
+        partial |= fields.any(|field| !matches!(field.as_ref(), "" | "-1"));
+        ((colors != Self::default()).then_some(colors), partial)
+    }
+
+    pub(crate) fn to_tc(self) -> String {
+        [self.tab]
+            .into_iter()
+            .chain(self.light)
+            .chain(self.dark)
+            .map(|color| color.map_or_else(|| "-1".into(), |rgb| swap_red_blue(rgb).to_string()))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+fn swap_red_blue(value: u32) -> u32 {
+    ((value & 0xff) << 16) | (value & 0x00ff00) | ((value >> 16) & 0xff)
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -119,6 +202,8 @@ pub struct Rule {
     pub excludes: String,
     pub any: bool,
     pub minimum_percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tc_expression: Option<String>,
 }
 
 impl Rule {
@@ -138,6 +223,9 @@ impl Rule {
     }
 
     pub fn validate(&self) -> io::Result<()> {
+        if let Some(expression) = &self.tc_expression {
+            return tc::parse_expression(expression).map(|_| ());
+        }
         self.path_mask()?;
         FileMasks::new(&self.contains)?;
         FileMasks::new(&self.excludes)?;
@@ -153,6 +241,9 @@ impl Rule {
     }
 
     fn matches(&self, scope: Scope, path: &str, entries: &[Entry]) -> io::Result<bool> {
+        if let Some(expression) = &self.tc_expression {
+            return Ok(tc::parse_expression(expression)?.matches(scope, path, entries));
+        }
         if self.scope != Scope::Any
             && self.scope != scope
             && !(self.scope == Scope::Local && scope == Scope::Unc)
@@ -199,12 +290,51 @@ impl Rule {
 #[serde(default)]
 pub struct Settings {
     pub columns: BTreeMap<String, Vec<Column>>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub wfx_columns: BTreeMap<PathBuf, WfxColumnSets>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub tc_columns: BTreeMap<u16, TcColumnLayout>,
     pub modes: BTreeMap<String, Mode>,
     pub rules: Vec<Rule>,
     pub automatic: bool,
     pub colors: Vec<FileColor>,
     pub selection: Option<ColorPair>,
     pub cursor: Option<ColorPair>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WfxColumnSets {
+    pub sets: BTreeMap<String, Vec<Column>>,
+    pub active: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin_default: Option<bool>,
+}
+
+impl WfxColumnSets {
+    pub fn active_columns(&self) -> Option<&[Column]> {
+        self.sets.get(self.active.as_ref()?).map(Vec::as_slice)
+    }
+
+    pub fn uses_plugin_default(&self) -> bool {
+        self.active.is_none() && self.plugin_default.unwrap_or(self.sets.is_empty())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TcColumnLayout {
+    pub name: String,
+    pub sort_keys: Vec<Option<SortKey>>,
+}
+
+impl TcColumnLayout {
+    pub(crate) fn custom_sort(&self, index: usize) -> Option<SortKey> {
+        self.sort_keys.get(index).copied().flatten()
+    }
+
+    pub(crate) fn sort_index(&self, key: SortKey) -> Option<usize> {
+        self.sort_keys.iter().position(|entry| *entry == Some(key))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -231,6 +361,24 @@ impl CompiledColor {
 }
 
 impl Settings {
+    pub fn uses_tc_drive_types(&self) -> bool {
+        self.automatic
+            && self.rules.iter().any(|rule| {
+                self.modes.contains_key(&rule.mode)
+                    && rule.tc_expression.as_ref().is_some_and(|expression| {
+                        expression
+                            .split("||")
+                            .flat_map(|group| group.split("|&"))
+                            .any(|term| {
+                                term.trim().strip_prefix('L').is_some_and(|types| {
+                                    !types.is_empty()
+                                        && types.bytes().all(|kind| (b'1'..=b'6').contains(&kind))
+                                })
+                            })
+                    })
+            })
+    }
+
     pub fn compile_colors(&self) -> Vec<CompiledColor> {
         self.colors
             .iter()
@@ -258,7 +406,7 @@ impl Settings {
         self.columns
             .values()
             .flatten()
-            .any(|column| column.field == Field::Comment)
+            .any(|column| column.field.needs_comment())
             || (self.automatic
                 && self
                     .modes

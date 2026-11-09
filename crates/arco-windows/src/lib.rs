@@ -2,9 +2,19 @@
 
 pub mod ftp;
 
+#[cfg(windows)]
+mod icons;
+#[cfg(windows)]
+pub use icons::resource_icon;
+
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+
+#[cfg(not(windows))]
+pub fn resource_icon(_: &Path, _: i32) -> io::Result<Vec<u8>> {
+    Err(unsupported())
+}
 
 #[derive(Clone, Copy, Default)]
 pub struct MetadataEdit {
@@ -52,14 +62,52 @@ pub struct ShellFolder {
 
 pub const SHELL_DESKTOP: &str = "shell:Desktop";
 pub const SHELL_COMPUTER: &str = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
+pub const SHELL_NETWORK: &str = "shell:NetworkPlacesFolder";
+pub const SHELL_LIBRARIES: &str = "shell:Libraries";
+pub const SHELL_APPLICATIONS: &str = "shell:AppsFolder";
+pub const SHELL_RECYCLE_BIN: &str = "shell:RecycleBinFolder";
 
 pub struct ShellListing {
     pub ancestors: Vec<(String, String)>,
     pub entries: Vec<ShellFolder>,
 }
 
+pub enum ShellAction {
+    Copy(PathBuf),
+    Move(PathBuf),
+    Recycle,
+    Delete,
+    Rename(std::ffi::OsString),
+    NewFolder(std::ffi::OsString),
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct ShellTransferOptions {
+    pub owner: Option<usize>,
+    pub allow_elevation: bool,
+}
+
+#[derive(Default)]
+pub struct ShellTransferReport {
+    pub completed: usize,
+    pub cancelled: bool,
+    pub skipped: usize,
+    pub errors: Vec<String>,
+}
+
 #[cfg(windows)]
-pub use shell_items::{open_shell_item, shell_folders, shell_listing};
+pub use shell_items::{open_shell_item, shell_folders, shell_listing, shell_transfer};
+
+#[cfg(not(windows))]
+pub fn shell_transfer(
+    _: &[PathBuf],
+    _: &ShellAction,
+    _: ShellTransferOptions,
+    _: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _: impl FnMut(&Path),
+) -> io::Result<ShellTransferReport> {
+    Err(unsupported())
+}
 
 #[cfg(not(windows))]
 pub fn shell_folders(_: Option<&str>, _: bool) -> io::Result<Vec<ShellFolder>> {
@@ -87,6 +135,13 @@ pub struct LocalShare {
     pub special: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShareAccess {
+    Read,
+    Change,
+    Full,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Volume {
     pub root: PathBuf,
@@ -104,7 +159,7 @@ pub fn local_shares() -> io::Result<Vec<LocalShare>> {
     Err(unsupported())
 }
 #[cfg(not(windows))]
-pub fn create_share(_: &Path, _: &str, _: bool) -> io::Result<()> {
+pub fn create_share(_: &Path, _: &str, _: ShareAccess, _: &str) -> io::Result<()> {
     Err(unsupported())
 }
 #[cfg(not(windows))]
@@ -141,7 +196,8 @@ pub fn total_commander_install() -> Option<PathBuf> {
 mod shell_actions;
 #[cfg(windows)]
 pub use shell_actions::{
-    create_shortcut, execute_verb, parse_windows_arguments, replace_preserving_attributes,
+    ShellProgram, create_shortcut, encode_system_text, execute_verb, launch_with_window,
+    parse_windows_arguments, replace_preserving_attributes, short_path,
 };
 
 #[cfg(not(windows))]
@@ -156,6 +212,36 @@ pub fn create_shortcut(_: &Path, _: &Path) -> io::Result<()> {
 
 #[cfg(not(windows))]
 pub fn execute_verb(_: &Path, _: &str) -> io::Result<()> {
+    Err(unsupported())
+}
+
+#[cfg(not(windows))]
+pub struct ShellProgram;
+
+#[cfg(not(windows))]
+impl ShellProgram {
+    pub fn wait(self) -> io::Result<()> {
+        Err(unsupported())
+    }
+}
+
+#[cfg(not(windows))]
+pub fn launch_with_window(
+    _: &Path,
+    _: &str,
+    _: Option<&Path>,
+    _: bool,
+) -> io::Result<Option<ShellProgram>> {
+    Err(unsupported())
+}
+
+#[cfg(not(windows))]
+pub fn short_path(_: &Path) -> io::Result<PathBuf> {
+    Err(unsupported())
+}
+
+#[cfg(not(windows))]
+pub fn encode_system_text(_: &str, _: bool) -> io::Result<Vec<u8>> {
     Err(unsupported())
 }
 
@@ -203,7 +289,43 @@ mod shell_items;
 #[cfg(windows)]
 pub use context_menu::show_context_menu;
 #[cfg(windows)]
-pub use drag::drag_copy;
+pub use drag::{drag_files, file_drop_action};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileDragOutcome {
+    NoConfirmedMove,
+    MovedByTarget,
+    MovedAfterCopy,
+    MovePartiallyCompleted { completed: usize, total: usize },
+    MoveUnconfirmed,
+}
+
+#[cfg(not(windows))]
+pub fn drag_files(_: &[PathBuf]) -> io::Result<FileDragOutcome> {
+    Err(unsupported())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileDropAction {
+    Copy,
+    Move,
+    Link,
+}
+
+impl FileDropAction {
+    pub fn from_modifiers(control: bool, shift: bool) -> Self {
+        match (control, shift) {
+            (true, true) => Self::Link,
+            (false, true) => Self::Move,
+            _ => Self::Copy,
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn file_drop_action() -> FileDropAction {
+    FileDropAction::Copy
+}
 #[cfg(windows)]
 pub use embedded::{close_embedded, position_embedded};
 #[cfg(windows)]

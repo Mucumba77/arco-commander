@@ -230,6 +230,7 @@ impl App {
         profile.save(&self.profile_path)?;
         self.profile = profile;
         self.invalidate_wdx_columns();
+        self.invalidate_thumbnails();
         self.stop_quick_plugin();
         self.quick_requested = None;
         Ok(())

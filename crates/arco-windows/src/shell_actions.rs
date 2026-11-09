@@ -1,18 +1,148 @@
 use crate::platform::{extended_path, rename_noreplace, wide};
-use std::{io, path::Path};
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
     CoUninitialize, IPersistFile,
 };
 use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
 use windows::core::{Interface, PCWSTR};
-use windows_sys::Win32::Foundation::{ERROR_CANCELLED, RPC_E_CHANGED_MODE};
-use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
+use windows_sys::Win32::Foundation::{ERROR_CANCELLED, RPC_E_CHANGED_MODE, WAIT_OBJECT_0};
+use windows_sys::Win32::Globalization::{
+    CP_UTF8, GetACP, GetOEMCP, WC_NO_BEST_FIT_CHARS, WideCharToMultiByte,
+};
+use windows_sys::Win32::Storage::FileSystem::{GetShortPathNameW, ReplaceFileW};
+use windows_sys::Win32::System::Threading::{INFINITE, WaitForSingleObject};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow;
 use windows_sys::Win32::UI::Shell::{
-    SEE_MASK_FLAG_NO_UI, SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW, ShellExecuteExW,
+    SEE_MASK_FLAG_NO_UI, SEE_MASK_INVOKEIDLIST, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS,
+    SHELLEXECUTEINFOW, ShellExecuteExW,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    SW_SHOWMAXIMIZED, SW_SHOWMINNOACTIVE, SW_SHOWNORMAL,
+};
+
+pub struct ShellProgram(OwnedHandle);
+
+impl ShellProgram {
+    pub fn wait(self) -> io::Result<()> {
+        if unsafe { WaitForSingleObject(self.0.as_raw_handle(), INFINITE) } == WAIT_OBJECT_0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+}
+
+pub fn launch_with_window(
+    path: &Path,
+    parameters: &str,
+    directory: Option<&Path>,
+    maximized: bool,
+) -> io::Result<Option<ShellProgram>> {
+    let path = wide(path)?;
+    let parameters = wide(parameters)?;
+    let directory = directory.map(wide).transpose()?;
+    let mut request = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC | SEE_MASK_NOCLOSEPROCESS,
+        hwnd: unsafe { GetActiveWindow() },
+        lpFile: path.as_ptr(),
+        lpParameters: parameters.as_ptr(),
+        lpDirectory: directory
+            .as_ref()
+            .map_or(std::ptr::null(), |path| path.as_ptr()),
+        nShow: if maximized {
+            SW_SHOWMAXIMIZED
+        } else {
+            SW_SHOWMINNOACTIVE
+        },
+        ..Default::default()
+    };
+    if unsafe { ShellExecuteExW(&mut request) } == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        let process = request.hProcess;
+        // SEE_MASK_NOCLOSEPROCESS transfers any returned handle to the caller.
+        Ok((!process.is_null())
+            .then(|| ShellProgram(unsafe { OwnedHandle::from_raw_handle(process) })))
+    }
+}
+
+pub fn short_path(path: &Path) -> io::Result<PathBuf> {
+    let path = wide(path)?;
+    let needed = unsafe { GetShortPathNameW(path.as_ptr(), std::ptr::null_mut(), 0) };
+    if needed == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut buffer = vec![0; needed as usize];
+    let length = unsafe { GetShortPathNameW(path.as_ptr(), buffer.as_mut_ptr(), needed) };
+    if length == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if length >= needed {
+        return Err(io::Error::other(
+            "Der Kurzpfad wurde während der Abfrage geändert.",
+        ));
+    }
+    Ok(PathBuf::from(OsString::from_wide(
+        &buffer[..length as usize],
+    )))
+}
+
+pub fn encode_system_text(text: &str, oem: bool) -> io::Result<Vec<u8>> {
+    let codepage = unsafe { if oem { GetOEMCP() } else { GetACP() } };
+    if text.is_empty() || codepage == CP_UTF8 {
+        return Ok(text.as_bytes().to_vec());
+    }
+    let input: Vec<_> = text.encode_utf16().collect();
+    let length = i32::try_from(input.len()).map_err(io::Error::other)?;
+    let mut lossy = 0;
+    let needed = unsafe {
+        WideCharToMultiByte(
+            codepage,
+            WC_NO_BEST_FIT_CHARS,
+            input.as_ptr(),
+            length,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null(),
+            &mut lossy,
+        )
+    };
+    if needed == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut output = vec![0; needed as usize];
+    let written = unsafe {
+        WideCharToMultiByte(
+            codepage,
+            WC_NO_BEST_FIT_CHARS,
+            input.as_ptr(),
+            length,
+            output.as_mut_ptr(),
+            needed,
+            std::ptr::null(),
+            &mut lossy,
+        )
+    };
+    if written == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if lossy != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Ein Dateiname passt nicht zur Windows-Codepage. Verwende eine Unicode-Listendatei.",
+        ));
+    }
+    output.truncate(written as usize);
+    Ok(output)
+}
 
 pub fn execute_verb(path: &Path, verb: &str) -> io::Result<()> {
     let path = wide(path)?;

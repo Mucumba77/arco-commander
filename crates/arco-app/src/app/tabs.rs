@@ -1,8 +1,9 @@
 use super::{App, Navigation, Outcome};
 use crate::commands::{Dialog, Pending};
 use crate::display_path;
-use crate::panel::{FtpTab, Location, Panel, Tab};
-use arco_core::profile::{self, Profile, SavedTab, TabLock, TcTabs};
+use crate::panel::{FtpLocation, FtpTab, Location, Panel, Tab, WfxLocation};
+use arco_core::plugin::Interface;
+use arco_core::profile::{self, Profile, SavedTab, TabLock, TcTabs, VirtualTab};
 use arco_windows::ftp::Listing;
 use std::fmt::Write as _;
 use std::io;
@@ -15,6 +16,7 @@ pub(super) struct ClosedTab {
     fallback: PathBuf,
     options: SavedTab,
     base: Option<Location>,
+    deferred: Option<VirtualTab>,
 }
 
 impl App {
@@ -25,6 +27,7 @@ impl App {
             fallback: tab.path,
             options: tab.options,
             base: tab.lock_base,
+            deferred: tab.deferred,
         });
         if self.closed_tabs.len() > 20 {
             self.closed_tabs.remove(0);
@@ -80,11 +83,14 @@ impl App {
         let mut tab = Tab::new(closed.fallback);
         tab.options = closed.options;
         tab.lock_base = closed.base;
+        tab.deferred = closed.deferred;
         let panel = &mut self.panels[closed.side];
         panel.tabs.push(tab);
         panel.tab = panel.tabs.len() - 1;
         self.set_active(closed.side);
-        self.load_location(closed.side, closed.location, Navigation::Refresh);
+        if !self.refresh_deferred_tab(closed.side) {
+            self.load_location(closed.side, closed.location, Navigation::Refresh);
+        }
     }
 
     pub(crate) fn open_selected_folders(&mut self, side: usize) {
@@ -120,7 +126,7 @@ impl App {
             Pending::TabGroups(names.clone()),
             Dialog {
                 title: "Tab-Gruppen",
-                description: "Gruppen speichern die lokalen Ordner-Tabs beider Dateifenster.",
+                description: "Gruppen speichern die Ordner-Tabs beider Dateifenster.",
                 options: &options,
                 ..Dialog::default()
             },
@@ -202,18 +208,17 @@ impl App {
             .current()
             .current()
             .filter(|entry| {
-                entry
-                    .path
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("tab"))
+                entry.path.extension().is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("tab") || ext.eq_ignore_ascii_case("ini")
+                })
             })
             .map(|entry| display_path(&entry.path))
             .unwrap_or_default();
         self.dialog("input", Pending::TabImport, Dialog {
             title: "Total-Commander-Tabs importieren",
-            description: "Die aktive Seite der Datei wird der aktuell gewählten Arco-Seite zugeordnet. Vor dem Speichern erscheint eine Vorschau.",
+            description: "Bei .tab-Dateien erhält die gewählte Seite die aktiven Tabs. Bei einer .ini-Datei bleiben links und rechts erhalten. Vor dem Speichern erscheint eine Vorschau.",
             value: &selected,
-            placeholder: "Absoluter Pfad zur .tab-Datei",
+            placeholder: "Absoluter Pfad zur .tab- oder .ini-Datei",
             second_placeholder: "Gruppenname (optional)",
             ..Dialog::default()
         });
@@ -222,13 +227,13 @@ impl App {
     pub(crate) fn read_tab_import(&mut self, path: &str, name: &str) -> io::Result<()> {
         let path = PathBuf::from(path.trim().trim_matches('"'));
         if !path.is_absolute()
-            || !path
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("tab"))
+            || !path.extension().is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("tab") || ext.eq_ignore_ascii_case("ini")
+            })
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "Gib den absoluten Pfad zu einer .tab-Datei ein.",
+                "Gib den absoluten Pfad zu einer .tab- oder .ini-Datei ein.",
             ));
         }
         let name = if name.trim().is_empty() {
@@ -246,8 +251,15 @@ impl App {
             .each_ref()
             .map(|panel| panel.current().path.clone());
         let source = self.active;
+        let layouts = self.profile.views.tc_columns.clone();
         self.start_job("Lese gespeicherte Ordner-Tabs …", false, move |_| {
-            let tabs = profile::read_tc_tabs(&path, [&bases[0], &bases[1]], source)?;
+            let tabs = profile::read_tc_tabs_with_columns(
+                &path,
+                [&bases[0], &bases[1]],
+                source,
+                super::favorites::tc_path_variables(&path),
+                &layouts,
+            )?;
             Ok(Outcome::ImportedTabs(name, Box::new(tabs)))
         });
         Ok(())
@@ -298,8 +310,10 @@ impl App {
     }
 
     fn start_tab_export(&mut self, path: PathBuf, panels: [profile::SavedPanel; 2], source: usize) {
+        let layouts = self.profile.views.tc_columns.clone();
+        let columns = self.profile.views.columns.clone();
         self.start_job("Exportiere Ordner-Tabs …", false, move |_| {
-            profile::write_tc_tabs(&path, &panels, source)?;
+            profile::write_tc_tabs_with_views(&path, &panels, source, &layouts, &columns)?;
             Ok(Outcome::Notice(format!(
                 "Tab-Datei gespeichert · {}",
                 display_path(&path)
@@ -310,7 +324,13 @@ impl App {
     pub(crate) fn tc_tab_command(&mut self, verb: &str, file: &str) -> bool {
         let verb = verb.to_ascii_uppercase();
         let path = PathBuf::from(file.trim().trim_matches('"'));
-        if verb == "OPENTABS" || verb == "APPENDTABS" {
+        let load_side = match verb.as_str() {
+            "OPENTABS" | "APPENDTABS" => Some(self.active),
+            "OPENTABSL" | "APPENDTABSL" => Some(0),
+            "OPENTABSR" | "APPENDTABSR" => Some(1),
+            _ => None,
+        };
+        if let Some(source) = load_side {
             if !path
                 .extension()
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("tab"))
@@ -323,10 +343,17 @@ impl App {
                 .panels
                 .each_ref()
                 .map(|panel| panel.current().path.clone());
-            let source = self.active;
+            let replace = verb.starts_with("OPEN");
+            let layouts = self.profile.views.tc_columns.clone();
             self.start_job("Lese gespeicherte Ordner-Tabs …", false, move |_| {
-                let tabs = profile::read_tc_tabs(&path, [&bases[0], &bases[1]], source)?;
-                Ok(Outcome::TabFile(Box::new(tabs), verb == "OPENTABS"))
+                let tabs = profile::read_tc_tabs_with_columns(
+                    &path,
+                    [&bases[0], &bases[1]],
+                    source,
+                    super::favorites::tc_path_variables(&path),
+                    &layouts,
+                )?;
+                Ok(Outcome::TabFile(Box::new(tabs), replace))
             });
             return true;
         }
@@ -347,19 +374,26 @@ impl App {
         true
     }
 
-    pub(super) fn apply_tab_file(&mut self, import: TcTabs, replace: bool) {
+    pub(super) fn apply_tab_file(&mut self, mut import: TcTabs, replace: bool) {
+        let embedded = import.embedded_column_count();
+        if let Err(error) = import.install_embedded_columns(&mut self.profile.views.columns) {
+            self.text("Tab-Datei konnte nicht geöffnet werden", &error.to_string());
+            return;
+        }
         self.apply_saved_tabs(import.panels, replace);
         self.status(format!(
-            "Tab-Datei geöffnet · {} übersprungen · {} weitere Optionen",
-            import.skipped, import.unhandled_options
+            "Tab-Datei geöffnet · {embedded} eingebettete Spaltensätze · {} übersprungen · {} weitere Optionen",
+            import.skipped, import.unhandled_options,
         ));
         self.save();
     }
 
     pub(super) fn review_tab_import(&mut self, name: String, import: TcTabs) {
         let description = format!(
-            "Speichert die Gruppe „{name}“. {} Tabs übersprungen, {} Einträge mit weiteren oder unbekannten Optionen.",
-            import.skipped, import.unhandled_options
+            "Speichert die Gruppe „{name}“. {} eingebettete Spaltensätze, {} Tabs übersprungen, {} Einträge mit weiteren oder unbekannten Optionen.",
+            import.embedded_column_count(),
+            import.skipped,
+            import.unhandled_options,
         );
         let mut body = String::new();
         for (side, panel) in ["Links", "Rechts"].into_iter().zip(&import.panels) {
@@ -375,14 +409,13 @@ impl App {
                     TabLock::Fixed => " [gesperrt]",
                     TabLock::ReturnToBase => " [Rückkehr zum Stammordner]",
                 };
-                let _ = writeln!(
-                    body,
-                    "  {}{}{} {}",
-                    options.title,
-                    active,
-                    lock,
-                    display_path(path)
-                );
+                let address = options
+                    .virtual_tab
+                    .as_ref()
+                    .and_then(VirtualTab::tc_path)
+                    .or_else(|| options.shell.clone())
+                    .unwrap_or_else(|| display_path(path));
+                let _ = writeln!(body, "  {}{}{} {}", options.title, active, lock, address);
             }
             body.push('\n');
         }
@@ -398,9 +431,10 @@ impl App {
         );
     }
 
-    pub(crate) fn save_imported_tabs(&mut self, name: &str, import: TcTabs) -> io::Result<()> {
+    pub(crate) fn save_imported_tabs(&mut self, name: &str, mut import: TcTabs) -> io::Result<()> {
         self.validate_group_name(name)?;
         let mut profile = self.profile_snapshot();
+        import.install_embedded_columns(&mut profile.views.columns)?;
         profile.tab_groups.insert(name.to_owned(), import.panels);
         self.commit_tab_group(profile)?;
         self.status(format!("Tab-Gruppe importiert · {name}"));
@@ -471,6 +505,80 @@ impl App {
                 self.panels[side].tabs.extend(new_panel.tabs);
                 self.publish(side);
             }
+        }
+    }
+
+    pub(super) fn refresh_deferred_tab(&mut self, side: usize) -> bool {
+        let Some(deferred) = self.panels[side].current().deferred.clone() else {
+            return false;
+        };
+        let location = match deferred {
+            VirtualTab::Archive { file, folder } => Some(Location::Archive { file, folder }),
+            VirtualTab::Wfx { plugin, directory } => {
+                let mut matches = self.profile.plugins.iter().filter(|entry| {
+                    entry.enabled
+                        && entry.interface == Interface::Wfx
+                        && entry.name.eq_ignore_ascii_case(&plugin)
+                });
+                match (matches.next(), matches.next()) {
+                    (Some(entry), None) => Some(Location::Wfx(WfxLocation {
+                        plugin: Arc::new(entry.clone()),
+                        directory,
+                    })),
+                    _ => {
+                        if side == self.active {
+                            self.status(format!("WFX-Tab · Das aktive Plugin „{plugin}“ fehlt oder ist nicht eindeutig."));
+                        }
+                        None
+                    }
+                }
+            }
+            VirtualTab::Ftp { profile, url } => {
+                let mut sessions = self
+                    .panels
+                    .iter()
+                    .flat_map(|panel| &panel.tabs)
+                    .filter_map(|tab| tab.ftp.as_ref())
+                    .filter(|ftp| ftp.location.profile.as_deref() == Some(profile.as_str()));
+                let location = sessions.find_map(|ftp| {
+                    let session = &ftp.location.session;
+                    let directory = session.restore_directory(url.as_deref()).ok()?;
+                    Some(Location::Ftp(FtpLocation {
+                        session: session.clone(),
+                        directory,
+                        profile: Some(profile.clone()),
+                    }))
+                });
+                if location.is_none() && side == self.active {
+                    self.status(format!(
+                        "FTP-Tab · Mit Enter das Profil „{profile}“ verbinden."
+                    ));
+                }
+                location
+            }
+        };
+        if let Some(location) = location {
+            self.load_location(side, location, Navigation::Refresh);
+        } else {
+            self.waiting_loads[side] = None;
+            if let Some(cancel) = &self.loader_cancel[side] {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            self.panels[side].loading = false;
+            self.panels[side].request = 0;
+            self.publish(side);
+        }
+        true
+    }
+
+    pub(super) fn open_deferred_tab(&mut self) -> bool {
+        if let Some(VirtualTab::Ftp { profile, .. }) = self.current().deferred.clone() {
+            if let Err(error) = self.connect_deferred_ftp(&profile) {
+                self.status(error.to_string());
+            }
+            true
+        } else {
+            self.refresh_deferred_tab(self.active)
         }
     }
 
@@ -643,6 +751,8 @@ impl App {
             },
         });
         tab.wfx = source.wfx.clone();
+        tab.shell = source.shell.clone();
+        tab.deferred = source.deferred.clone();
         tab.options = source.options.clone();
         tab.options.lock = TabLock::Unlocked;
         let panel = &mut self.panels[side];

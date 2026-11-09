@@ -4,7 +4,7 @@ use super::{
 };
 use arco_core::plugin::{
     PROTOCOL_VERSION, Prompt, PromptAnswer, PromptKind, PromptMessage, Row, WFX_TREE_DEPTH,
-    WFX_TREE_ENTRIES, WfxOperation, WfxVersion,
+    WFX_TREE_ENTRIES, WfxOperation, WfxOverwrite, WfxVersion,
 };
 use arco_core::{files, tools};
 use libloading::os::windows::Library;
@@ -22,6 +22,7 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Storage::FileSystem::{WIN32_FIND_DATAA, WIN32_FIND_DATAW};
 use zeroize::{Zeroize, Zeroizing};
 
+pub(super) mod content;
 mod credentials;
 
 type Progress<T> = unsafe extern "system" fn(i32, *mut T, *mut T, i32) -> i32;
@@ -98,6 +99,7 @@ pub fn inspect(library: &Library, plugin: &Path, directory: &OsStr) -> io::Resul
                 name: entry.name,
                 value,
                 wfx_version,
+                ..Default::default()
             }
         })
         .collect())
@@ -213,6 +215,34 @@ pub fn batch(
     plugin: &Path,
     operations: &[WfxOperation],
 ) -> io::Result<Vec<Row>> {
+    batch_with_filter(library, plugin, operations, None)
+}
+
+pub fn batch_filtered(
+    library: &Library,
+    plugin: &Path,
+    operations: &[WfxOperation],
+    plugin_name: &str,
+    ignore: &str,
+) -> io::Result<Vec<Row>> {
+    let rules = arco_core::ignore::IgnoreList::parse(ignore)?;
+    batch_with_filter(
+        library,
+        plugin,
+        operations,
+        Some(TreeFilter {
+            rules: &rules,
+            plugin_name,
+        }),
+    )
+}
+
+fn batch_with_filter(
+    library: &Library,
+    plugin: &Path,
+    operations: &[WfxOperation],
+    filter: Option<TreeFilter<'_>>,
+) -> io::Result<Vec<Row>> {
     if operations.len() > 64 {
         return Err(io::Error::other("WFX-Auftrag enthält zu viele Einträge."));
     }
@@ -224,16 +254,87 @@ pub fn batch(
             return Err(io::ErrorKind::Interrupted.into());
         }
         progress_message(|| format!("{}/{} Einträge", index + 1, operations.len()));
-        let value = operate_initialized(library, operation, unicode)
-            .err()
-            .map_or_else(String::new, |error| error.to_string());
+        let mut ignored = 0;
+        let outcome = match operation {
+            WfxOperation::Overwrite {
+                operation,
+                expected,
+                rule,
+            } => overwrite_file(library, operation, *expected, *rule, unicode),
+            _ => match filter {
+                Some(filter) => operate_filtered(library, operation, unicode, filter, &mut ignored),
+                None => operate_initialized(library, operation, unicode),
+            }
+            .map(|()| true),
+        };
         result.push(Row {
             name: index.to_string(),
-            value,
+            wfx_skipped: matches!(outcome, Ok(false)),
+            wfx_ignored: ignored,
+            value: outcome
+                .err()
+                .map_or_else(String::new, |error| error.to_string()),
             ..Default::default()
         });
     }
     Ok(result)
+}
+
+fn operate_filtered(
+    library: &Library,
+    operation: &WfxOperation,
+    unicode: bool,
+    filter: TreeFilter<'_>,
+    ignored: &mut usize,
+) -> io::Result<()> {
+    match operation {
+        WfxOperation::DownloadTree { remote, local } => {
+            let plan = filtered_tree_plan(library, remote, true, unicode, Some(filter))?;
+            *ignored = plan.ignored;
+            read_tree_plan(
+                library,
+                remote,
+                TreeTarget::Local(local),
+                unicode,
+                plan.entries,
+            )
+        }
+        WfxOperation::CopyTree { from, to } => {
+            let plan = filtered_tree_plan(library, from, true, unicode, Some(filter))?;
+            *ignored = plan.ignored;
+            read_tree_plan(library, from, TreeTarget::Remote(to), unicode, plan.entries)
+        }
+        WfxOperation::MoveTree { from, to } => {
+            verify_delete_path(library, from, true, unicode)?;
+            prepare_target(library, to, unicode)?;
+            let plan = filtered_tree_plan(library, from, true, unicode, Some(filter))?;
+            *ignored = plan.ignored;
+            let workspace = tempfile::tempdir_in(workspace_file(""))?;
+            let local = workspace.path().join("source");
+            read_tree_plan(
+                library,
+                from,
+                TreeTarget::Local(&local),
+                unicode,
+                plan.entries,
+            )?;
+            upload_tree(library, &local, to, unicode)?;
+            verify_remote_copy(library, to, &local, true, unicode)?;
+            remove_downloaded_filtered(library, from, &local, true, unicode, Some(filter)).map_err(
+                |error| {
+                    io::Error::other(format!(
+                        "WFX-Ziel übertragen. Quellenstatus prüfen: {error}"
+                    ))
+                },
+            )
+        }
+        WfxOperation::RemoveDownloaded {
+            remote,
+            local,
+            tree: true,
+        } => remove_downloaded_filtered(library, remote, local, true, unicode, Some(filter)),
+        _ => operate_initialized(library, operation, unicode),
+    }
 }
 
 fn operate_initialized(
@@ -245,8 +346,10 @@ fn operate_initialized(
         WfxOperation::Overwrite {
             operation,
             expected,
+            rule,
         } => {
-            return overwrite_file(library, operation, *expected, initialized_unicode);
+            return overwrite_file(library, operation, *expected, *rule, initialized_unicode)
+                .map(|_| ());
         }
         WfxOperation::DeleteTree { path } => {
             verify_delete_path(library, path, true, initialized_unicode)?;
@@ -349,8 +452,9 @@ fn overwrite_file(
     library: &Library,
     operation: &WfxOperation,
     expected: WfxVersion,
+    rule: WfxOverwrite,
     unicode: bool,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     let target = operation
         .file_destination()
         .ok_or_else(|| io::Error::other("WFX-Zieldatei fehlt."))?;
@@ -383,7 +487,90 @@ fn overwrite_file(
         }
         _ => return Err(io::Error::other("Ungültige WFX-Dateiersetzung.")),
     };
-    let (stage, size) = if let Some((from, version)) = source_version {
+    let local_metadata = local
+        .map(|path| files::regular_metadata(path))
+        .transpose()?;
+    if local_metadata
+        .as_ref()
+        .is_some_and(|metadata| !metadata.is_file())
+    {
+        return Err(io::Error::other("WFX-Quelle ist keine reguläre Datei."));
+    }
+    let (source_size, source_time) = if let Some((_, version)) = source_version {
+        (version.size, version.modified_time())
+    } else {
+        let metadata = local_metadata
+            .as_ref()
+            .expect("local WFX replacement source");
+        (metadata.len(), metadata.modified().ok())
+    };
+    match rule {
+        WfxOverwrite::Newer
+            if !source_time
+                .zip(expected.modified_time())
+                .is_some_and(|(source, target)| source > target) =>
+        {
+            return Ok(false);
+        }
+        WfxOverwrite::Larger if source_size <= expected.size => return Ok(false),
+        WfxOverwrite::Append if !operation.can_append() => {
+            return Err(io::Error::other(
+                "Anhängen ist nur beim WFX-Kopieren möglich.",
+            ));
+        }
+        _ => (),
+    }
+    let append_storage;
+    let (stage, size) = if rule == WfxOverwrite::Append {
+        append_storage = tempfile::tempdir_in(workspace_file(""))?;
+        let prefix = append_storage.path().join("target");
+        let target_entry = find_entry(library, target, unicode)?;
+        download(library, target, &prefix, unicode, target_entry.info)?;
+        expect_file_version(library, target, expected, unicode)?;
+        let prefix_metadata = files::regular_metadata(&prefix)?;
+        if prefix_metadata.len() != expected.size {
+            return Err(io::Error::other(
+                "Die heruntergeladene WFX-Zieldatei hat eine unerwartete Größe.",
+            ));
+        }
+        let combined = append_storage.path().join("combined");
+        let mut output = fs::File::create_new(&combined)?;
+        let cancel = AtomicBool::new(false);
+        let mut writer = CancelledWrite(&mut output);
+        files::copy_snapshot_to(&prefix, &prefix_metadata, &mut writer, &cancel)?;
+        if let Some((from, version)) = source_version {
+            let suffix = append_storage.path().join("source");
+            let source_entry = find_entry(library, from, unicode)?;
+            download(library, from, &suffix, unicode, source_entry.info)?;
+            expect_file_version(library, from, version, unicode)?;
+            let metadata = files::regular_metadata(&suffix)?;
+            if metadata.len() != source_size {
+                return Err(io::Error::other(
+                    "Die heruntergeladene WFX-Quelldatei hat eine unerwartete Größe.",
+                ));
+            }
+            files::copy_snapshot_to(&suffix, &metadata, &mut writer, &cancel)?;
+        } else {
+            files::copy_snapshot_to(
+                local.expect("local WFX append source"),
+                local_metadata.as_ref().expect("local WFX append metadata"),
+                &mut writer,
+                &cancel,
+            )?;
+        }
+        drop(output);
+        let size = expected
+            .size
+            .checked_add(source_size)
+            .ok_or_else(|| io::Error::other("Die WFX-Dateigröße ist zu groß."))?;
+        (
+            WfxOperation::Upload {
+                local: combined,
+                remote: part.clone(),
+            },
+            size,
+        )
+    } else if let Some((from, version)) = source_version {
         (
             WfxOperation::Copy {
                 from: from.clone(),
@@ -393,16 +580,12 @@ fn overwrite_file(
         )
     } else {
         let local = local.expect("local WFX replacement source");
-        let metadata = files::regular_metadata(local)?;
-        if !metadata.is_file() {
-            return Err(io::Error::other("WFX-Quelle ist keine reguläre Datei."));
-        }
         (
             WfxOperation::Upload {
                 local: local.clone(),
                 remote: part.clone(),
             },
-            metadata.len(),
+            source_size,
         )
     };
     let rename = |from: &str, to: &str| {
@@ -476,11 +659,26 @@ fn overwrite_file(
         expect_file_version(library, &backup, expected, unicode)?;
         delete(&backup)
     })();
-    finish.map_err(|error| {
+    finish.map(|()| true).map_err(|error| {
         io::Error::other(format!(
             "{error}. Das WFX-Ziel wurde geschrieben. Prüfe die Sicherung „{backup}“."
         ))
     })
+}
+
+struct CancelledWrite<'a>(&'a mut fs::File);
+
+impl Write for CancelledWrite<'_> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if cancelled() {
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        self.0.write(buffer)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
 }
 
 fn single(
@@ -662,6 +860,18 @@ struct TreeEntry {
     info: RemoteInfo,
 }
 
+#[derive(Clone, Copy)]
+struct TreeFilter<'a> {
+    rules: &'a arco_core::ignore::IgnoreList,
+    plugin_name: &'a str,
+}
+
+struct TreePlan {
+    entries: Vec<TreeEntry>,
+    kept: std::collections::HashSet<String>,
+    ignored: usize,
+}
+
 impl TreeEntry {
     fn directory(&self) -> bool {
         self.info.attributes & 0x10 != 0
@@ -674,6 +884,16 @@ fn tree_plan(
     tree: bool,
     unicode: bool,
 ) -> io::Result<Vec<TreeEntry>> {
+    filtered_tree_plan(library, root, tree, unicode, None).map(|plan| plan.entries)
+}
+
+fn filtered_tree_plan(
+    library: &Library,
+    root: &str,
+    tree: bool,
+    unicode: bool,
+    filter: Option<TreeFilter<'_>>,
+) -> io::Result<TreePlan> {
     let root_entry = find_entry(library, root, unicode)?;
     if root_entry.directory() != tree || root_entry.link() {
         return Err(io::Error::other(
@@ -686,6 +906,8 @@ fn tree_plan(
         info: root_entry.info,
     }];
     let mut index = 0;
+    let mut kept = std::collections::HashSet::new();
+    let mut ignored = 0;
     while let Some(entry) = plan.get(index) {
         let TreeEntry {
             relative, depth, ..
@@ -696,24 +918,42 @@ fn tree_plan(
             let mut names = std::collections::HashSet::new();
             let mut children = Vec::new();
             for entry in directory {
+                files::leaf_name(OsStr::new(&entry.name))?;
+                let child = if relative.is_empty() {
+                    entry.name.clone()
+                } else {
+                    format!("{relative}\\{}", entry.name)
+                };
+                if let Some(filter) = filter
+                    && filter.rules.matches(
+                        arco_core::ignore::Source::Wfx(filter.plugin_name),
+                        &tree_path(root, &child)?,
+                        entry.directory(),
+                    )
+                {
+                    ignored += 1;
+                    let mut ancestor = relative.as_str();
+                    loop {
+                        kept.insert(ancestor.to_owned());
+                        if ancestor.is_empty() {
+                            break;
+                        }
+                        ancestor = ancestor.rsplit_once('\\').map_or("", |(parent, _)| parent);
+                    }
+                    continue;
+                }
                 if entry.link() {
                     return Err(io::Error::other(format!(
                         "WFX-Verknüpfung im Quellordner: {}",
                         entry.name
                     )));
                 }
-                files::leaf_name(OsStr::new(&entry.name))?;
                 if !names.insert(entry.name.to_lowercase()) {
                     return Err(io::Error::other(format!(
                         "Mehrdeutiger WFX-Name: {}",
                         entry.name
                     )));
                 }
-                let child = if relative.is_empty() {
-                    entry.name
-                } else {
-                    format!("{relative}\\{}", entry.name)
-                };
                 check_tree_item(plan.len() + children.len(), depth + 1)?;
                 children.push(TreeEntry {
                     relative: child,
@@ -725,7 +965,11 @@ fn tree_plan(
         }
         index += 1;
     }
-    Ok(plan)
+    Ok(TreePlan {
+        entries: plan,
+        kept,
+        ignored,
+    })
 }
 
 fn read_tree(
@@ -736,6 +980,16 @@ fn read_tree(
 ) -> io::Result<()> {
     // Plan the entire source before creating a target that might alias the source.
     let plan = tree_plan(library, root, true, unicode)?;
+    read_tree_plan(library, root, target, unicode, plan)
+}
+
+fn read_tree_plan(
+    library: &Library,
+    root: &str,
+    target: TreeTarget<'_>,
+    unicode: bool,
+    plan: Vec<TreeEntry>,
+) -> io::Result<()> {
     let staging = if let TreeTarget::Remote(root) = target {
         prepare_target(library, root, unicode)?;
         Some(tempfile::tempdir_in(workspace_file(""))?)
@@ -868,6 +1122,9 @@ fn delete_plan(
                 return Err(io::Error::other("Der WFX-Eintrag hat sich geändert."));
             }
             verify_target(&entry.relative)?;
+            if entry.directory() && !entries(library, OsStr::new(&path), unicode)?.is_empty() {
+                return Err(io::Error::other("Der WFX-Ordner enthält weitere Einträge."));
+            }
             let operation = if entry.directory() {
                 WfxOperation::RemoveDir { path: path.clone() }
             } else {
@@ -893,9 +1150,23 @@ fn remove_downloaded(
     tree: bool,
     unicode: bool,
 ) -> io::Result<()> {
+    remove_downloaded_filtered(library, remote, local, tree, unicode, None)
+}
+
+fn remove_downloaded_filtered(
+    library: &Library,
+    remote: &str,
+    local: &Path,
+    tree: bool,
+    unicode: bool,
+    filter: Option<TreeFilter<'_>>,
+) -> io::Result<()> {
     verify_delete_path(library, remote, tree, unicode)?;
-    let verified = verify_remote_copy(library, remote, local, tree, unicode)?;
+    let mut verified = verify_remote_copy_filtered(library, remote, local, tree, unicode, filter)?;
     verify_delete_path(library, remote, tree, unicode)?;
+    verified
+        .entries
+        .retain(|entry| !verified.kept.contains(&entry.relative));
     delete_plan(library, remote, &verified.entries, unicode, |relative| {
         let (path, metadata) = verified
             .local
@@ -908,6 +1179,7 @@ fn remove_downloaded(
 struct VerifiedCopy {
     entries: Vec<TreeEntry>,
     local: std::collections::HashMap<String, (std::path::PathBuf, fs::Metadata)>,
+    kept: std::collections::HashSet<String>,
 }
 
 fn verify_remote_copy(
@@ -917,7 +1189,18 @@ fn verify_remote_copy(
     tree: bool,
     unicode: bool,
 ) -> io::Result<VerifiedCopy> {
-    let plan = tree_plan(library, remote, tree, unicode)?;
+    verify_remote_copy_filtered(library, remote, local, tree, unicode, None)
+}
+
+fn verify_remote_copy_filtered(
+    library: &Library,
+    remote: &str,
+    local: &Path,
+    tree: bool,
+    unicode: bool,
+    filter: Option<TreeFilter<'_>>,
+) -> io::Result<VerifiedCopy> {
+    let plan = filtered_tree_plan(library, remote, tree, unicode, filter)?.entries;
     let staging = tempfile::tempdir_in(workspace_file(""))?;
     let local_path = |relative: &str| {
         if relative.is_empty() {
@@ -956,17 +1239,26 @@ fn verify_remote_copy(
     }
     let previous: std::collections::HashMap<_, _> = plan
         .iter()
-        .map(|entry| (entry.relative.as_str(), entry.info.fingerprint()))
+        .map(|entry| (entry.relative.as_str(), entry))
         .collect();
-    let current = tree_plan(library, remote, tree, unicode)?;
-    if current.len() != plan.len()
-        || current
-            .iter()
-            .any(|entry| previous.get(entry.relative.as_str()) != Some(&entry.info.fingerprint()))
-    {
+    let current = filtered_tree_plan(library, remote, tree, unicode, filter)?;
+    let kept = current.kept;
+    let current = current.entries;
+    if current.len() != plan.len() {
         return Err(io::Error::other(
-            "WFX-Quelle hat sich während der Prüfung geändert.",
+            "Die Anzahl der WFX-Einträge hat sich während der Prüfung geändert.",
         ));
+    }
+    for entry in &current {
+        if !previous.get(entry.relative.as_str()).is_some_and(|prior| {
+            prior.directory() == entry.directory()
+                && (entry.directory() || prior.info.fingerprint() == entry.info.fingerprint())
+        }) {
+            let path = tree_path(remote, &entry.relative)?;
+            return Err(io::Error::other(format!(
+                "WFX-Eintrag hat sich während der Prüfung geändert: {path}"
+            )));
+        }
     }
     let local_paths: std::collections::HashSet<_> =
         targets.values().map(|(path, _)| path.as_path()).collect();
@@ -990,6 +1282,7 @@ fn verify_remote_copy(
     Ok(VerifiedCopy {
         entries: current,
         local: targets,
+        kept,
     })
 }
 

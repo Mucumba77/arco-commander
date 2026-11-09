@@ -358,6 +358,20 @@ impl App {
         Ok(())
     }
 
+    pub(super) fn connect_deferred_ftp(&mut self, name: &str) -> io::Result<()> {
+        let profile = self
+            .profile
+            .ftp_profiles
+            .get(name)
+            .cloned()
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "FTP-Profil „{name}“ fehlt. Lege es an oder importiere es zuerst."
+                ))
+            })?;
+        self.connect_ftp_profile(name.to_owned(), profile)
+    }
+
     pub(crate) fn mount_ftp(
         &mut self,
         side: usize,
@@ -367,11 +381,23 @@ impl App {
         profile: Option<String>,
     ) -> io::Result<()> {
         let session = Arc::new(connection.authenticate(password)?);
-        let directory = session.initial_directory();
-        let navigation = local.map_or(Navigation::Jump, |local| Navigation::FtpProfile {
-            local,
-            opposite_request: self.panels[1 - side].request,
-        });
+        let deferred = self.panels[side].current().deferred.as_ref();
+        let (directory, navigation) = match deferred {
+            Some(arco_core::profile::VirtualTab::Ftp {
+                profile: saved,
+                url,
+            }) if profile.as_deref() == Some(saved.as_str()) => (
+                session.restore_directory(url.as_deref())?,
+                Navigation::Refresh,
+            ),
+            _ => (
+                session.initial_directory(),
+                local.map_or(Navigation::Jump, |local| Navigation::FtpProfile {
+                    local,
+                    opposite_request: self.panels[1 - side].request,
+                }),
+            ),
+        };
         self.load_location(
             side,
             Location::Ftp(FtpLocation {

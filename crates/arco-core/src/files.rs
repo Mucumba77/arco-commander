@@ -11,7 +11,7 @@ use std::time::SystemTime;
 use tempfile::NamedTempFile;
 use walkdir::WalkDir;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     Directory,
     File,
@@ -90,7 +90,7 @@ impl Entry {
             list_order: 0,
         }
     }
-    pub(crate) fn read(path: PathBuf, name: OsString) -> io::Result<Self> {
+    pub fn read(path: PathBuf, name: OsString) -> io::Result<Self> {
         let meta = fs::symlink_metadata(&path)?;
         Ok(Self::from_metadata(path, name, &meta))
     }
@@ -584,8 +584,12 @@ pub type ResolveConflict<'a> = dyn Fn(FileConflict<'_>) -> io::Result<ConflictDe
 pub struct NtfsCopyOptions {
     pub streams: bool,
     pub permissions: bool,
+    pub owner: bool,
+    pub audit: bool,
     pub hardlinks: bool,
     pub sparse: bool,
+    pub creation_time: bool,
+    pub copy_links: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -929,7 +933,12 @@ fn transfer_item(
     progress: &mut impl FnMut(Progress<'_>),
 ) -> io::Result<(bool, usize)> {
     let destination = target.parent().expect("a transfer target has a directory");
-    let meta = regular_metadata(source)?;
+    let meta = fs::symlink_metadata(source)?;
+    #[cfg(windows)]
+    if operation == Transfer::Copy && policy.ntfs.copy_links && is_link(&meta) {
+        return copy_junction(source, target, &meta, policy, cancel, progress);
+    }
+    let meta = checked_regular_metadata(source, meta)?;
     if policy
         .ignore
         .is_some_and(|ignore| ignore.local(source, meta.is_dir()))
@@ -1075,11 +1084,13 @@ fn transfer_item(
         }
     }
 
+    #[cfg(windows)]
+    native.check_audit_privilege()?;
     let mut skipped = false;
     let mut skipped_files = BTreeSet::new();
     let mut moved_comments = BTreeMap::new();
     #[cfg(windows)]
-    let mut new_directories = BTreeSet::new();
+    let mut new_directories = BTreeMap::new();
     for (from, to, meta) in &plan {
         check_cancel(cancel)?;
         if meta.is_dir() {
@@ -1091,8 +1102,8 @@ fn transfer_item(
                 moved_comments.insert(from, comment);
             }
             #[cfg(windows)]
-            if _created && (policy.ntfs.streams || policy.ntfs.permissions) {
-                new_directories.insert(to);
+            if _created && let Some(identity) = native.directory_identity(to)? {
+                new_directories.insert(to, identity);
             }
         } else {
             ensure_unchanged(from, meta)?;
@@ -1122,16 +1133,17 @@ fn transfer_item(
         }
     }
     for (_from, to, meta) in plan.iter().rev().filter(|(_, _, meta)| meta.is_dir()) {
+        #[cfg(windows)]
+        if let Some(identity) = new_directories.get(to) {
+            ensure_unchanged(_from, meta)?;
+            native.prepare_directory(_from, to, *identity, meta, cancel)?;
+            continue;
+        }
         set_file_times(
             to,
             FileTime::from_last_access_time(meta),
             FileTime::from_last_modification_time(meta),
         )?;
-        #[cfg(windows)]
-        if new_directories.contains(to) {
-            ensure_unchanged(_from, meta)?;
-            native.prepare_directory(_from, to, cancel)?;
-        }
     }
     if operation == Transfer::Move && (!skipped || policy.resolve_conflict.is_some()) {
         check_cancel(cancel)?;
@@ -1175,6 +1187,81 @@ fn transfer_item(
         !skipped && (operation == Transfer::Copy || ignored == 0),
         ignored,
     ))
+}
+
+#[cfg(windows)]
+fn copy_junction(
+    source: &Path,
+    target: &Path,
+    metadata: &Metadata,
+    policy: &TransferPolicy<'_>,
+    cancel: &AtomicBool,
+    progress: &mut impl FnMut(Progress<'_>),
+) -> io::Result<(bool, usize)> {
+    if policy
+        .ignore
+        .is_some_and(|ignore| ignore.local(source, true))
+    {
+        return Ok((false, 1));
+    }
+    if policy.filter.is_some() {
+        // A directory filter matches contents. Junction copies never inspect them.
+        return Ok((false, 0));
+    }
+    let options = policy.ntfs;
+    if options.streams
+        || options.permissions
+        || options.owner
+        || options.audit
+        || options.creation_time
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Die gewählten NTFS-Metadatenoptionen sind für Verzeichnisjunctions nicht verfügbar.",
+        ));
+    }
+    let junction = crate::native_copy::junction::Junction::open(source)?;
+    let target = match fs::symlink_metadata(target) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => target.to_path_buf(),
+        Err(error) => return Err(error),
+        Ok(existing) => {
+            let decision = if let Some(resolve) = policy.resolve_conflict {
+                resolve(FileConflict {
+                    source,
+                    target,
+                    source_metadata: metadata,
+                    target_metadata: &existing,
+                })?
+            } else {
+                policy.conflict.into()
+            };
+            check_cancel(cancel)?;
+            match decision {
+                ConflictDecision::Apply(Conflict::Skip) => return Ok((false, 0)),
+                ConflictDecision::Apply(Conflict::Rename) => unused_copy_name(target, cancel)?,
+                ConflictDecision::RenameTo(name) => target.with_file_name(leaf_name(&name)?),
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!(
+                            "Eine Verzeichnisjunction benötigt einen freien Zielnamen: {}",
+                            target.display()
+                        ),
+                    ));
+                }
+            }
+        }
+    };
+    progress(Progress {
+        path: source,
+        copied: 0,
+        total: 0,
+    });
+    junction.copy_to(&target, cancel)?;
+    if let Some(prepare) = policy.descriptions {
+        crate::descriptions::copy_entry(source, &target, prepare)?;
+    }
+    Ok((true, 0))
 }
 
 #[cfg(test)]
@@ -1384,6 +1471,8 @@ fn copy_file_content(
     if !append && _native.try_link(&input, source, meta, target, previous, cancel)? {
         return Ok(());
     }
+    #[cfg(windows)]
+    _native.check_audit_privilege()?;
     let mut temp = NamedTempFile::new_in(parent)?;
     if append && let Some(previous) = previous {
         copy_snapshot_to(target, previous, &mut temp, cancel)?;
@@ -1430,9 +1519,9 @@ fn copy_file_content(
     if append && let Some(previous) = previous {
         ensure_unchanged(target, previous)?;
         let existing = open_for_read(target)?;
-        _native.prepare(&existing, target, temp.path(), cancel)?;
+        _native.prepare(&existing, target, (temp.path(), temp.as_file()), cancel)?;
     } else {
-        _native.prepare(&input, source, temp.path(), cancel)?;
+        _native.prepare(&input, source, (temp.path(), temp.as_file()), cancel)?;
     }
     set_file_handle_times(
         temp.as_file(),
@@ -1440,6 +1529,17 @@ fn copy_file_content(
         Some(FileTime::from_last_modification_time(meta)),
     )?;
     let published = publish_checked(temp, target, previous, cancel)?;
+    #[cfg(windows)]
+    _native.copy_basic_attributes(
+        &published,
+        meta,
+        if append {
+            previous.unwrap_or(meta)
+        } else {
+            meta
+        },
+    )?;
+    #[cfg(not(windows))]
     published.set_permissions(meta.permissions())?;
     #[cfg(windows)]
     if !append {
@@ -1504,7 +1604,10 @@ fn create_transfer_directory(path: &Path) -> io::Result<bool> {
 }
 
 pub fn regular_metadata(path: &Path) -> io::Result<Metadata> {
-    let meta = fs::symlink_metadata(path)?;
+    checked_regular_metadata(path, fs::symlink_metadata(path)?)
+}
+
+fn checked_regular_metadata(path: &Path, meta: Metadata) -> io::Result<Metadata> {
     if is_link(&meta) || !(meta.is_file() || meta.is_dir()) {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,

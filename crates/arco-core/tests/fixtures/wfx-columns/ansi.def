@@ -1,0 +1,9 @@
+EXPORTS
+FsInit=FxInit
+FsFindFirst=FxFindFirst
+FsFindNext=FxFindNext
+FsFindClose=FxFindClose
+FsContentGetSupportedField=FxFields
+FsContentGetDefaultSortOrder=FxSort
+FsContentGetValue=FxValue
+FsContentGetDefaultView=FxDefaultView

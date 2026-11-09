@@ -151,6 +151,7 @@ impl TransferTask {
 struct Running {
     description: String,
     local: Option<(TransferTask, Arc<AtomicBool>)>,
+    ftp_draft: Option<PathBuf>,
 }
 
 type TransferWork = Box<dyn FnOnce(JobContext) -> io::Result<Outcome> + Send>;
@@ -160,6 +161,7 @@ enum QueuedTransfer {
     Virtual {
         label: String,
         refresh: bool,
+        ftp_draft: Option<PathBuf>,
         work: TransferWork,
     },
 }
@@ -488,8 +490,12 @@ impl App {
         self.ui().set_ntfs_draft(NtfsDraft {
             streams: options.streams,
             permissions: options.permissions,
+            owner: options.owner,
+            audit: options.audit,
             hardlinks: options.hardlinks,
             sparse: options.sparse,
+            creation_time: options.creation_time,
+            copy_links: options.copy_links,
         });
         self.dialog(
             "ntfs-options",
@@ -513,8 +519,12 @@ impl App {
         draft.transfer_ntfs = files::NtfsCopyOptions {
             streams: options.streams,
             permissions: options.permissions,
+            owner: options.owner,
+            audit: options.audit,
             hardlinks: options.hardlinks,
             sparse: options.sparse,
+            creation_time: options.creation_time,
+            copy_links: options.copy_links,
         };
         match draft.save(&self.profile_path) {
             Ok(()) => {
@@ -581,10 +591,45 @@ impl App {
         if let Err(error) = self.enqueue_work(QueuedTransfer::Virtual {
             label: label.into(),
             refresh,
+            ftp_draft: None,
             work: Box::new(work),
         }) {
             self.status(error.to_string());
         }
+    }
+
+    pub(super) fn enqueue_ftp_upload(
+        &mut self,
+        label: String,
+        path: PathBuf,
+        work: impl FnOnce(JobContext) -> io::Result<Outcome> + Send + 'static,
+    ) -> io::Result<()> {
+        self.enqueue_work(QueuedTransfer::Virtual {
+            label,
+            refresh: false,
+            ftp_draft: Some(path),
+            work: Box::new(work),
+        })
+    }
+
+    pub(super) fn ftp_upload_running(&self, path: &Path) -> bool {
+        self.transfers
+            .current
+            .as_ref()
+            .and_then(|job| job.ftp_draft.as_deref())
+            == Some(path)
+    }
+
+    pub(super) fn ftp_upload_pending(&self, path: &Path) -> bool {
+        self.ftp_upload_running(path) || self.transfers.waiting.iter().any(|(_, task)| {
+            matches!(task, QueuedTransfer::Virtual { ftp_draft: Some(draft), .. } if draft == path)
+        })
+    }
+
+    pub(super) fn remove_waiting_ftp_uploads(&mut self, paths: &[PathBuf]) {
+        self.transfers.waiting.retain(|(_, task)| {
+            !matches!(task, QueuedTransfer::Virtual { ftp_draft: Some(draft), .. } if paths.contains(draft))
+        });
     }
 
     fn enqueue_work(&mut self, task: QueuedTransfer) -> io::Result<()> {
@@ -625,11 +670,13 @@ impl App {
             QueuedTransfer::Virtual {
                 label,
                 refresh,
+                ftp_draft,
                 work,
             } => {
                 self.transfers.current = Some(Running {
                     description: label.clone(),
                     local: None,
+                    ftp_draft,
                 });
                 let description = label.clone();
                 self.start_job(&label, refresh, move |job| {
@@ -652,10 +699,24 @@ impl App {
                             },
                         ),
                     };
-                    if let (Some(log), Outcome::Report(_, report)) = (log, &mut outcome)
-                        && let Err(error) = write_log(&log, &description, report)
-                    {
-                        report.errors.push(format!("Transferprotokoll · {error}"));
+                    if let Some(log) = log {
+                        match &mut outcome {
+                            Outcome::Report(_, report) => {
+                                if let Err(error) = write_log(&log, &description, report) {
+                                    report.errors.push(format!("Transferprotokoll · {error}"));
+                                }
+                            }
+                            Outcome::FtpEditUploaded(_, log_error) => {
+                                let report = TransferReport {
+                                    completed: 1,
+                                    ..Default::default()
+                                };
+                                if let Err(error) = write_log(&log, &description, &report) {
+                                    *log_error = Some(error.to_string());
+                                }
+                            }
+                            _ => (),
+                        }
                     }
                     Ok(outcome)
                 });
@@ -667,6 +728,7 @@ impl App {
         self.transfers.current = Some(Running {
             description: task.describe(),
             local: Some((task.clone(), paused.clone())),
+            ftp_draft: None,
         });
         let rate = self.profile.transfer_rate_kib;
         self.start_job(task.label(), true, move |job| {

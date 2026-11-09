@@ -18,6 +18,8 @@ encoding_rs = "0.8"
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 regex = "1"
 rtf-grimoire = "0.2"
+serde.workspace = true
+serde_json.workspace = true
 slint.workspace = true
 tempfile.workspace = true
 zeroize = "1"

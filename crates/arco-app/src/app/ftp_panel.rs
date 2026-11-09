@@ -227,6 +227,10 @@ impl App {
         let Some((session, _)) = self.ftp_endpoint() else {
             return;
         };
+        if self.ftp_session_upload_running(&session) {
+            self.status("Beende zuerst die aktive FTP-Rückübertragung im Transfermanager.");
+            return;
+        }
         if self
             .ftp
             .as_ref()
@@ -260,7 +264,7 @@ impl App {
                         tab.set_lock(TabLock::Unlocked);
                     }
                     tab.change_location(&Location::Local(tab.path.clone()), None);
-                    tab.volume.clear();
+                    tab.space = None;
                     tab.populate(Vec::new(), self.profile.show_hidden, String::new());
                     tab.loaded = false;
                     reload |= index == panel.tab;
