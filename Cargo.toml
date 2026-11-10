@@ -7,6 +7,7 @@ resolver = "3"
 version = "1.0.0"
 edition = "2024"
 rust-version = "1.93"
+license = "MIT"
 
 [workspace.dependencies]
 arco-core = { path = "crates/arco-core" }

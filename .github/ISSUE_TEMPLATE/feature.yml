@@ -1,0 +1,23 @@
+name: Funktion vorschlagen
+description: Einen Arbeitsablauf oder eine Verbesserung für Arco Commander vorschlagen
+labels: [enhancement]
+body:
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Arbeitsablauf
+      description: Welche Aufgabe möchtest du erledigen und wo hakt es aktuell?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Gewünschtes Verhalten
+      description: Beschreibe, woran man eine fertige Umsetzung erkennen würde.
+    validations:
+      required: true
+  - type: input
+    id: reference
+    attributes:
+      label: Referenz in der Funktionsmatrix oder in Total Commander
+      description: Falls vorhanden, nenne die Matrix-ID, den Befehl oder den Menüpfad.

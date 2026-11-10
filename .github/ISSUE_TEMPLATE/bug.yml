@@ -1,0 +1,33 @@
+name: Fehler melden
+description: Ein reproduzierbares Problem in Arco Commander beschreiben
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Arco-Version
+      description: Die Versionsnummer steht unter Hilfe → Über Arco Commander.
+      placeholder: "1.0.0"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows-Version
+      placeholder: "Windows 11 24H2, x64"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Schritte zum Nachstellen
+      description: Beschreibe die Ausgangssituation und die verwendete Aktion.
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Erwartetes und tatsächliches Verhalten
+      description: Ergänze relevante Fehlermeldungen oder Screenshots. Entferne persönliche Daten aus Anhängen.
+    validations:
+      required: true

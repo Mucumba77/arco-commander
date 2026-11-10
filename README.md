@@ -3,6 +3,8 @@
 Arco Commander ist ein Zwei-Fenster-Dateimanager für Windows, geschrieben in Rust und inspiriert von Norton Commander und Total Commander. Die Desktop-Oberfläche verwendet Slint.
 
 [![Neueste Version](https://img.shields.io/github/v/release/Mucumba77/arco-commander)](https://github.com/Mucumba77/arco-commander/releases/latest)
+[![Windows CI](https://github.com/Mucumba77/arco-commander/actions/workflows/windows-ci.yml/badge.svg?branch=main)](https://github.com/Mucumba77/arco-commander/actions/workflows/windows-ci.yml)
+[![MIT-Lizenz](https://img.shields.io/badge/Lizenz-MIT-blue)](LICENSE)
 [![Made with Slint](https://raw.githubusercontent.com/slint-ui/slint/master/logo/MadeWithSlint-logo-whitebg.png)](https://slint.dev/)
 
 ## Download
@@ -290,3 +292,11 @@ Die Referenz bleibt Total Commander 11.58.1 für Windows. Die Funktionsparität 
 - [Funktionsmatrix und Prüffälle](FUNKTIONSMATRIX.md)
 - [Änderungen pro Version](CHANGELOG.md)
 - [Herstellerhilfe und Referenzindex für Dialoge, Einstellungen und Tastatur](TOTAL-COMMANDER-REFERENZ.md)
+
+## Mitwirken
+
+Beiträge auf Deutsch und Englisch sind willkommen. Die [Beitragsanleitung](CONTRIBUTING.md) erklärt den Windows-Build, Tests und Pull Requests. Für Fehler und Ideen gibt es [Issue-Vorlagen](https://github.com/Mucumba77/arco-commander/issues/new/choose). Sicherheitsmeldungen laufen über den [privaten Meldeweg](SECURITY.md).
+
+## Lizenz
+
+Der Arco-eigene Code steht unter der [MIT-Lizenz](LICENSE). Abhängigkeiten wie Slint und der WebView2-Loader stehen unter ihren eigenen Lizenzbedingungen. Das Windows-Paket enthält die zugehörigen Drittanbieterhinweise.
