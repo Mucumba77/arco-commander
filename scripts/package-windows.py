@@ -26,6 +26,9 @@ DOCS = (
     "LICENSE", "README.md", "CONTRIBUTING.md", "SECURITY.md",
     "CHANGELOG.md", "FUNKTIONSMATRIX.md", "PLAN.md",
     "TOTAL-COMMANDER-REFERENZ.md", "docs/RELEASE.md",
+    "docs/branding/arco-commander.svg",
+    "docs/screenshots/hauptfenster.jpg", "docs/screenshots/kopierfortschritt.jpg",
+    "docs/screenshots/lister.jpg",
 )
 LICENSE_NAME = re.compile(
     r"^(?:licen[cs]es?|copying|copyright|notice|unlicense|third[-_ ]?party[-_ ]?notices)(?:$|[_. -])",
