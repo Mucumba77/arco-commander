@@ -1,0 +1,44 @@
+import { Button } from "std-widgets.slint";
+
+export global Colors {
+    in property <bool> light;
+    in property <bool> custom-selection;
+    in property <bool> custom-cursor;
+    in property <color> selection-light;
+    in property <color> selection-dark;
+    in property <color> cursor-light;
+    in property <color> cursor-dark;
+    out property <color> background: light ? #e8eff0 : #10181e;
+    out property <color> panel: light ? #f9fcfc : #18232b;
+    out property <color> surface: light ? #f1f6f7 : #212e38;
+    out property <color> edge: light ? #c2d1d5 : #334852;
+    out property <color> accent: light ? #046d5c : #72e3c6;
+    out property <color> text: light ? #1b2f3a : #eff6f7;
+    out property <color> muted: light ? #49616d : #a8bdc7;
+    out property <color> selection: custom-selection ? (light ? selection-light : selection-dark) : (light ? #cfece4 : #264b48);
+    out property <color> cursor: custom-cursor ? (light ? cursor-light : cursor-dark) : (light ? #e3f3ef : #293d45);
+    out property <color> folder: light ? #8c5105 : #efbc78;
+    out property <color> media: light ? #604395 : #c6aefa;
+    out property <color> archive: light ? #8e3a55 : #f1a2b7;
+}
+
+export component NavButton inherits Button {
+    in property <string> label;
+    accessible-label: root.label;
+    width: 34px;
+    icon-size: 16px;
+    colorize-icon: true;
+    Tooltip { text: @markdown("\{root.label}"); }
+}
+
+export component ActionButton inherits Button {
+    colorize-icon: true;
+    icon-size: 17px;
+}
+
+export component DetailCell inherits Text {
+    color: Colors.muted;
+    font-size: 12px;
+    vertical-alignment: center;
+    overflow: elide;
+}

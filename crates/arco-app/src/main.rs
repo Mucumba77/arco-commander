@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 
 slint::include_modules!();
 
+const VERSION: &str = concat!("Arco Commander ", env!("CARGO_PKG_VERSION"));
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args_os()
         .nth(1)
@@ -32,8 +34,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some("--help" | "-h" | "/?") => {
                 arco_windows::attach_parent_console_for_help();
                 println!(
-                    "Arco Commander\n  --left PFAD | /L=PFAD\n  --right PFAD | /R=PFAD\n  --portable\n  --profile DATEI\n  --instance NAME"
+                    "{VERSION}\n  --left PFAD | /L=PFAD\n  --right PFAD | /R=PFAD\n  --portable\n  --profile DATEI\n  --instance NAME\n  --version"
                 );
+                return Ok(());
+            }
+            Some("--version" | "-V") => {
+                arco_windows::attach_parent_console_for_help();
+                println!("{VERSION}");
                 return Ok(());
             }
             Some("--left") => paths[0] = Some(next_path(&mut arguments, "--left")?),

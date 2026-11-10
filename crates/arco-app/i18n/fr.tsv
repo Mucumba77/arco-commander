@@ -307,3 +307,145 @@ Ausgewählte Verzeichnisjunctions als Links kopieren	Copier les jonctions de ré
 Plugin-Standardansicht	Vue par défaut du plugin
 Bei WFX gilt ohne Vorzeichen die Plugin-Vorgabe. + sortiert aufsteigend, - absteigend.	Pour WFX, l’absence de signe utilise le réglage du plugin. + trie par ordre croissant, - par ordre décroissant.
 Die angegebene WFX-Spalte fehlt in der Detailansicht.	La colonne WFX indiquée est absente de la vue détaillée.
+Navigation	Navigation
+Öffnen und anzeigen	Ouvrir et afficher
+Erstellen und löschen	Créer et supprimer
+Zwischenablage	Presse-papiers
+Transfers	Transferts
+Eigenschaften und Drucken	Propriétés et impression
+Windows-Aktionen	Actions Windows
+Auswahl nach Maske	Sélection par masque
+Gespeicherte Auswahl	Sélection enregistrée
+Orte und Pfade	Emplacements et chemins
+Ordner-Tabs	Onglets de dossiers
+Suche und Metadaten	Recherche et métadonnées
+Vergleich und Abgleich	Comparer et synchroniser
+Prüfsummen	Sommes de contrôle
+Teilen und Kodieren	Fractionner et encoder
+FTP-Dateioperationen	Opérations de fichiers FTP
+Server-zu-Server (FXP)	De serveur à serveur (FXP)
+Dateisystem-Plugins	Plugins de système de fichiers
+Spalten und Sortierung	Colonnes et tri
+Ordnerbäume	Arborescences de dossiers
+Filter und Zweigansicht	Filtres et vue par branche
+Fenster und Größen	Panneaux et tailles
+Farbschema	Thème de couleurs
+Oberfläche	Interface
+Dateien und Programme	Fichiers et programmes
+Suche und Migration	Recherche et migration
+Befehl oder Tastenkürzel suchen …	Rechercher une commande ou un raccourci …
+Gefundene Befehle	Commandes correspondantes
+Keine passenden Befehle.	Aucune commande correspondante.
+↑ ↓ Auswählen · Enter Ausführen · Esc Schließen	↑ ↓ Sélectionner · Entrée Exécuter · Échap Fermer
+Auftragsfortschritt anzeigen	Afficher la progression de la tâche
+Fortschritt	Progression
+Auftrag läuft …	Tâche en cours …
+Im Hintergrund	Exécuter en arrière-plan
+Derzeit läuft kein Auftrag.	Aucune tâche en cours.
+Abbruch angefordert …	Annulation demandée …
+Bei Namenskonflikten	En cas de conflit de noms
+Archivformat	Format d’archive
+Gespeicherter Suchfilter	Filtre de recherche enregistré
+Option	Option
+Strg	Ctrl
+Umschalt	Maj
+Arco Lister	Arco Lister
+Quelle	Source
+Zielordner	Dossier de destination
+Auswahl ausblenden	Masquer la sélection
+Auswahl anzeigen	Afficher la sélection
+Ausgewählte Quelldateien	Éléments sources sélectionnés
+Markierte Zielordner	Dossiers de destination sélectionnés
+Archivname	Nom de l’archive
+Erweiterte Optionen	Options avancées
+ZIP-/7z-Passwort (optional)	Mot de passe ZIP/7z (facultatif)
+Zielmaske (optional)	Masque de destination (facultatif)
+Vorheriger Abschnitt	Section précédente
+Nächster Abschnitt	Section suivante
+Hexansicht umschalten	Basculer l’affichage hexadécimal
+Weitersuchen	Rechercher le suivant
+Ab Anfang suchen	Rechercher depuis le début
+Anzeigeoptionen	Options d’affichage
+Zeilenumbruch	Retour à la ligne
+Dateiinhalt	Contenu du fichier
+Bildvorschau	Aperçu de l’image
+Aktueller Transfer	Transfert en cours
+Kein Transfer aktiv.	Aucun transfert en cours.
+Pausiert	En pause
+Pausieren	Mettre en pause
+Transfer abbrechen	Annuler le transfert
+Wartende Aufträge	Tâches en attente
+Keine Transfers vorgemerkt.	Aucun transfert en attente.
+Dateikommentare mitführen	Conserver les commentaires des fichiers
+Letzte Kopie erneut versuchen	Réessayer la dernière copie
+Geschwindigkeit und Protokoll	Vitesse et journal
+Ausgewählte Einträge	Éléments sélectionnés
+Endgültig löschen	Supprimer définitivement
+In den Papierkorb	Mettre à la corbeille
+Kein weiterer Treffer.	Aucun autre résultat.
+Allgemein	Général
+Layout	Disposition
+Dateiübertragung	Transferts de fichiers
+Programme	Programmes
+Übertragungsrate (KiB/s)	Débit de transfert (Kio/s)
+0 bedeutet unbegrenzt.	Saisissez 0 pour un débit illimité.
+Protokolldatei	Fichier journal
+Absoluter Pfad (optional)	Chemin absolu (facultatif)
+NTFS-Kopieroptionen	Options de copie NTFS
+Benannte Datenströme übernehmen	Conserver les flux de données nommés
+Zugriffsrechte der Quelle übernehmen	Conserver les autorisations de la source
+Besitzer übernehmen	Conserver le propriétaire
+Überwachungs-ACL übernehmen (erfordert Windows-Recht)	Conserver la liste d’audit (privilège Windows requis)
+Hardlink-Gruppen im Ziel erhalten	Conserver les groupes de liens physiques à destination
+Nur belegte Bereiche von Sparse-Dateien kopieren	Copier uniquement les plages allouées des fichiers creux
+Externer Editor	Éditeur externe
+Absoluter Programmpfad	Chemin absolu du programme
+Bei leerem Feld verwendet Arco den Windows-Editor.	Laissez vide pour utiliser le Bloc-notes Windows.
+Pfad zu es.exe	Chemin vers es.exe
+Bei leerem Feld verwendet Arco die interne Suche.	Laissez vide pour utiliser la recherche intégrée.
+Bestätigen	Confirmer
+Auswahl bestätigen	Confirmer la sélection
+Erstellen	Créer
+Erzeugen	Générer
+Teilen	Fractionner
+Verbinden	Connecter
+Algorithmus	Algorithme
+Einstellungen angewendet.	Paramètres appliqués.
+Einstellungen gelten für diese Sitzung.	Paramètres appliqués à cette session.
+Wähle eine verfügbare Oberflächensprache.	Choisissez une langue d’interface disponible.
+Editor benötigt einen absoluten Programmpfad	Saisissez le chemin absolu de l’éditeur.
+Gib den absoluten EXE-Pfad für Everything an.	Saisissez le chemin absolu de l’exécutable Everything.
+Gib einen absoluten Pfad zur Protokolldatei ein.	Saisissez le chemin absolu du fichier journal.
+Gib eine ganze Zahl für KiB/s ein.	Saisissez un nombre entier en Kio/s.
+Gespeicherte FTP-Verbindungen	Connexions FTP enregistrées
+Neu	Nouveau
+Importieren	Importer
+Profilname	Nom du profil
+FTP-Adresse und Startordner	Adresse FTP et dossier de départ
+Verschlüsselungsmodus	Mode de chiffrement
+Explizites FTPS (FTP mit TLS)	FTPS explicite (FTP avec TLS)
+Implizites FTPS	FTPS implicite
+Klartext-FTP	FTP en clair
+Format der Verzeichnisliste	Format de liste des dossiers
+Automatisch	Automatique
+Nur MLSD	MLSD uniquement
+Nur LIST (Unix / IIS)	LIST uniquement (Unix / IIS)
+Klartext-FTP überträgt Passwort und Dateien unverschlüsselt.	Le FTP en clair transmet le mot de passe et les fichiers sans chiffrement.
+Für implizites FTPS ftps:// verwenden.	Utilisez ftps:// pour le FTPS implicite.
+Für explizites FTPS ftp:// verwenden.	Utilisez ftp:// pour le FTPS explicite.
+Lokaler Startordner	Dossier de départ local
+Proxy	Proxy
+HTTP-/SOCKS-Proxy (optional)	Proxy HTTP/SOCKS (facultatif)
+Aktiver FTP-Modus (Direktverbindung)	Mode FTP actif (connexion directe)
+Benutzername	Nom d’utilisateur
+Leer für anonyme Anmeldung	Laissez vide pour une connexion anonyme
+FTP-Passwort	Mot de passe FTP
+Neues Passwort (optional)	Nouveau mot de passe (facultatif)
+Passwort zum Speichern	Mot de passe à enregistrer
+Passwort in Windows-Anmeldeinformationen speichern	Enregistrer le mot de passe dans le Gestionnaire d’identifiants Windows
+Arco Commander · Dateisuche	Arco Commander · Recherche de fichiers
+Dateisuche	Recherche de fichiers
+Suchtreffer und Lesefehler	Résultats et erreurs de lecture
+Suchlauf abbrechen	Annuler la recherche
+Suchkriterien	Critères de recherche
+Über Arco Commander	À propos d’Arco Commander

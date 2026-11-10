@@ -56,15 +56,14 @@ mod windows {
             path: &Path,
             preview: Rich,
             light: bool,
-            embedded: bool,
         ) -> io::Result<Self> {
-            let (parent, initial) = window
+            let parent = window
                 .with_winit_window(|native| {
                     let RawWindowHandle::Win32(handle) = native.window_handle().ok()?.as_raw()
                     else {
                         return None;
                     };
-                    Some((Parent(handle), bounds(native)))
+                    Some(Parent(handle))
                 })
                 .flatten()
                 .ok_or_else(|| io::Error::other("Kein Windows-Fenster für den Lister."))?;
@@ -77,11 +76,7 @@ mod windows {
                 .with_visible(false)
                 .with_autoplay(false)
                 .with_browser_accelerator_keys(false)
-                .with_bounds(if embedded {
-                    wry::Rect::default()
-                } else {
-                    initial
-                })
+                .with_bounds(wry::Rect::default())
                 .with_navigation_handler(|url| url == VIEW_URL || url == "about:blank")
                 .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
                 .with_custom_protocol("arco-lister".into(), move |_, request| {
@@ -133,19 +128,10 @@ mod windows {
                 .map_err(io::Error::other)?;
             }
             webview.load_url(VIEW_URL).map_err(io::Error::other)?;
-            if !embedded {
-                webview.set_visible(true).map_err(io::Error::other)?;
-            }
             Ok(Self {
                 webview,
                 _profile: profile,
             })
-        }
-
-        pub(crate) fn resize(&self, window: &slint::Window) {
-            if let Some(bounds) = window.with_winit_window(bounds) {
-                let _ = self.webview.set_bounds(bounds);
-            }
         }
 
         pub(crate) fn place(&self, rect: Option<[i32; 4]>) -> io::Result<()> {
@@ -164,19 +150,6 @@ mod windows {
             self.webview
                 .set_visible(rect.is_some())
                 .map_err(io::Error::other)
-        }
-    }
-
-    fn bounds(window: &slint::winit_030::winit::window::Window) -> wry::Rect {
-        let size = window.inner_size();
-        let controls = (60.0 * window.scale_factor()).ceil() as u32;
-        wry::Rect {
-            position: wry::dpi::PhysicalPosition::new(0, 0).into(),
-            size: wry::dpi::PhysicalSize::new(
-                size.width,
-                size.height.saturating_sub(controls).max(1),
-            )
-            .into(),
         }
     }
 
@@ -250,13 +223,7 @@ pub(in crate::app) struct Surface;
 
 #[cfg(not(windows))]
 impl Surface {
-    pub(in crate::app) fn new(
-        _: &slint::Window,
-        _: &Path,
-        _: Rich,
-        _: bool,
-        _: bool,
-    ) -> io::Result<Self> {
+    pub(in crate::app) fn new(_: &slint::Window, _: &Path, _: Rich, _: bool) -> io::Result<Self> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "Die formatierte Vorschau benötigt Windows und WebView2.",

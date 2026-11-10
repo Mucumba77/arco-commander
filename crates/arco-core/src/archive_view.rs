@@ -1085,8 +1085,26 @@ pub fn extract(
     password: Option<&str>,
     cancel: &AtomicBool,
 ) -> io::Result<usize> {
+    extract_with_progress(file, destination, selection, password, cancel, |_| {})
+}
+
+pub fn extract_with_progress(
+    file: &Path,
+    destination: &Path,
+    selection: &Selection,
+    password: Option<&str>,
+    cancel: &AtomicBool,
+    progress: impl FnMut(files::Progress<'_>),
+) -> io::Result<usize> {
     if is_zip_container(file) {
-        archives::extract_zip_selection(file, destination, password, Some(selection), cancel)
+        archives::extract_zip_selection_with_progress(
+            file,
+            destination,
+            password,
+            Some(selection),
+            cancel,
+            progress,
+        )
     } else if seven_zip::can_read(file) {
         seven_zip::extract(file, destination, Some(selection), password, cancel)
     } else if let Some(format) = legacy_archives::Format::of(file) {
@@ -1125,8 +1143,25 @@ pub fn extract_all(
     password: Option<&str>,
     cancel: &AtomicBool,
 ) -> io::Result<usize> {
+    extract_all_with_progress(file, destination, password, cancel, |_| {})
+}
+
+pub fn extract_all_with_progress(
+    file: &Path,
+    destination: &Path,
+    password: Option<&str>,
+    cancel: &AtomicBool,
+    progress: impl FnMut(files::Progress<'_>),
+) -> io::Result<usize> {
     if is_zip_container(file) {
-        archives::extract_zip(file, destination, password, cancel)
+        archives::extract_zip_selection_with_progress(
+            file,
+            destination,
+            password,
+            None,
+            cancel,
+            progress,
+        )
     } else if seven_zip::can_read(file) {
         seven_zip::extract(file, destination, None, password, cancel)
     } else if let Some(format) = legacy_archives::Format::of(file) {

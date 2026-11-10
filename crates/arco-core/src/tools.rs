@@ -1014,9 +1014,18 @@ pub(crate) fn publish_parts(
 }
 
 pub(crate) fn copy_cancelled(
+    reader: impl Read,
+    writer: impl Write,
+    cancel: &AtomicBool,
+) -> io::Result<u64> {
+    copy_cancelled_with_progress(reader, writer, cancel, |_| {})
+}
+
+pub(crate) fn copy_cancelled_with_progress(
     mut reader: impl Read,
     mut writer: impl Write,
     cancel: &AtomicBool,
+    mut progress: impl FnMut(u64),
 ) -> io::Result<u64> {
     let mut total = 0;
     let mut buffer = vec![0; 128 * 1024];
@@ -1028,6 +1037,7 @@ pub(crate) fn copy_cancelled(
         }
         writer.write_all(&buffer[..count])?;
         total += count as u64;
+        progress(total);
     }
 }
 

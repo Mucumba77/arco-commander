@@ -1,6 +1,6 @@
 use super::{App, Event, JobContext, Outcome};
 use crate::commands::{Dialog, Pending, TransferDestination};
-use crate::{FileConflictData, NtfsDraft, display_path, human_size};
+use crate::{FileConflictData, display_path, human_size};
 use arco_core::advanced_search::Query;
 use arco_core::files::{self, Conflict, ConflictDecision, FileConflict, Transfer, TransferReport};
 use arco_core::ignore::IgnoreList;
@@ -89,7 +89,6 @@ impl TransferTask {
         };
         let mut last = Instant::now() - Duration::from_secs(1);
         let mut previous_bytes = 0;
-        let label = self.label();
         let mut progress = |target: &Path, progress: files::Progress<'_>| {
             let delta = progress.copied.saturating_sub(previous_bytes);
             previous_bytes = progress.copied;
@@ -112,13 +111,18 @@ impl TransferTask {
             }
             if last.elapsed() >= Duration::from_millis(100) {
                 last = Instant::now();
-                job.progress(format!(
-                    "{label} · {} → {} · {} / {}",
-                    display_path(progress.path),
-                    display_path(target),
-                    human_size(progress.copied),
-                    human_size(progress.total)
-                ));
+                job.progress_bytes(
+                    format!(
+                        "{} · {}\n→ {}\n{} / {}",
+                        crate::locale::tr("Aktuelle Datei"),
+                        display_path(progress.path),
+                        display_path(target),
+                        human_size(progress.copied),
+                        human_size(progress.total)
+                    ),
+                    progress.copied,
+                    progress.total,
+                );
             }
         };
         match &self.destination {
@@ -485,57 +489,6 @@ pub(super) struct Queue {
 }
 
 impl App {
-    pub(crate) fn open_ntfs_options(&mut self) {
-        let options = self.profile.transfer_ntfs;
-        self.ui().set_ntfs_draft(NtfsDraft {
-            streams: options.streams,
-            permissions: options.permissions,
-            owner: options.owner,
-            audit: options.audit,
-            hardlinks: options.hardlinks,
-            sparse: options.sparse,
-            creation_time: options.creation_time,
-            copy_links: options.copy_links,
-        });
-        self.dialog(
-            "ntfs-options",
-            Pending::NtfsOptions,
-            Dialog {
-                title: "NTFS-Kopieroptionen",
-                ..Default::default()
-            },
-        );
-    }
-
-    pub(super) fn apply_ntfs_options(&mut self, options: NtfsDraft) {
-        if !matches!(&self.pending, Some(Pending::NtfsOptions)) {
-            return;
-        }
-        if !self.save_profile {
-            self.status("Das Arco-Profil ist nicht verfügbar.");
-            return;
-        }
-        let mut draft = self.profile_snapshot();
-        draft.transfer_ntfs = files::NtfsCopyOptions {
-            streams: options.streams,
-            permissions: options.permissions,
-            owner: options.owner,
-            audit: options.audit,
-            hardlinks: options.hardlinks,
-            sparse: options.sparse,
-            creation_time: options.creation_time,
-            copy_links: options.copy_links,
-        };
-        match draft.save(&self.profile_path) {
-            Ok(()) => {
-                self.profile = draft;
-                self.close_dialog();
-                self.status("NTFS-Kopieroptionen gespeichert.");
-            }
-            Err(error) => self.status(error.to_string()),
-        }
-    }
-
     pub(super) fn open_next_transfer_conflict(&mut self) {
         if matches!(&self.pending, Some(Pending::TransferConflict(ticket)) if ticket.cancelled()) {
             self.close_dialog();
@@ -679,7 +632,7 @@ impl App {
                     ftp_draft,
                 });
                 let description = label.clone();
-                self.start_job(&label, refresh, move |job| {
+                self.start_progress_job(&label, refresh, String::new(), move |job| {
                     let mut outcome = match work(job) {
                         Ok(outcome) => outcome,
                         Err(error) if error.kind() == io::ErrorKind::Interrupted => {
@@ -731,7 +684,7 @@ impl App {
             ftp_draft: None,
         });
         let rate = self.profile.transfer_rate_kib;
-        self.start_job(task.label(), true, move |job| {
+        self.start_progress_job(task.label(), true, task.describe(), move |job| {
             let mut report = match task.run(&job, &paused, rate) {
                 Ok(report) => report,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => TransferReport {
@@ -784,51 +737,34 @@ impl App {
     }
 
     pub(crate) fn open_transfer_manager(&mut self) {
-        let mut body = String::new();
-        if let Some(running) = &self.transfers.current {
-            writeln!(
-                body,
-                "{} · {}",
-                if running
-                    .local
-                    .as_ref()
-                    .is_some_and(|(_, paused)| paused.load(Ordering::Relaxed))
-                {
-                    "Pausiert"
-                } else {
-                    "Aktiv"
-                },
-                running.description
-            )
-            .unwrap();
-        }
-        for (index, (_, task)) in self.transfers.waiting.iter().enumerate() {
-            writeln!(body, "{}. {}", index + 1, task.describe()).unwrap();
-        }
-        if body.is_empty() {
-            body.push_str("Keine Transfers vorgemerkt.");
-        }
+        self.publish_transfer_manager();
         self.dialog(
-            "review",
+            "transfer-manager",
             Pending::TransferManager,
-            Dialog {
-                title: "Transfermanager",
-                value: &body,
-                options: &[
-                    "Pause oder Fortsetzen",
-                    "Aktiven Transfer abbrechen",
-                    "Wartende Aufträge bearbeiten",
-                    "Letzte fehlgeschlagene Kopie erneut versuchen",
-                    "Geschwindigkeit und Protokoll",
-                    if self.profile.transfer_descriptions {
-                        "Dateikommentare mitführen · an"
-                    } else {
-                        "Dateikommentare mitführen · aus"
-                    },
-                ],
-                ..Default::default()
-            },
+            Dialog::default(),
         );
+    }
+
+    pub(super) fn publish_transfer_manager(&self) {
+        let running = self.transfers.current.as_ref();
+        let local = running.and_then(|running| running.local.as_ref());
+        let waiting = self
+            .transfers
+            .waiting
+            .iter()
+            .map(|(_, task)| task.describe());
+        self.ui()
+            .set_transfer_manager_data(crate::TransferManagerData {
+                active: running
+                    .map(|running| running.description.as_str())
+                    .unwrap_or_default()
+                    .into(),
+                pausable: local.is_some(),
+                paused: local.is_some_and(|(_, paused)| paused.load(Ordering::Relaxed)),
+                waiting: super::strings(waiting),
+                retry: self.transfers.retry.is_some(),
+                descriptions: self.profile.transfer_descriptions,
+            });
     }
 
     pub(crate) fn transfer_manager_action(&mut self, action: usize) -> io::Result<()> {
@@ -846,34 +782,14 @@ impl App {
                 } else {
                     "Transfer fortgesetzt."
                 });
+                self.open_transfer_manager();
             }
             1 => {
                 if self.transfers.current.is_none() {
                     return Err(io::Error::other("Kein Transfer aktiv."));
                 }
                 self.cancel();
-            }
-            2 => {
-                let ids: Vec<_> = self.transfers.waiting.iter().map(|(id, _)| *id).collect();
-                let names: Vec<_> = self
-                    .transfers
-                    .waiting
-                    .iter()
-                    .map(|(_, task)| task.describe())
-                    .collect();
-                if ids.is_empty() {
-                    return Err(io::Error::other("Keine Transfers vorgemerkt."));
-                }
-                let options: Vec<_> = names.iter().map(String::as_str).collect();
-                self.dialog(
-                    "confirm",
-                    Pending::TransferQueueChoose(ids),
-                    Dialog {
-                        title: "Wartende Aufträge",
-                        options: &options,
-                        ..Default::default()
-                    },
-                );
+                self.open_transfer_manager();
             }
             3 => {
                 let task = self.transfers.retry.clone().ok_or_else(|| {
@@ -881,20 +797,7 @@ impl App {
                 })?;
                 self.enqueue_transfer(task)?;
             }
-            4 => {
-                let log = self
-                    .profile
-                    .transfer_log
-                    .as_deref()
-                    .map(display_path)
-                    .unwrap_or_default();
-                let rate = self.profile.transfer_rate_kib.to_string();
-                self.dialog("input", Pending::TransferSettings, Dialog {
-                    title: "Transfereinstellungen", description: "0 bedeutet unbegrenzt. Ein leerer Protokollpfad deaktiviert das Protokoll.",
-                    value: &rate, second: &log, placeholder: "KiB/s für neue Aufträge",
-                    second_placeholder: "Absoluter Protokollpfad", ..Default::default()
-                });
-            }
+            4 => self.open_settings(super::SettingsPage::Transfers),
             5 => {
                 if !self.save_profile {
                     return Err(io::Error::other("Das Arco-Profil ist nicht verfügbar."));
@@ -904,6 +807,11 @@ impl App {
                 draft.save(&self.profile_path)?;
                 self.profile = draft;
                 self.open_transfer_manager();
+            }
+            6.. => {
+                if let Some((id, _)) = self.transfers.waiting.get(action - 6) {
+                    self.open_queued_transfer(*id);
+                }
             }
             _ => {}
         }
@@ -941,32 +849,6 @@ impl App {
             }
         }
         self.open_transfer_manager();
-    }
-
-    pub(crate) fn save_transfer_settings(&mut self, rate: &str, log: &str) -> io::Result<()> {
-        if !self.save_profile {
-            return Err(io::Error::other("Das Arco-Profil ist nicht verfügbar."));
-        }
-        let mut draft = self.profile_snapshot();
-        draft.transfer_rate_kib = rate
-            .trim()
-            .parse()
-            .map_err(|_| io::Error::other("Gib eine ganze Zahl für KiB/s ein."))?;
-        let log = log.trim().trim_matches('"');
-        draft.transfer_log = (!log.is_empty()).then(|| PathBuf::from(log));
-        if draft
-            .transfer_log
-            .as_ref()
-            .is_some_and(|path| !path.is_absolute() || path.file_name().is_none())
-        {
-            return Err(io::Error::other(
-                "Gib einen absoluten Pfad zur Protokolldatei ein.",
-            ));
-        }
-        draft.save(&self.profile_path)?;
-        self.profile = draft;
-        self.status("Transfereinstellungen gespeichert.");
-        Ok(())
     }
 }
 

@@ -305,16 +305,11 @@ impl State {
                 let label = content.label();
                 self.raw_path = Some(path.clone());
                 window.set_has_rich(true);
-                match surface::Surface::new(
-                    window.window(),
-                    &path,
-                    content,
-                    window.get_light(),
-                    false,
-                ) {
+                match surface::Surface::new(window.window(), &path, content, window.get_light()) {
                     Ok(surface) => {
                         self.surface = Some(surface);
                         window.set_status(format!("{label} · Formatierte Vorschau").into());
+                        self.position_surface(window);
                     }
                     Err(error) => window.set_status(error.to_string().into()),
                 }
@@ -332,6 +327,20 @@ impl State {
                 None => Loaded::NoMatch,
             })
         });
+    }
+
+    fn position_surface(&self, window: &ListerWindow) {
+        if let Some(surface) = &self.surface {
+            let bounds = window.get_rich_bounds();
+            let scale = window.window().scale_factor();
+            let rect = (bounds.width > 0.0 && bounds.height > 0.0).then(|| {
+                [bounds.x, bounds.y, bounds.width, bounds.height]
+                    .map(|value| (value * scale).round() as i32)
+            });
+            if let Err(error) = surface.place(rect) {
+                window.set_status(error.to_string().into());
+            }
+        }
     }
 
     fn cancel(&mut self) {
@@ -407,7 +416,10 @@ impl App {
             }
         };
         window.set_lister_title(format!("Arco Lister – {title}").into());
-        window.set_light(self.ui().global::<Colors>().get_light());
+        window.set_file_title(title.into());
+        let light = self.ui().global::<Colors>().get_light();
+        window.set_light(light);
+        window.global::<Colors>().set_light(light);
         window.set_encodings(strings([
             "Automatisch",
             "UTF-8",
@@ -481,19 +493,26 @@ impl App {
                 });
             }
         });
+        let weak = window.as_weak();
+        let controls = Rc::downgrade(&state);
+        window.on_rich_resized(move || {
+            if let (Some(window), Some(state)) = (weak.upgrade(), controls.upgrade())
+                && let Ok(state) = state.try_borrow()
+            {
+                state.position_surface(&window);
+            }
+        });
         #[cfg(windows)]
         {
             use slint::winit_030::{EventResult, WinitWindowAccessor, winit::event::WindowEvent};
+            let weak = window.as_weak();
             let controls = Rc::downgrade(&state);
-            window.window().on_winit_window_event(move |window, event| {
-                if matches!(
-                    event,
-                    WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. }
-                ) && let Some(state) = controls.upgrade()
+            window.window().on_winit_window_event(move |_, event| {
+                if matches!(event, WindowEvent::ScaleFactorChanged { .. })
+                    && let (Some(window), Some(state)) = (weak.upgrade(), controls.upgrade())
                     && let Ok(state) = state.try_borrow()
-                    && let Some(surface) = &state.surface
                 {
-                    surface.resize(window);
+                    state.position_surface(&window);
                 }
                 EventResult::Propagate
             });

@@ -194,13 +194,15 @@ impl App {
             check_archive(&archive)?;
             let target = std::fs::canonicalize(target)?;
             let staging = tempfile::tempdir_in(&target)?;
-            archive_view::extract(
+            archive_view::extract_with_progress(
                 &archive.file,
                 staging.path(),
                 &selection,
                 password.as_deref().or(archive.password()),
                 &job.cancel,
+                job.archive_progress(),
             )?;
+            job.progress(format!("→ {}", display_path(&target)));
             check_archive(&archive)?;
             let mut paths = std::fs::read_dir(staging.path())?
                 .map(|entry| entry.map(|entry| entry.path()))
@@ -419,17 +421,22 @@ impl App {
         password: &str,
     ) {
         let password = (!password.is_empty()).then(|| zeroize::Zeroizing::new(password.to_owned()));
-        self.start_job("Bearbeite Archiv …", true, move |job| {
-            check_archive(&archive)?;
-            let secret = password
-                .as_ref()
-                .map(|value| value.as_str())
-                .or(archive.password());
-            let count = archive_view::edit(&archive.file, edit, secret, &job.cancel)?;
-            Ok(Outcome::Notice(format!(
-                "{count} Archiveinträge bearbeitet."
-            )))
-        });
+        self.start_progress_job(
+            "Bearbeite Archiv …",
+            true,
+            display_path(&archive.file),
+            move |job| {
+                check_archive(&archive)?;
+                let secret = password
+                    .as_ref()
+                    .map(|value| value.as_str())
+                    .or(archive.password());
+                let count = archive_view::edit(&archive.file, edit, secret, &job.cancel)?;
+                Ok(Outcome::Notice(format!(
+                    "{count} Archiveinträge bearbeitet."
+                )))
+            },
+        );
     }
 
     pub(super) fn show_staged_preview(
@@ -451,7 +458,10 @@ impl App {
                 let ui = self.ui();
                 self.preview_image_path = Some(path);
                 ui.set_dialog_title(title.into());
-                ui.set_dialog_description("".into());
+                ui.set_dialog_description(
+                    format!("{} × {} px", image.width(), image.height()).into(),
+                );
+                ui.set_viewer_notice("".into());
                 ui.set_dialog_options(strings(std::iter::empty::<&str>()));
                 ui.set_viewer_image(preview::to_slint(&image));
                 ui.set_dialog_kind("image".into());

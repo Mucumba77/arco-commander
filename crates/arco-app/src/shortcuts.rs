@@ -56,6 +56,7 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("Ctrl+C", "clipboard-copy"),
     ("Ctrl+D", "favorites"),
     ("Ctrl+F", "ftp-profiles"),
+    ("Ctrl+J", "job-details"),
     ("Ctrl+K", "palette"),
     ("Ctrl+L", "space-usage"),
     ("Ctrl+Shift+L", "focus-command-line"),
@@ -181,7 +182,13 @@ const EXTRA_COMMANDS: &[(&str, &str)] = &[
 ];
 
 pub fn commands() -> impl Iterator<Item = (&'static str, &'static str)> {
-    COMMANDS.iter().chain(EXTRA_COMMANDS).copied()
+    let mut seen = std::collections::HashSet::new();
+    COMMANDS
+        .iter()
+        .chain(EXTRA_COMMANDS)
+        .copied()
+        .chain(crate::app::menu::actions())
+        .filter(move |(_, key)| seen.insert(*key))
 }
 
 pub fn label(id: &str) -> Option<&'static str> {
@@ -272,6 +279,7 @@ pub fn display(chord: &str) -> String {
             "NumpadComma" => "Num ,",
             _ => part,
         })
+        .map(crate::locale::tr)
         .collect::<Vec<_>>()
         .join("+")
 }
@@ -461,6 +469,7 @@ pub fn available_during_edit(chord: &str, command: &str) -> bool {
             | "focus-path"
             | "focus-command-line"
             | "clear-filter"
+            | "job-details"
             | "palette"
             | "settings"
             | "help"

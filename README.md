@@ -2,13 +2,28 @@
 
 Arco Commander ist ein Zwei-Fenster-Dateimanager für Windows, geschrieben in Rust und inspiriert von Norton Commander und Total Commander. Die Desktop-Oberfläche verwendet Slint.
 
+[![Neueste Version](https://img.shields.io/github/v/release/Mucumba77/arco-commander)](https://github.com/Mucumba77/arco-commander/releases/latest)
+[![Made with Slint](https://raw.githubusercontent.com/slint-ui/slint/master/logo/MadeWithSlint-logo-whitebg.png)](https://slint.dev/)
+
 ## Download
 
-Die [Vorabversion für Windows 10 22H2 und Windows 11 (x64)](https://github.com/Mucumba77/arco-commander/releases/tag/v0.1.0-preview.2) ist ein portables ZIP. Entpacke es vollständig und starte `arco-commander.exe`. Die Vorabversion ist unsigniert. Der manuelle Fenstertest und der Test auf Windows 10 stehen aus.
+[**Arco Commander 1.0.0 für Windows x64 herunterladen**](https://github.com/Mucumba77/arco-commander/releases/download/v1.0.0/arco-commander-v1.0.0-windows-x64.zip)
 
-## Entwicklungsstand
+Das portable ZIP ist für Windows 10 22H2 und Windows 11 vorgesehen. Entpacke es vollständig und starte `arco-commander.exe`. Das Paket enthält beide Plugin-Hosts, das ZIP-SFX-Modul, die Kurzanleitung und Drittanbieterhinweise. Es ist unsigniert. [Release-Hinweise und SHA-256-Prüfsumme](https://github.com/Mucumba77/arco-commander/releases/tag/v1.0.0)
 
-Unter **Konfigurieren → Sprache** stehen Deutsch, Englisch und Französisch zur Auswahl. Die Sprache wird im Profil gespeichert. Einige Fachdialoge und Meldungen verwenden weiterhin Deutsch.
+Für ein Update entpacke die neue Version in einen eigenen Ordner. Arco verwendet das bisherige Standardprofil weiter. Bei Verwendung von `--portable` übernimm zusätzlich die Profildatei `arco-commander.json` aus dem bisherigen Programmordner.
+
+## Bedienung und Funktionen
+
+Die Menüleiste gruppiert Hauptaktionen und verwandte Befehle in Untermenüs. Symbole und aktuell belegte Tastenkürzel stehen direkt am Befehl. Die **Befehlspalette** in der Werkzeugleiste und unter **Werkzeuge** öffnet sich standardmäßig mit `Strg+K`. Sie filtert nach Befehlsnamen, Tastenkürzeln und unterstützten `cm_`-Aliasen. Mit Pfeiltasten und Enter führst du einen Treffer aus.
+
+Kopieren, Verschieben und Archivaufträge öffnen eine Fortschrittskarte. Lokale Dateikopien zeigen den Stand der aktuellen Datei. Beim regulären ZIP-Pack- und Entpackvorgang zeigt der Balken den Stand der unkomprimierten Daten. Aufträge ohne messbare Gesamtmenge zeigen einen animierten Balken. **Im Hintergrund** blendet die Karte aus. Über **Fortschritt** in der Statusleiste oder `Strg+J` öffnest du sie wieder. Konflikt- und Anmeldedialoge erscheinen vor der Karte.
+
+Die Masken für Kopieren, Verschieben und Packen zeigen Quelle und Ziel vor dem Start. Zielmasken und gespeicherte Suchfilter stehen bei Transfers unter **Erweiterte Optionen**. Im Transfermanager sind der aktuelle und die wartenden Aufträge getrennt. Wähle einen wartenden Eintrag aus, um seine Reihenfolge zu ändern oder ihn zu entfernen.
+
+Die interne Vorschau und der separate Lister verwenden dieselbe Werkzeugleiste für Text und Hex. Die Lupe setzt die Suche fort. Kodierung, Zeilenumbruch und Byte-Offset stehen unter **Anzeigeoptionen**. Bilder lassen sich einpassen oder in Originalgröße betrachten.
+
+Unter **Konfigurieren → Einstellungen → Allgemein** stehen Deutsch, Englisch und Französisch zur Auswahl. Die Sprache wird im Profil gespeichert. Einige Fachdialoge und Meldungen verwenden weiterhin Deutsch.
 
 Die Oberfläche hat zwei kompakte, virtualisierte Dateilisten mit getrennten Spalten für Name, Erweiterung, Größe, Datum und Attribute. Die sortierte Spalte zeigt ihre Richtung an. Laufwerk und Speicherplatz stehen oberhalb der anklickbaren Pfadsegmente. `[..]` führt in den Elternordner und gehört nie zu einer Dateiauswahl. Das Verhältnis der beiden Fenster lässt sich an der Trennlinie ziehen und wird im Profil gespeichert.
 
@@ -58,7 +73,7 @@ Ein gespeicherter WFX-Pfad braucht ein aktiviertes Plugin mit passendem Namen. F
 
 Im Menü **Ansicht** lassen sich markierte lokale Ordner als Hintergrund-Tabs auf beiden Seiten öffnen. **Kürzlich geschlossene Tabs** zeigt die letzten 20 einzeln geschlossenen Tabs der laufenden Sitzung und öffnet sie auf ihrer ursprünglichen Seite.
 
-**Konfigurieren → Einstellungen** enthält Seiten für Layout, Bedienung und Tastatur. Im Layout lassen sich die obere und mittlere Symbolleiste, Laufwerksbuttons und Laufwerksliste, Pfad, Verlauf und Spaltenüberschriften separat ein- und ausblenden. `Alt+D` öffnet die Pfadeingabe auch bei ausgeblendetem Pfad. Unter Bedienung lässt sich einstellen, ob die Ziffernblock-Auswahl Ordner einbezieht.
+**Konfigurieren → Einstellungen** bündelt Sprache und Farbschema, Layout, Bedienung, Tastatur, Schrift, Dateiübertragung und externe Programme. Die direkten Menüeinträge für Sprache, NTFS-Kopieroptionen, Editor und Everything öffnen die jeweilige Einstellungsseite. Im Layout lassen sich die obere und mittlere Symbolleiste, Laufwerksbuttons und Laufwerksliste, Pfad, Verlauf und Spaltenüberschriften separat ein- und ausblenden. `Alt+D` öffnet die Pfadeingabe auch bei ausgeblendetem Pfad. Unter Bedienung lässt sich einstellen, ob die Ziffernblock-Auswahl Ordner einbezieht.
 
 Unter **Konfigurieren → Eigene Buttonbars** bearbeitest du die obere oder mittlere Leiste. Eine Schaltfläche enthält Beschriftung, Symbol und einen Arco-Befehl, einen unterstützten `cm_`-Aufruf oder einen absoluten EXE-Pfad. Beim Symbol kannst du auch den absoluten Pfad einer Bilddatei bis 1 MiB eintragen. Für eine EXE steht jedes Argument auf einer eigenen Zeile. Das separate Feld **Startordner** akzeptiert einen absoluten Pfad oder einen Pfad relativ zum Quellordner. Beim `.bar`-Import werden Pfadvariablen in EXE- und Startpfaden aufgelöst. Die Leisten übernehmen die gespeicherte Reihenfolge. Eine leere Liste zeigt die Standardbelegung. [Total-Commander-Buttonbar](https://ghisler.ch/wiki/index.php?title=Button_bar)
 
@@ -94,7 +109,7 @@ Bei lokalen Zielen kannst du einen eigenen Dateinamen eingeben. Arco prüft den 
 
 Bei WFX-Zielen kannst du überspringen, unter einem freien Namen speichern oder eine einzelne Datei überschreiben. Für das Überschreiben benötigt das Plugin die jeweiligen Kopier-, Umbenenn- und Löschoperationen. Arco bereitet die neue Datei unter einem Zwischennamen vor und prüft Größe, Änderungszeit und Attribute der bisherigen Zieldatei vor der Veröffentlichung. Falls die Veröffentlichung scheitert, versucht Arco die bisherige Zieldatei wiederherzustellen und nennt im Fehlerfall die relevanten Sicherungs- und Zwischenpfade. Für kleine FTP-, WFX- und Archiveinträge bis 64 KiB kann der Dialog eine Text- oder Hexvorschau laden. [WFX-SDK](https://www.ghisler.com/plugins.htm)
 
-Unter **Konfigurieren → NTFS-Kopieroptionen** legst du für neue lokale F5- und F6-Aufträge getrennt fest, ob Arco benannte Datenströme, Quell-DACL, Besitzer, Überwachungs-ACL, Hardlink-Gruppen, Sparse-Bereiche und die Erstellungszeit übernimmt. DOS-Attribute werden für Dateien und neu angelegte Ordner übernommen. Die Option **Ausgewählte Verzeichnisjunctions als Links kopieren** gilt für F5 zu einem lokalen Zielordner mit freiem Zielnamen. Sie kopiert direkt ausgewählte Junctions zu lokalen Laufwerkspfaden, ohne deren Zielverzeichnis zu durchlaufen. Zusätzliche Metadatenoptionen für Datenströme, Rechte, Besitzer, Überwachungs-ACL und Erstellungszeit gelten für reguläre Kopien. Arco setzt kopierte ACLs geschützt, damit Zielvererbung ihren Inhalt nicht ändert. Verschieben per nativer Umbenennung behält die vorhandenen Dateimetadaten. [Windows-Dateiströme](https://learn.microsoft.com/en-us/windows/win32/fileio/file-streams), [Sparse-Dateien](https://learn.microsoft.com/en-us/windows/win32/fileio/sparse-files)
+Unter **Konfigurieren → Einstellungen → Dateiübertragung** legst du für neue lokale F5- und F6-Aufträge getrennt fest, ob Arco benannte Datenströme, Quell-DACL, Besitzer, Überwachungs-ACL, Hardlink-Gruppen, Sparse-Bereiche und die Erstellungszeit übernimmt. DOS-Attribute werden für Dateien und neu angelegte Ordner übernommen. Die Option **Ausgewählte Verzeichnisjunctions als Links kopieren** gilt für F5 zu einem lokalen Zielordner mit freiem Zielnamen. Sie kopiert direkt ausgewählte Junctions zu lokalen Laufwerkspfaden, ohne deren Zielverzeichnis zu durchlaufen. Zusätzliche Metadatenoptionen für Datenströme, Rechte, Besitzer, Überwachungs-ACL und Erstellungszeit gelten für reguläre Kopien. Arco setzt kopierte ACLs geschützt, damit Zielvererbung ihren Inhalt nicht ändert. Verschieben per nativer Umbenennung behält die vorhandenen Dateimetadaten. [Windows-Dateiströme](https://learn.microsoft.com/en-us/windows/win32/fileio/file-streams), [Sparse-Dateien](https://learn.microsoft.com/en-us/windows/win32/fileio/sparse-files)
 
 Für Überwachungs-ACLs benötigt der Auftrag `SeSecurityPrivilege`. Beim Setzen eines fremden Besitzers kann Windows `SeRestorePrivilege` verlangen. Fehlt ein erforderliches Recht, meldet Arco den Fehler im Transferbericht. Bei Dateiübertragungen wird die vorbereitete Kopie erst nach erfolgreicher Übernahme der gewählten Sicherheitsdaten veröffentlicht. [SACL-Zugriffsrecht](https://learn.microsoft.com/en-us/windows/win32/secauthz/sacl-access-right), [Windows-Privilegien](https://learn.microsoft.com/en-us/windows/win32/secauthz/privilege-constants)
 
@@ -265,10 +280,13 @@ Copy-Item target\i686-pc-windows-msvc\debug\arco-plugin-host.exe target\debug\ar
 `--portable` legt das Sitzungsprofil neben der ausführbaren Datei ab. `--instance NAME` verwendet ein eigenes Profil für eine benannte Instanz. Mit `--profile <Datei>` lässt sich der Speicherort direkt wählen. Das Profil speichert Position, Größe und Maximierung des Hauptfensters pro Anzeige.
 Beim direkten Start von `arco-commander.exe` erscheint das Windows-Anwendungsfenster.
 
+Die Programmversion steht unter **Hilfe → Über Arco Commander** und lässt sich über `arco-commander.exe --version` abfragen. Für ein Distributionspaket verwende die [Windows-Release-Anleitung](docs/RELEASE.md).
+
 ## Funktionsparität
 
 Die Referenz bleibt Total Commander 11.58.1 für Windows. Die Funktionsparität ist noch offen. Dazu zählen unter anderem vollständige Plugin-Operationen und eingebettete Plugin-Vorschau, weitere Archivformate und Archivbearbeitung, vollständige TC-Befehls- und Profilkompatibilität, physische USB- und LPT-Transfers sowie Teile der Windows-Shell-Integration. Die Matrix führt die einzelnen Varianten und die bisher geprüften Abläufe auf.
 
 - [Entwicklungsplan](PLAN.md)
 - [Funktionsmatrix und Prüffälle](FUNKTIONSMATRIX.md)
+- [Änderungen pro Version](CHANGELOG.md)
 - [Herstellerhilfe und Referenzindex für Dialoge, Einstellungen und Tastatur](TOTAL-COMMANDER-REFERENZ.md)

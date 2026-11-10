@@ -1,0 +1,489 @@
+import { Button, ComboBox, LineEdit, ScrollView, TextEdit } from "std-widgets.slint";
+import { Colors, ActionButton, NavButton } from "dialog-theme.slint";
+
+export component DialogHeading {
+    in property <image> icon;
+    in property <string> title;
+    in property <string> subtitle;
+    in property <bool> wrap-subtitle: true;
+    min-height: 42px;
+
+    HorizontalLayout {
+        spacing: 11px;
+        Rectangle {
+            width: 42px;
+            height: 42px;
+            background: Colors.cursor;
+            border-radius: 10px;
+            Image { width: 21px; height: 21px; source: root.icon; colorize: Colors.accent; }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 3px;
+            Text { text: root.title; color: Colors.text; font-size: 20px; font-weight: 650; overflow: elide; }
+            if root.subtitle != "" : Text {
+                text: root.subtitle;
+                color: Colors.muted;
+                font-size: 12px;
+                wrap: root.wrap-subtitle ? word-wrap : no-wrap;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+export component FieldLabel inherits Text {
+    color: Colors.text;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+component Note inherits Text {
+    color: Colors.muted;
+    font-size: 12px;
+    wrap: word-wrap;
+}
+
+export component FileOperationCard inherits Rectangle {
+    in property <string> title;
+    in property <string> selection-count;
+    in property <string> selected-paths;
+    in property <string> initial-value;
+    in property <string> archive-target;
+    in property <bool> pack;
+    in property <bool> multiple;
+    in property <bool> move-files;
+    in property <[string]> choices;
+    in property <[string]> filters;
+    in property <string> confirm-label;
+    in-out property <int> filter-index;
+    out property <length> content-height: heading.preferred-height + fields.preferred-height + footer.preferred-height
+        + layout.padding * 2 + layout.spacing * 3 + divider.height;
+    property <bool> selection-open: true;
+    property <bool> advanced;
+    callback start(string, string, int);
+    callback dismiss();
+
+    background: Colors.panel;
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: Colors.edge;
+
+    function submit() {
+        root.start(root.multiple ? "" : main-input.text, secondary.text, choice.current-index);
+    }
+
+    layout := VerticalLayout {
+        padding: 18px;
+        spacing: 12px;
+        heading := DialogHeading {
+            icon: root.pack ? @image-url("icons/archive.svg") : root.move-files ? @image-url("icons/move.svg") : @image-url("icons/copy.svg");
+            title: root.title;
+            subtitle: root.selection-count;
+        }
+        ScrollView {
+            vertical-stretch: 1;
+            viewport-width: self.visible-width;
+            viewport-height: fields.preferred-height;
+            fields := VerticalLayout {
+                width: parent.visible-width;
+                padding-right: 3px;
+                spacing: 9px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    FieldLabel { text: @tr("Quelle"); vertical-alignment: center; }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: root.selection-open ? @tr("Auswahl ausblenden") : @tr("Auswahl anzeigen");
+                        clicked => { root.selection-open = !root.selection-open; }
+                    }
+                }
+                if root.selection-open : TextEdit {
+                    height: 83px;
+                    read-only: true;
+                    wrap: no-wrap;
+                    text: root.selected-paths;
+                    accessible-label: @tr("Ausgewählte Quelldateien");
+                }
+                Rectangle { height: 1px; background: Colors.edge; }
+                FieldLabel { text: @tr("Zielordner"); }
+                if root.pack : Note { text: root.archive-target; }
+                if root.multiple : TextEdit {
+                    height: 80px;
+                    read-only: true;
+                    wrap: no-wrap;
+                    text: root.initial-value;
+                    accessible-label: @tr("Markierte Zielordner");
+                }
+                if root.pack : FieldLabel { text: @tr("Archivname"); }
+                main-input := LineEdit {
+                    visible: !root.multiple;
+                    text: root.initial-value;
+                    accessible-label: root.pack ? @tr("Archivname") : @tr("Zielordner");
+                    accepted => { root.submit(); }
+                }
+                FieldLabel { text: root.pack ? @tr("Archivformat") : @tr("Bei Namenskonflikten"); }
+                choice := ComboBox {
+                    model: root.choices;
+                    current-index: 0;
+                    accessible-label: root.pack ? @tr("Archivformat") : @tr("Bei Namenskonflikten");
+                }
+                if !root.pack && (!root.multiple || root.filters.length > 0) : HorizontalLayout {
+                    Rectangle { horizontal-stretch: 1; }
+                    ActionButton {
+                        icon: @image-url("icons/settings.svg");
+                        text: @tr("Erweiterte Optionen");
+                        checkable: true;
+                        checked: root.advanced;
+                        clicked => { root.advanced = !root.advanced; }
+                    }
+                }
+                if root.pack || (root.advanced && !root.multiple) : FieldLabel {
+                    text: root.pack ? @tr("ZIP-/7z-Passwort (optional)") : @tr("Zielmaske (optional)");
+                }
+                secondary := LineEdit {
+                    visible: root.pack || (root.advanced && !root.multiple);
+                    placeholder-text: root.pack ? @tr("ZIP-/7z-Passwort (optional)") : "*.bak";
+                    accessible-label: root.pack ? @tr("ZIP-/7z-Passwort (optional)") : @tr("Zielmaske (optional)");
+                    input-type: root.pack ? password : text;
+                    accepted => { root.submit(); }
+                }
+                if root.advanced && !root.pack && root.filters.length > 0 : FieldLabel { text: @tr("Gespeicherter Suchfilter"); }
+                if root.advanced && !root.pack && root.filters.length > 0 : ComboBox {
+                    model: root.filters;
+                    current-index <=> root.filter-index;
+                    accessible-label: @tr("Gespeicherter Suchfilter");
+                }
+            }
+        }
+        divider := Rectangle { height: 1px; background: Colors.edge; }
+        footer := HorizontalLayout {
+            spacing: 8px;
+            Rectangle { horizontal-stretch: 1; }
+            Button { text: @tr("Abbrechen"); clicked => { root.dismiss(); } }
+            start-button := Button { text: root.confirm-label; primary: true; clicked => { root.submit(); } }
+        }
+    }
+
+    init => {
+        if (root.multiple) { start-button.focus(); }
+        else { main-input.focus(); }
+    }
+}
+
+export component ReaderPane inherits FocusScope {
+    in property <bool> busy;
+    in property <bool> hex;
+    in property <bool> can-back;
+    in property <bool> can-next;
+    in property <int> encoding;
+    in property <[string]> encodings;
+    in property <string> body;
+    property <bool> tools-open;
+    property <bool> wrap-text: true;
+    callback navigate(string);
+    callback control(int, string, int);
+
+    key-pressed(event) => {
+        if (event.modifiers.control && !event.modifiers.alt && event.text == "f") {
+            search.focus();
+            return accept;
+        }
+        if (event.modifiers.alt && !root.busy && event.text == Key.LeftArrow && root.can-back) {
+            root.navigate("viewer-back");
+            return accept;
+        }
+        if (event.modifiers.alt && !root.busy && event.text == Key.RightArrow && root.can-next) {
+            root.navigate("viewer-next");
+            return accept;
+        }
+        return reject;
+    }
+
+    VerticalLayout {
+        spacing: 8px;
+        Rectangle {
+            height: 44px;
+            background: Colors.surface;
+            border-radius: 8px;
+            HorizontalLayout {
+                padding: 5px;
+                spacing: 5px;
+                NavButton { icon: @image-url("icons/back.svg"); label: @tr("Vorheriger Abschnitt"); enabled: !root.busy && root.can-back; clicked => { root.navigate("viewer-back"); } }
+                NavButton { icon: @image-url("icons/forward.svg"); label: @tr("Nächster Abschnitt"); enabled: !root.busy && root.can-next; clicked => { root.navigate("viewer-next"); } }
+                ActionButton {
+                    icon: @image-url("icons/code.svg");
+                    text: "Hex";
+                    accessible-label: @tr("Hexansicht umschalten");
+                    checkable: true;
+                    checked: root.hex;
+                    enabled: !root.busy;
+                    clicked => { root.navigate("viewer-toggle"); }
+                }
+                search := LineEdit {
+                    horizontal-stretch: 1;
+                    placeholder-text: root.hex ? @tr("Hexbytes suchen") : @tr("Text suchen");
+                    accessible-label: self.placeholder-text;
+                    enabled: !root.busy;
+                    accepted => { if self.text != "" { root.control(2, self.text, 0); } }
+                }
+                NavButton { icon: @image-url("icons/search.svg"); label: @tr("Weitersuchen"); enabled: !root.busy && search.text != ""; clicked => { root.control(2, search.text, 0); } }
+                NavButton { icon: @image-url("icons/refresh.svg"); label: @tr("Ab Anfang suchen"); enabled: !root.busy && search.text != ""; clicked => { root.control(3, search.text, 0); } }
+                NavButton { icon: @image-url("icons/settings.svg"); label: @tr("Anzeigeoptionen"); checkable: true; checked: root.tools-open; clicked => { root.tools-open = !root.tools-open; } }
+            }
+        }
+        if root.tools-open : HorizontalLayout {
+            spacing: 6px;
+            ComboBox {
+                model: root.encodings;
+                current-index: root.encoding;
+                enabled: !root.busy && !root.hex;
+                accessible-label: @tr("Textkodierung");
+                selected => { root.control(0, "", self.current-index); }
+            }
+            Button {
+                text: @tr("Zeilenumbruch");
+                checkable: true;
+                checked: root.wrap-text;
+                enabled: !root.hex;
+                clicked => { root.wrap-text = !root.wrap-text; }
+            }
+            position := LineEdit {
+                horizontal-stretch: 1;
+                placeholder-text: @tr("Byte-Offset (dezimal oder 0x)");
+                accessible-label: self.placeholder-text;
+                enabled: !root.busy;
+                accepted => { if self.text != "" { root.control(1, self.text, 0); } }
+            }
+            Button { text: @tr("Springen"); enabled: !root.busy && position.text != ""; clicked => { root.control(1, position.text, 0); } }
+        }
+        reader := TextEdit {
+            vertical-stretch: 1;
+            read-only: true;
+            font-family: "Consolas";
+            font-size: 14px;
+            wrap: !root.hex && root.wrap-text ? word-wrap : no-wrap;
+            accessible-label: @tr("Dateiinhalt");
+            text: root.body;
+        }
+    }
+    init => { reader.focus(); }
+}
+
+export component ImagePane inherits Rectangle {
+    in property <image> picture;
+    in property <int> zoom;
+    background: Colors.background;
+    border-radius: 9px;
+    clip: true;
+    if root.zoom == 0 : Image {
+        width: parent.width - 16px;
+        height: parent.height - 16px;
+        x: 8px;
+        y: 8px;
+        image-fit: contain;
+        source: root.picture;
+    }
+    if root.zoom > 0 : ScrollView {
+        viewport-width: max(self.visible-width, root.picture.width * root.zoom * 1px / 100);
+        viewport-height: max(self.visible-height, root.picture.height * root.zoom * 1px / 100);
+        Image {
+            width: root.picture.width * root.zoom * 1px / 100;
+            height: root.picture.height * root.zoom * 1px / 100;
+            x: max(0px, (parent.viewport-width - self.width) / 2);
+            y: max(0px, (parent.viewport-height - self.height) / 2);
+            image-fit: contain;
+            source: root.picture;
+        }
+    }
+}
+
+export struct TransferManagerData {
+    active: string,
+    pausable: bool,
+    paused: bool,
+    waiting: [string],
+    retry: bool,
+    descriptions: bool,
+}
+
+export component TransferManagerCard inherits Rectangle {
+    in property <TransferManagerData> data;
+    in property <bool> cancelling;
+    callback choose(int);
+    callback dismiss();
+
+    background: Colors.panel;
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: Colors.edge;
+
+    VerticalLayout {
+        padding: 18px;
+        spacing: 10px;
+        DialogHeading {
+            icon: @image-url("icons/move.svg");
+            title: @tr("Transfermanager");
+        }
+        Rectangle {
+            background: Colors.surface;
+            border-radius: 8px;
+            VerticalLayout {
+                padding: 10px;
+                spacing: 6px;
+                FieldLabel { text: @tr("Aktueller Transfer"); }
+                Note {
+                    text: root.data.active == "" ? @tr("Kein Transfer aktiv.") : root.data.active;
+                }
+                if root.data.active != "" : HorizontalLayout {
+                    spacing: 6px;
+                    if root.data.paused : FieldLabel { text: @tr("Pausiert"); vertical-alignment: center; }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: root.data.paused ? @tr("Fortsetzen") : @tr("Pausieren");
+                        enabled: root.data.pausable && !root.cancelling;
+                        clicked => { root.choose(0); }
+                    }
+                    Button {
+                        text: @tr("Transfer abbrechen");
+                        enabled: !root.cancelling;
+                        clicked => { root.choose(1); }
+                    }
+                }
+            }
+        }
+        FieldLabel { text: @tr("Wartende Aufträge") + "  ·  \{root.data.waiting.length}"; }
+        if root.data.waiting.length == 0 : Note { text: @tr("Keine Transfers vorgemerkt."); }
+        if root.data.waiting.length > 0 : ScrollView {
+            vertical-stretch: 1;
+            viewport-width: self.visible-width;
+            VerticalLayout {
+                width: parent.visible-width;
+                spacing: 4px;
+                for entry[i] in root.data.waiting : Button {
+                    text: "\{i + 1}.  \{entry}";
+                    clicked => { root.choose(6 + i); }
+                }
+            }
+        }
+        if root.data.waiting.length == 0 : Rectangle { vertical-stretch: 1; }
+        Rectangle { height: 1px; background: Colors.edge; }
+        HorizontalLayout {
+            spacing: 6px;
+            Button {
+                text: @tr("Dateikommentare mitführen");
+                checkable: true;
+                checked: root.data.descriptions;
+                clicked => { root.choose(5); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Button {
+                text: @tr("Letzte Kopie erneut versuchen");
+                enabled: root.data.retry;
+                clicked => { root.choose(3); }
+            }
+        }
+        HorizontalLayout {
+            spacing: 6px;
+            ActionButton {
+                icon: @image-url("icons/settings.svg");
+                text: @tr("Geschwindigkeit und Protokoll");
+                clicked => { root.choose(4); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            close-button := Button { text: @tr("Schließen"); primary: true; clicked => { root.dismiss(); } }
+        }
+    }
+    init => { close-button.focus(); }
+}
+
+export component CompactDialogCard inherits Rectangle {
+    in property <bool> input;
+    in property <int> revision;
+    in property <string> title;
+    in property <string> description;
+    in property <string> value;
+    in property <string> secondary-value;
+    in property <string> label;
+    in property <string> secondary-label;
+    in property <string> options-label;
+    in property <string> confirm-label;
+    in property <bool> secret;
+    in property <bool> secondary-secret;
+    in property <[string]> options;
+    property <string> first: root.value;
+    property <string> second: root.secondary-value;
+    property <int> choice;
+    callback submit(string, string, int);
+    callback dismiss();
+
+    background: Colors.panel;
+    border-radius: 14px;
+    border-width: 1px;
+    border-color: Colors.edge;
+
+    changed revision => {
+        root.first = root.value;
+        root.second = root.secondary-value;
+        root.choice = 0;
+    }
+
+    VerticalLayout {
+        padding: 17px;
+        spacing: 10px;
+        alignment: start;
+        DialogHeading {
+            icon: root.input ? @image-url("icons/edit.svg") : @image-url("icons/check.svg");
+            title: root.title;
+            subtitle: root.description;
+        }
+        if root.input : VerticalLayout {
+            spacing: 4px;
+            if root.label != "" : FieldLabel { text: root.label; }
+            LineEdit {
+                text <=> root.first;
+                input-type: root.secret ? password : text;
+                accessible-label: root.label;
+                accepted => { root.submit(root.first, root.second, root.choice); }
+                init => { self.focus(); }
+            }
+        }
+        if root.input && root.secondary-label != "" : VerticalLayout {
+            spacing: 4px;
+            FieldLabel { text: root.secondary-label; }
+            LineEdit {
+                text <=> root.second;
+                input-type: root.secondary-secret ? password : text;
+                accessible-label: root.secondary-label;
+                accepted => { root.submit(root.first, root.second, root.choice); }
+            }
+        }
+        if root.options.length > 0 : VerticalLayout {
+            spacing: 4px;
+            FieldLabel { text: root.options-label == "" ? @tr("Auswahl") : root.options-label; }
+            ComboBox {
+                model: root.options;
+                current-index <=> root.choice;
+                accessible-label: root.options-label == "" ? @tr("Auswahl") : root.options-label;
+                init => { if (!root.input) { self.focus(); } }
+            }
+        }
+        Rectangle { height: 1px; background: Colors.edge; }
+        HorizontalLayout {
+            spacing: 8px;
+            Rectangle { horizontal-stretch: 1; }
+            Button {
+                text: @tr("Abbrechen");
+                clicked => { root.dismiss(); }
+                init => { if (!root.input && root.options.length == 0) { self.focus(); } }
+            }
+            Button {
+                text: root.confirm-label != "" ? root.confirm-label
+                    : root.options.length > 0 ? @tr("Auswahl bestätigen") : @tr("Bestätigen");
+                primary: true;
+                clicked => { root.submit(root.first, root.second, root.choice); }
+            }
+        }
+    }
+}

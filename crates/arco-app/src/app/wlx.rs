@@ -237,6 +237,7 @@ impl App {
             || ui.get_settings_open()
             || ui.get_drive_side() >= 0
             || !ui.get_dialog_kind().is_empty()
+            || ui.get_job_activity_open()
             || bounds.width < 1.0
             || bounds.height < 1.0
         {
@@ -308,7 +309,7 @@ fn schedule_quick_web(window: slint::Weak<MainWindow>, state: &Rc<RefCell<QuickW
             light,
         } = request;
         let label = rich.label();
-        let result = Surface::new(ui.window(), &path, rich, light, true);
+        let result = Surface::new(ui.window(), &path, rich, light);
         let mut web = state.borrow_mut();
         web.building = false;
         if web.generation == generation && ui.get_quick_open() {

@@ -1,11 +1,11 @@
-use crate::commands::{COMMANDS, Dialog, Pending};
+use crate::commands::{Dialog, Pending};
 use crate::panel::{ArchiveTab, FtpTab, Location, Panel, ShellLocation, Tab};
 use crate::preview;
 use crate::shortcuts;
-use crate::{Colors, MainWindow, SettingsData, display_path};
+use crate::{Colors, MainWindow, SettingsData, display_path, human_size};
 use arco_core::archive_view::{self, Catalog};
 use arco_core::files::{self, Directory, Kind, Transfer, TransferReport};
-use arco_core::profile::{self, LayoutSettings, ListFont, Profile, TabLock, TcImport};
+use arco_core::profile::{self, ListFont, Profile, TabLock, TcImport};
 use arco_core::rename;
 use arco_core::tools::{PreviewEncoding, PreviewMode};
 use arco_windows::DiskSpace;
@@ -38,7 +38,10 @@ mod ftp_profiles;
 mod ftp_sync;
 mod ignore;
 mod keyboard;
+mod settings;
+pub(crate) use settings::SettingsPage;
 mod lister;
+pub(crate) mod menu;
 mod metadata_actions;
 mod packer_profiles;
 mod plugin_files;
@@ -154,6 +157,7 @@ pub enum Outcome {
         page: arco_core::tools::Preview,
     },
     ViewerPage(Viewer, arco_core::tools::Preview),
+    ViewerNotice(String),
     TextCompared(Arc<arco_core::text_compare::Session>, usize, bool),
     BinaryCompared(
         Arc<arco_core::tools::BinaryComparison>,
@@ -175,7 +179,10 @@ enum Event {
         navigation: Navigation,
         directory: io::Result<Box<LoadedDirectory>>,
     },
-    Progress(String),
+    Progress {
+        detail: String,
+        fraction: f32,
+    },
     PluginPrompt(PromptTicket),
     TransferConflict(ConflictTicket),
     WdxValues(wdx::Values),
@@ -294,7 +301,40 @@ pub struct JobContext {
 
 impl JobContext {
     pub fn progress(&self, value: String) {
-        let _ = self.sender.send(Event::Progress(value));
+        self.progress_fraction(value, -1.0);
+    }
+
+    pub fn progress_bytes(&self, detail: String, completed: u64, total: u64) {
+        let fraction = if total == 0 {
+            -1.0
+        } else {
+            (completed.min(total) as f64 / total as f64) as f32
+        };
+        self.progress_fraction(detail, fraction);
+    }
+
+    fn progress_fraction(&self, detail: String, fraction: f32) {
+        let _ = self.sender.send(Event::Progress { detail, fraction });
+    }
+
+    pub fn archive_progress(&self) -> impl FnMut(files::Progress<'_>) + '_ {
+        let interval = std::time::Duration::from_millis(100);
+        let mut last = std::time::Instant::now() - interval;
+        move |progress| {
+            if last.elapsed() >= interval || progress.copied == progress.total {
+                last = std::time::Instant::now();
+                self.progress_bytes(
+                    format!(
+                        "{}\n{} / {}",
+                        display_path(progress.path),
+                        human_size(progress.copied),
+                        human_size(progress.total)
+                    ),
+                    progress.copied,
+                    progress.total,
+                );
+            }
+        }
     }
 }
 
@@ -464,16 +504,7 @@ pub fn run(
             app.borrow_mut().action(name.as_str());
         }
     });
-    let weak = Rc::downgrade(&app);
-    window.on_tool_selected(move |index| {
-        if let Some(app) = weak.upgrade()
-            && let Some((_, command)) = usize::try_from(index.saturating_sub(1))
-                .ok()
-                .and_then(|index| COMMANDS.get(index))
-        {
-            app.borrow_mut().action(command);
-        }
-    });
+    menu::connect(window, &app);
     let weak = Rc::downgrade(&app);
     window.on_command_line(move |line| {
         weak.upgrade()
@@ -742,21 +773,6 @@ pub fn run(
         }
     });
     let weak = Rc::downgrade(&app);
-    window.on_ntfs_apply(move |options| {
-        if let Some(app) = weak.upgrade() {
-            app.borrow_mut().apply_ntfs_options(options);
-        }
-    });
-    {
-        let app = Rc::downgrade(&app);
-        window.on_viewer_control(move |operation, value, option| {
-            if let Some(app) = app.upgrade() {
-                app.borrow_mut()
-                    .viewer_control(operation, value.as_str(), option);
-            }
-        });
-    }
-    let weak = Rc::downgrade(&app);
     window.on_diff_navigate(move |delta| {
         if let Some(app) = weak.upgrade() {
             app.borrow_mut().navigate_comparison(delta);
@@ -778,6 +794,13 @@ pub fn run(
         if let Some(app) = weak.upgrade() {
             app.borrow_mut()
                 .save_comparison_change(side, edited, text.to_string());
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_viewer_control(move |operation, value, option| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut()
+                .viewer_control(operation, value.as_str(), option);
         }
     });
     let weak = Rc::downgrade(&app);
@@ -863,7 +886,6 @@ pub fn run(
         window.set_drives(strings(
             arco_windows::drives().iter().map(|path| display_path(path)),
         ));
-        state.sync_tools_menu();
         state.sync_shortcut_labels();
         state.sync_ui_settings();
         state.invalidate_wdx_columns();
@@ -994,9 +1016,9 @@ impl App {
         let profile = &self.profile;
         let layout = &profile.layout;
         let ui = self.ui();
-        ui.set_settings(SettingsData {
-            toolbar: layout.toolbar || !self.buttonbar_switches[0].is_empty(),
-            panel_toolbar: layout.panel_toolbar || !self.buttonbar_switches[1].is_empty(),
+        let mut settings = SettingsData {
+            toolbar: layout.toolbar,
+            panel_toolbar: layout.panel_toolbar,
             drive_buttons: layout.drive_buttons,
             drive_list: layout.drive_list,
             folder_tabs: layout.folder_tabs,
@@ -1027,7 +1049,21 @@ impl App {
                 .iter()
                 .position(|&size| size == profile.list_font_size)
                 .unwrap_or(1) as i32,
-        });
+            language: crate::locale::LANGUAGES
+                .iter()
+                .position(|language| *language == profile.language)
+                .unwrap_or_default() as i32,
+            editor: settings::path_label(profile.editor.as_deref()).into(),
+            everything: settings::path_label(profile.everything_cli.as_deref()).into(),
+            transfer_rate: profile.transfer_rate_kib.to_string().into(),
+            transfer_log: settings::path_label(profile.transfer_log.as_deref()).into(),
+            transfer_comments: profile.transfer_descriptions,
+            ntfs: settings::ntfs_draft(profile.transfer_ntfs),
+        };
+        ui.set_settings_current(settings.clone());
+        settings.toolbar |= !self.buttonbar_switches[0].is_empty();
+        settings.panel_toolbar |= !self.buttonbar_switches[1].is_empty();
+        ui.set_settings(settings);
         ui.global::<Colors>()
             .set_light(self.effective_light_theme());
         self.update_search_theme();
@@ -1053,52 +1089,6 @@ impl App {
             } else {
                 self.invalidate_tree(side);
             }
-        }
-    }
-
-    fn apply_settings(&mut self, value: SettingsData, close: bool) {
-        self.apply_shortcuts();
-        self.profile.layout = LayoutSettings {
-            toolbar: value.toolbar,
-            panel_toolbar: value.panel_toolbar,
-            drive_buttons: value.drive_buttons,
-            drive_list: value.drive_list,
-            folder_tabs: value.folder_tabs,
-            current_path: value.current_path,
-            breadcrumbs: value.breadcrumbs,
-            history_buttons: value.history_buttons,
-            column_headers: value.column_headers,
-            panel_status: value.panel_status,
-            command_line: value.command_line,
-            function_keys: value.function_keys,
-            numpad_folders: value.numpad_folders,
-            quick_find_start: match value.quick_find_start {
-                1 => profile::QuickFindStart::Typing,
-                2 => profile::QuickFindStart::Alt,
-                3 => profile::QuickFindStart::CtrlAlt,
-                _ => profile::QuickFindStart::Shortcut,
-            },
-        };
-        self.profile.stacked = value.stacked;
-        self.profile.light_mode = value.light;
-        self.profile.system_theme = value.system_theme;
-        self.profile.list_font = match value.list_font {
-            1 => ListFont::Arial,
-            2 => ListFont::Verdana,
-            _ => ListFont::SegoeUi,
-        };
-        self.profile.list_font_size = FILE_FONT_SIZES
-            .get(value.list_font_size as usize)
-            .copied()
-            .unwrap_or(14);
-        self.set_hidden(value.show_hidden);
-        self.sync_ui_settings();
-        self.publish(0);
-        self.publish(1);
-        self.status("Einstellungen angewendet.");
-        self.save();
-        if close {
-            self.close_settings();
         }
     }
 
@@ -1158,14 +1148,6 @@ impl App {
     pub fn status(&self, text: impl Into<SharedString>) {
         self.ui()
             .set_status(crate::locale::tr(text.into().as_str()).into());
-    }
-
-    pub(crate) fn sync_tools_menu(&self) {
-        self.ui().set_tools_menu(strings(
-            std::iter::once("Werkzeuge")
-                .chain(COMMANDS.iter().map(|(label, _)| *label))
-                .map(crate::locale::tr),
-        ));
     }
 
     pub fn set_active(&mut self, side: usize) {
@@ -1543,6 +1525,26 @@ impl App {
         refresh: bool,
         work: impl FnOnce(JobContext) -> io::Result<Outcome> + Send + 'static,
     ) {
+        self.start_job_with_detail(label, refresh, None, work);
+    }
+
+    pub fn start_progress_job(
+        &mut self,
+        label: &str,
+        refresh: bool,
+        detail: String,
+        work: impl FnOnce(JobContext) -> io::Result<Outcome> + Send + 'static,
+    ) {
+        self.start_job_with_detail(label, refresh, Some(detail), work);
+    }
+
+    fn start_job_with_detail(
+        &mut self,
+        label: &str,
+        refresh: bool,
+        detail: Option<String>,
+        work: impl FnOnce(JobContext) -> io::Result<Outcome> + Send + 'static,
+    ) {
         if self.job.is_some() {
             self.status("Ein Auftrag läuft bereits.");
             return;
@@ -1550,8 +1552,13 @@ impl App {
         let cancel = Arc::new(AtomicBool::new(false));
         let sender = self.sender.clone();
         self.job = Some(cancel.clone());
-        self.ui().set_job_status(label.into());
-        self.ui().set_job_active(true);
+        let ui = self.ui();
+        ui.set_job_title(crate::locale::tr(label).into());
+        ui.set_job_status(detail.as_deref().unwrap_or_default().into());
+        ui.set_job_progress(-1.0);
+        ui.set_job_cancelling(false);
+        ui.set_job_expanded(detail.is_some());
+        ui.set_job_active(true);
         std::thread::spawn(move || {
             let context = JobContext {
                 cancel,
@@ -1599,7 +1606,13 @@ impl App {
                         self.spawn_loader(side, request);
                     }
                 }
-                Event::Progress(text) => self.ui().set_job_status(text.into()),
+                Event::Progress { detail, fraction } => {
+                    let ui = self.ui();
+                    if !ui.get_job_cancelling() {
+                        ui.set_job_status(detail.into());
+                        ui.set_job_progress(fraction);
+                    }
+                }
                 Event::PluginPrompt(ticket) => self.plugin_prompts.push_back(ticket),
                 Event::TransferConflict(ticket) => self.transfers.prompt = Some(ticket),
                 Event::WdxValues(values) => self.apply_wdx_values(values),
@@ -1624,15 +1637,27 @@ impl App {
                 Event::Finished { outcome, refresh } => {
                     self.job = None;
                     self.finish_virtual_transfer();
-                    self.ui().set_job_active(false);
+                    let ui = self.ui();
+                    let restore_focus = ui.get_job_activity_open();
+                    ui.set_job_active(false);
+                    ui.set_job_expanded(false);
+                    if restore_focus {
+                        ui.invoke_focus_panels();
+                    }
                     if refresh {
                         self.refresh_both();
                     }
                     match outcome {
                         Ok(outcome) => self.completed(outcome),
+                        Err(error) if ui.get_dialog_kind() == "viewer" => {
+                            ui.set_viewer_notice(crate::locale::tr(&error).into());
+                        }
                         Err(error) => self.status(error),
                     }
                     self.finish_wdx_sort_attempt();
+                    if ui.get_dialog_kind() == "transfer-manager" {
+                        self.publish_transfer_manager();
+                    }
                 }
             }
         }
@@ -2010,6 +2035,11 @@ impl App {
             Outcome::PrintPreview(title, body) => self.show_print_preview(title, body),
             Outcome::TransferFinished(report) => self.complete_transfer(report),
             Outcome::Notice(message) => self.status(message),
+            Outcome::ViewerNotice(message) if self.ui().get_dialog_kind() == "viewer" => {
+                self.ui()
+                    .set_viewer_notice(crate::locale::tr(&message).into());
+            }
+            Outcome::ViewerNotice(message) => self.status(message),
             Outcome::Text(title, body) => self.text(&title, &body),
             Outcome::ClipboardText(body) => self.report(arco_windows::copy_text(&body)),
             Outcome::Entries {
@@ -2147,7 +2177,10 @@ impl App {
             Outcome::Image(path, image) => {
                 let ui = self.ui();
                 ui.set_dialog_title(display_path(&path).into());
-                ui.set_dialog_description("".into());
+                ui.set_dialog_description(
+                    format!("{} × {} px", image.width(), image.height()).into(),
+                );
+                ui.set_viewer_notice("".into());
                 ui.set_dialog_options(strings(std::iter::empty::<&str>()));
                 ui.set_viewer_image(preview::to_slint(&image));
                 self.preview_image_path = Some(path);
@@ -2161,7 +2194,10 @@ impl App {
     pub fn cancel(&self) {
         if let Some(cancel) = &self.job {
             cancel.store(true, Ordering::Relaxed);
-            self.ui().set_job_status("Abbruch angefordert …".into());
+            let ui = self.ui();
+            ui.set_job_cancelling(true);
+            ui.set_job_status(crate::locale::tr("Abbruch angefordert …").into());
+            ui.set_job_progress(-1.0);
         }
     }
 
@@ -2172,6 +2208,7 @@ impl App {
         ui.set_dialog_title(crate::locale::tr(title).into());
         ui.set_dialog_description("".into());
         ui.set_dialog_options(strings(std::iter::empty::<&str>()));
+        ui.set_dialog_content_lines(crate::commands::content_lines(body));
         ui.set_dialog_value(body.into());
     }
 

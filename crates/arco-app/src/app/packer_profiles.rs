@@ -169,13 +169,18 @@ impl App {
         } else {
             directory.join(tools::output_name(&format!("{value}{suffix}"))?)
         };
-        self.start_job("Packe mit externem Profil …", true, move |job| {
-            profile.pack(&paths, &base, &target, &job.cancel)?;
-            Ok(Outcome::Notice(format!(
-                "Erstellt: {}",
-                display_path(&target)
-            )))
-        });
+        self.start_progress_job(
+            "Packe mit externem Profil …",
+            true,
+            crate::display_path(&target),
+            move |job| {
+                profile.pack(&paths, &base, &target, &job.cancel)?;
+                Ok(Outcome::Notice(format!(
+                    "Erstellt: {}",
+                    display_path(&target)
+                )))
+            },
+        );
         Ok(())
     }
 }

@@ -167,12 +167,24 @@ pub fn create_zip(
     password: Option<&str>,
     cancel: &AtomicBool,
 ) -> io::Result<()> {
+    create_zip_with_progress(paths, base, target, password, cancel, |_| {})
+}
+
+pub fn create_zip_with_progress(
+    paths: &[PathBuf],
+    base: &Path,
+    target: &Path,
+    password: Option<&str>,
+    cancel: &AtomicBool,
+    progress: impl FnMut(files::Progress<'_>),
+) -> io::Result<()> {
     create_zip_with_encryption(
         paths,
         base,
         target,
         password.map(ZipEncryption::Aes),
         cancel,
+        progress,
     )
 }
 
@@ -195,6 +207,7 @@ pub fn create_zip_zipcrypto(
         target,
         Some(ZipEncryption::ZipCrypto(password)),
         cancel,
+        |_| {},
     )
 }
 
@@ -204,6 +217,7 @@ fn create_zip_with_encryption(
     target: &Path,
     encryption: Option<ZipEncryption<'_>>,
     cancel: &AtomicBool,
+    progress: impl FnMut(files::Progress<'_>),
 ) -> io::Result<()> {
     let plan = plan_sources(paths, base, Path::new(""), cancel)?;
     let parent = target
@@ -211,7 +225,7 @@ fn create_zip_with_encryption(
         .ok_or_else(|| io::Error::other("missing target directory"))?;
     let mut staging = NamedTempFile::new_in(parent)?;
     let mut archive = ZipWriter::new(staging.as_file_mut());
-    write_plan(&mut archive, plan, encryption, cancel)?;
+    write_plan(&mut archive, plan, encryption, cancel, progress)?;
     archive.finish()?.sync_all()?;
     if let Some(ZipEncryption::ZipCrypto(password)) = encryption {
         test_zip(staging.path(), Some(password), cancel)?;
@@ -266,7 +280,13 @@ pub fn create_zip_sfx(
     files::ensure_unchanged(stub, &metadata)?;
     let mut archive = ZipWriter::new(staging.as_file_mut());
     archive.set_comment(SFX_COMMENT)?;
-    write_plan(&mut archive, plan, password.map(ZipEncryption::Aes), cancel)?;
+    write_plan(
+        &mut archive,
+        plan,
+        password.map(ZipEncryption::Aes),
+        cancel,
+        |_| {},
+    )?;
     archive.finish()?.sync_all()?;
     test_zip(staging.path(), password, cancel)?;
     files::check_cancel(cancel)?;
@@ -385,7 +405,7 @@ pub fn append_zip(
             ZipEncryption::Aes(password)
         }
     });
-    write_plan(&mut archive, plan, encryption, cancel)?;
+    write_plan(&mut archive, plan, encryption, cancel, |_| {})?;
     archive.finish()?.sync_all()?;
     replace_zip(staging, path, &original, cancel)?;
     Ok(count)
@@ -593,7 +613,7 @@ fn rewrite_zip(
             ZipEncryption::Aes(password)
         }
     });
-    write_plan(&mut writer, additions, encryption, cancel)?;
+    write_plan(&mut writer, additions, encryption, cancel, |_| {})?;
     writer.finish()?.sync_all()?;
     drop(archive);
     let result = list_zip(staging.path(), cancel)?;
@@ -759,7 +779,13 @@ fn write_plan(
     plan: Vec<PlannedSource>,
     encryption: Option<ZipEncryption<'_>>,
     cancel: &AtomicBool,
+    mut progress: impl FnMut(files::Progress<'_>),
 ) -> io::Result<()> {
+    let total = plan
+        .iter()
+        .filter(|(_, _, meta)| meta.is_file())
+        .fold(0u64, |bytes, (_, _, meta)| bytes.saturating_add(meta.len()));
+    let mut completed = 0u64;
     for (path, name, meta) in plan {
         files::check_cancel(cancel)?;
         files::ensure_unchanged(&path, &meta)?;
@@ -786,11 +812,23 @@ fn write_plan(
                 None => options,
             };
             archive.start_file(name, options)?;
-            let actual = tools::copy_cancelled(File::open(&path)?, &mut *archive, cancel)?;
+            let actual = tools::copy_cancelled_with_progress(
+                File::open(&path)?,
+                &mut *archive,
+                cancel,
+                |copied| {
+                    progress(files::Progress {
+                        path: &path,
+                        copied: completed.saturating_add(copied),
+                        total,
+                    });
+                },
+            )?;
             if actual != meta.len() {
                 return Err(io::Error::other("source size changed during packing"));
             }
             files::ensure_unchanged(&path, &meta)?;
+            completed = completed.saturating_add(actual);
         }
     }
     Ok(())
@@ -812,6 +850,17 @@ pub(crate) fn extract_zip_selection(
     selection: Option<&crate::archive_view::Selection>,
     cancel: &AtomicBool,
 ) -> io::Result<usize> {
+    extract_zip_selection_with_progress(path, destination, password, selection, cancel, |_| {})
+}
+
+pub(crate) fn extract_zip_selection_with_progress(
+    path: &Path,
+    destination: &Path,
+    password: Option<&str>,
+    selection: Option<&crate::archive_view::Selection>,
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(files::Progress<'_>),
+) -> io::Result<usize> {
     let mut archive = open_read_zip(path, cancel)?;
     let entries = members(&mut archive, cancel)?;
     let entries = crate::archive_view::project(
@@ -832,6 +881,11 @@ pub(crate) fn extract_zip_selection(
         cancel,
     )?;
     let zone = crate::archive_zone::ArchiveZone::read(path, cancel)?;
+    let total = entries
+        .iter()
+        .filter(|(member, _)| !member.directory)
+        .fold(0u64, |bytes, (member, _)| bytes.saturating_add(member.size));
+    let mut completed = 0u64;
     let mut count = 0;
     for (member, relative) in entries {
         files::check_cancel(cancel)?;
@@ -850,7 +904,20 @@ pub(crate) fn extract_zip_selection(
             continue;
         }
         let mut staging = NamedTempFile::new_in(&current)?;
-        copy_member(&mut archive, &member, password, &mut staging, cancel)?;
+        copy_member_with_progress(
+            &mut archive,
+            &member,
+            password,
+            &mut staging,
+            cancel,
+            |copied| {
+                progress(files::Progress {
+                    path: &member.path,
+                    copied: completed.saturating_add(copied),
+                    total,
+                });
+            },
+        )?;
         zone.apply(staging.path())?;
         crate::archive_view::preserve_timestamp(staging.as_file(), member.modified)?;
         staging.as_file().sync_all()?;
@@ -858,6 +925,7 @@ pub(crate) fn extract_zip_selection(
         staging
             .persist_noclobber(target)
             .map_err(|error| error.error)?;
+        completed = completed.saturating_add(member.size);
         count += 1;
     }
     Ok(count)
@@ -884,6 +952,17 @@ fn copy_member(
     output: impl Write,
     cancel: &AtomicBool,
 ) -> io::Result<()> {
+    copy_member_with_progress(archive, member, password, output, cancel, |_| {})
+}
+
+fn copy_member_with_progress(
+    archive: &mut ZipArchive<impl Read + Seek>,
+    member: &Member,
+    password: Option<&str>,
+    output: impl Write,
+    cancel: &AtomicBool,
+    progress: impl FnMut(u64),
+) -> io::Result<()> {
     let limit = member.size.saturating_add(1);
     let bytes = if member.compression == ZIP_BROTLI {
         if member.encrypted {
@@ -898,7 +977,12 @@ fn copy_member(
             output,
             crc: crc32fast::Hasher::new(),
         };
-        let bytes = tools::copy_cancelled(decoder.take(limit), &mut writer, cancel)?;
+        let bytes = tools::copy_cancelled_with_progress(
+            decoder.take(limit),
+            &mut writer,
+            cancel,
+            progress,
+        )?;
         if writer.crc.finalize() != member.crc32 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -913,7 +997,7 @@ fn copy_member(
         } else {
             archive.by_index(member.index)?
         };
-        tools::copy_cancelled(entry.take(limit), output, cancel)?
+        tools::copy_cancelled_with_progress(entry.take(limit), output, cancel, progress)?
     };
     if bytes != member.size {
         return Err(io::Error::new(
@@ -999,6 +1083,46 @@ fn validate_size(entries: &[Member]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zip_progress_reports_cumulative_uncompressed_bytes_in_both_directions() {
+        let fixture = tempfile::tempdir().unwrap();
+        let source = fixture.path().join("source");
+        let destination = fixture.path().join("target");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(&destination).unwrap();
+        let first = source.join("first.txt");
+        let second = source.join("second.txt");
+        std::fs::write(&first, vec![b'A'; 256 * 1024]).unwrap();
+        std::fs::write(&second, b"data").unwrap();
+        let zip = fixture.path().join("archive.zip");
+        let cancel = AtomicBool::new(false);
+        let mut pack = Vec::new();
+        create_zip_with_progress(&[first, second], &source, &zip, None, &cancel, |p| {
+            pack.push((p.copied, p.total));
+        })
+        .unwrap();
+        let mut extract = Vec::new();
+        extract_zip_selection_with_progress(&zip, &destination, None, None, &cancel, |p| {
+            extract.push((p.copied, p.total));
+        })
+        .unwrap();
+        let total = 256 * 1024 + 4;
+        for progress in [pack, extract] {
+            assert!(progress.len() > 1);
+            assert!(
+                progress
+                    .iter()
+                    .all(|&(copied, expected)| expected == total && copied <= total)
+            );
+            assert!(progress.windows(2).all(|pair| pair[0].0 < pair[1].0));
+            assert_eq!(progress.last(), Some(&(total, total)));
+        }
+        assert_eq!(
+            std::fs::read(destination.join("second.txt")).unwrap(),
+            b"data"
+        );
+    }
     use crate::archive_view::{self, Catalog, Selection};
     use std::io::Write;
 

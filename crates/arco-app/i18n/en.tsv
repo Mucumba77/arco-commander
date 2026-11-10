@@ -307,3 +307,145 @@ Ausgewählte Verzeichnisjunctions als Links kopieren	Copy selected directory jun
 Plugin-Standardansicht	Plugin default view
 Bei WFX gilt ohne Vorzeichen die Plugin-Vorgabe. + sortiert aufsteigend, - absteigend.	For WFX, omitting the sign uses the plugin default. + sorts ascending, - sorts descending.
 Die angegebene WFX-Spalte fehlt in der Detailansicht.	The specified WFX column is absent from the details view.
+Navigation	Navigation
+Öffnen und anzeigen	Open and view
+Erstellen und löschen	Create and delete
+Zwischenablage	Clipboard
+Transfers	Transfers
+Eigenschaften und Drucken	Properties and printing
+Windows-Aktionen	Windows actions
+Auswahl nach Maske	Selection by pattern
+Gespeicherte Auswahl	Saved selection
+Orte und Pfade	Locations and paths
+Ordner-Tabs	Folder tabs
+Suche und Metadaten	Search and metadata
+Vergleich und Abgleich	Compare and synchronize
+Prüfsummen	Checksums
+Teilen und Kodieren	Split and encode
+FTP-Dateioperationen	FTP file operations
+Server-zu-Server (FXP)	Server-to-server (FXP)
+Dateisystem-Plugins	File system plugins
+Spalten und Sortierung	Columns and sorting
+Ordnerbäume	Folder trees
+Filter und Zweigansicht	Filters and branch view
+Fenster und Größen	Panels and sizes
+Farbschema	Color theme
+Oberfläche	Interface
+Dateien und Programme	Files and programs
+Suche und Migration	Search and migration
+Befehl oder Tastenkürzel suchen …	Search commands or shortcuts …
+Gefundene Befehle	Matching commands
+Keine passenden Befehle.	No matching commands.
+↑ ↓ Auswählen · Enter Ausführen · Esc Schließen	↑ ↓ Select · Enter Run · Esc Close
+Auftragsfortschritt anzeigen	Show job progress
+Fortschritt	Progress
+Auftrag läuft …	Job in progress …
+Im Hintergrund	Run in background
+Derzeit läuft kein Auftrag.	No job is running.
+Abbruch angefordert …	Cancellation requested …
+Bei Namenskonflikten	On naming conflicts
+Archivformat	Archive format
+Gespeicherter Suchfilter	Saved search filter
+Option	Option
+Strg	Ctrl
+Umschalt	Shift
+Arco Lister	Arco Lister
+Quelle	Source
+Zielordner	Destination folder
+Auswahl ausblenden	Hide selection
+Auswahl anzeigen	Show selection
+Ausgewählte Quelldateien	Selected source items
+Markierte Zielordner	Selected destination folders
+Archivname	Archive name
+Erweiterte Optionen	Advanced options
+ZIP-/7z-Passwort (optional)	ZIP/7z password (optional)
+Zielmaske (optional)	Destination pattern (optional)
+Vorheriger Abschnitt	Previous section
+Nächster Abschnitt	Next section
+Hexansicht umschalten	Toggle hex view
+Weitersuchen	Find next
+Ab Anfang suchen	Find from start
+Anzeigeoptionen	View options
+Zeilenumbruch	Wrap lines
+Dateiinhalt	File contents
+Bildvorschau	Image preview
+Aktueller Transfer	Current transfer
+Kein Transfer aktiv.	No active transfer.
+Pausiert	Paused
+Pausieren	Pause
+Transfer abbrechen	Cancel transfer
+Wartende Aufträge	Queued jobs
+Keine Transfers vorgemerkt.	No transfers queued.
+Dateikommentare mitführen	Preserve file comments
+Letzte Kopie erneut versuchen	Retry last copy
+Geschwindigkeit und Protokoll	Speed and log
+Ausgewählte Einträge	Selected items
+Endgültig löschen	Delete permanently
+In den Papierkorb	Move to Recycle Bin
+Kein weiterer Treffer.	No further match.
+Allgemein	General
+Layout	Layout
+Dateiübertragung	File transfers
+Programme	Programs
+Übertragungsrate (KiB/s)	Transfer rate (KiB/s)
+0 bedeutet unbegrenzt.	Enter 0 for no limit.
+Protokolldatei	Log file
+Absoluter Pfad (optional)	Absolute path (optional)
+NTFS-Kopieroptionen	NTFS copy options
+Benannte Datenströme übernehmen	Preserve named data streams
+Zugriffsrechte der Quelle übernehmen	Preserve source permissions
+Besitzer übernehmen	Preserve owner
+Überwachungs-ACL übernehmen (erfordert Windows-Recht)	Preserve audit ACL (requires Windows privilege)
+Hardlink-Gruppen im Ziel erhalten	Preserve hard-link groups at the destination
+Nur belegte Bereiche von Sparse-Dateien kopieren	Copy only allocated ranges of sparse files
+Externer Editor	External editor
+Absoluter Programmpfad	Absolute program path
+Bei leerem Feld verwendet Arco den Windows-Editor.	Leave blank to use Windows Notepad.
+Pfad zu es.exe	Path to es.exe
+Bei leerem Feld verwendet Arco die interne Suche.	Leave blank to use Arco search.
+Bestätigen	Confirm
+Auswahl bestätigen	Confirm selection
+Erstellen	Create
+Erzeugen	Generate
+Teilen	Split
+Verbinden	Connect
+Algorithmus	Algorithm
+Einstellungen angewendet.	Settings applied.
+Einstellungen gelten für diese Sitzung.	Settings apply to this session.
+Wähle eine verfügbare Oberflächensprache.	Select an available interface language.
+Editor benötigt einen absoluten Programmpfad	Enter an absolute path to the editor.
+Gib den absoluten EXE-Pfad für Everything an.	Enter the absolute path to the Everything executable.
+Gib einen absoluten Pfad zur Protokolldatei ein.	Enter an absolute path to the log file.
+Gib eine ganze Zahl für KiB/s ein.	Enter a whole number for KiB/s.
+Gespeicherte FTP-Verbindungen	Saved FTP connections
+Neu	New
+Importieren	Import
+Profilname	Profile name
+FTP-Adresse und Startordner	FTP address and starting folder
+Verschlüsselungsmodus	Encryption mode
+Explizites FTPS (FTP mit TLS)	Explicit FTPS (FTP with TLS)
+Implizites FTPS	Implicit FTPS
+Klartext-FTP	Unencrypted FTP
+Format der Verzeichnisliste	Directory listing format
+Automatisch	Automatic
+Nur MLSD	MLSD only
+Nur LIST (Unix / IIS)	LIST only (Unix / IIS)
+Klartext-FTP überträgt Passwort und Dateien unverschlüsselt.	Unencrypted FTP sends the password and files in plain text.
+Für implizites FTPS ftps:// verwenden.	Use ftps:// for implicit FTPS.
+Für explizites FTPS ftp:// verwenden.	Use ftp:// for explicit FTPS.
+Lokaler Startordner	Local starting folder
+Proxy	Proxy
+HTTP-/SOCKS-Proxy (optional)	HTTP/SOCKS proxy (optional)
+Aktiver FTP-Modus (Direktverbindung)	Active FTP mode (direct connection)
+Benutzername	Username
+Leer für anonyme Anmeldung	Leave blank for anonymous login
+FTP-Passwort	FTP password
+Neues Passwort (optional)	New password (optional)
+Passwort zum Speichern	Password to save
+Passwort in Windows-Anmeldeinformationen speichern	Save password in Windows Credential Manager
+Arco Commander · Dateisuche	Arco Commander · File search
+Dateisuche	File search
+Suchtreffer und Lesefehler	Search matches and read errors
+Suchlauf abbrechen	Cancel search
+Suchkriterien	Search criteria
+Über Arco Commander	About Arco Commander

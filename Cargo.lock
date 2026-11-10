@@ -297,7 +297,7 @@ checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
 
 [[package]]
 name = "arco-app"
-version = "0.1.0-preview.2"
+version = "1.0.0"
 dependencies = [
  "ammonia",
  "arco-core",
@@ -321,7 +321,7 @@ dependencies = [
 
 [[package]]
 name = "arco-core"
-version = "0.1.0-preview.2"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -353,7 +353,7 @@ dependencies = [
 
 [[package]]
 name = "arco-plugin-host"
-version = "0.1.0-preview.2"
+version = "1.0.0"
 dependencies = [
  "arco-core",
  "arco-windows",
@@ -367,7 +367,7 @@ dependencies = [
 
 [[package]]
 name = "arco-windows"
-version = "0.1.0-preview.2"
+version = "1.0.0"
 dependencies = [
  "blake3",
  "percent-encoding",

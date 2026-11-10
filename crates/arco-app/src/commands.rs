@@ -27,7 +27,6 @@ use std::sync::atomic::Ordering;
 use zeroize::Zeroizing;
 
 pub enum Pending {
-    Language([profile::Language; 3]),
     ShellTransfer(Vec<PathBuf>, arco_windows::ShellAction, bool),
     ShellName(PathBuf, bool, bool),
     ShellElevation,
@@ -40,17 +39,13 @@ pub enum Pending {
     DuplicateFields(PathBuf),
     HashClipboard(PathBuf, String, Vec<Hash>),
     AdvancedSearch(crate::app::AdvancedSearchSetup),
-    EverythingPath,
     SearchReview(Box<crate::app::AdvancedSearchReview>),
     EditComment(PathBuf, Option<String>),
     EditMetadata(Vec<PathBuf>),
     PrintDirectory(PathBuf, Vec<PathBuf>),
     PrintText(String, String),
     TransferManager,
-    TransferQueueChoose(Vec<u64>),
     TransferQueueOrder(u64),
-    TransferSettings,
-    NtfsOptions,
     TransferConflict(crate::app::ConflictTicket),
     ViewSetup(crate::app::ViewSetup),
     Associations(crate::app::AssociationSetup),
@@ -176,7 +171,6 @@ pub enum Pending {
     FtpFxp(FtpEndpoint, FtpEndpoint),
     Mask(MaskEdit),
     Favorites(crate::app::FavoriteSetup),
-    Editor,
     Palette,
     ImportTc,
     ApplyTc(TcImport, Vec<(String, &'static str)>),
@@ -225,6 +219,8 @@ pub(crate) struct Dialog<'a> {
     pub(crate) placeholder: &'a str,
     pub(crate) second_placeholder: &'a str,
     pub(crate) options: &'a [&'a str],
+    pub(crate) options_label: &'a str,
+    pub(crate) confirm_label: &'a str,
     pub(crate) secret: bool,
     pub(crate) second_secret: bool,
 }
@@ -442,6 +438,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("Hilfe", "help"),
     ("Systeminformationen", "system-information"),
     ("Windows-Version", "windows-version"),
+    ("Über Arco Commander", "about"),
 ];
 
 impl App {
@@ -520,6 +517,20 @@ impl App {
             .iter()
             .find(|(label, _)| *label == command)
             .map_or(command, |(_, id)| *id);
+        if command == "about" {
+            self.text("Über Arco Commander", crate::VERSION);
+            return;
+        }
+        let settings_page = match command {
+            "settings" | "language" => Some(crate::app::SettingsPage::General),
+            "configure-editor" | "everything-configure" => Some(crate::app::SettingsPage::Programs),
+            "ntfs-options" => Some(crate::app::SettingsPage::Transfers),
+            _ => None,
+        };
+        if let Some(page) = settings_page {
+            self.open_settings(page);
+            return;
+        }
         if let Some(index) = command
             .strip_prefix("sort-wdx:")
             .and_then(|index| index.parse().ok())
@@ -745,6 +756,7 @@ impl App {
                     | "hidden"
                     | "settings"
                     | "transfer-manager"
+                    | "job-details"
                     | "ntfs-options"
                     | "quick-find"
                     | "selection-paste"
@@ -955,17 +967,6 @@ impl App {
                 self.set_hidden(!hidden);
                 self.sync_ui_settings();
             }
-            "settings" => self.open_settings(),
-            "language" => {
-                let mut languages = crate::locale::LANGUAGES;
-                languages.sort_by_key(|language| *language != self.profile.language);
-                self.dialog("confirm", Pending::Language(languages), Dialog {
-                    title: "Oberflächensprache",
-                    description: "Wähle die Sprache für Arco Commander.",
-                    options: &languages.map(crate::locale::label),
-                    ..Dialog::default()
-                });
-            }
             "close-settings" => self.close_settings(),
             "close-drives" => self.ui().set_drive_side(-1),
             "edit" => self.with_file(|app, path| app.report(arco_windows::edit(&path, app.profile.editor.as_deref()))),
@@ -1019,7 +1020,7 @@ impl App {
             "mkdir" | "new-file" => {
                 let folder = command == "mkdir";
                 self.dialog("input", Pending::Create(self.current().path.clone(), folder), Dialog {
-                    title: if folder { "Neuer Ordner" } else { "Neue Datei" }, placeholder: "Name", ..Default::default()
+                    title: if folder { "Neuer Ordner" } else { "Neue Datei" }, placeholder: "Name", confirm_label: "Erstellen", ..Default::default()
                 });
             }
             "delete" | "delete-permanent" | "rename" if self.current().archive.is_some() => self.archive_edit_dialog(command == "rename"),
@@ -1035,6 +1036,7 @@ impl App {
                 let search_text = archive.as_ref().is_none_or(|archive| archive_view::supports_text_search(&archive.file));
                 self.dialog("input", Pending::Search(side, self.panels[side].request, self.current().location(), archive), Dialog {
                     title: "Dateien suchen", description: "Durchsucht den aktiven Ordner und seine Unterordner. Mehrere Dateimasken werden mit Semikolon getrennt.",
+                    confirm_label: "Suchen",
                     value: "*", placeholder: "Dateimaske", second_placeholder: if search_text { "Text als RegEx (optional)" } else { "" }, ..Default::default()
                 });
             }
@@ -1082,9 +1084,7 @@ impl App {
             "hash" | "verify" => self.hash_dialog(command == "verify"),
             "verify-clipboard" => self.hash_clipboard_dialog(),
             "quick-find" => self.quick_find_dialog(),
-            "everything-configure" => self.configure_everything_dialog(),
             "transfer-manager" => self.open_transfer_manager(),
-            "ntfs-options" => self.open_ntfs_options(),
             "selection-save" | "selection-load" => self.selection_dialog(command == "selection-save"),
             "selection-paste" => {
                 if let Err(error) = arco_windows::paste_text().and_then(|value| self.select_from_text(&value)) {
@@ -1095,6 +1095,7 @@ impl App {
             "duplicates" => {
                 self.dialog("confirm", Pending::DuplicateSearch(self.current().path.clone()), Dialog {
                     title: "Duplikate suchen",
+                    confirm_label: "Suchen",
                     description: "Durchsucht den aktiven Ordner einschließlich Unterordnern.",
                     options: &["Identischer Inhalt", "Gleicher Name", "Gleiche Größe", "Name und Größe", "Name und Inhalt", "Gleiche Plugin-Felder …"],
                     ..Default::default()
@@ -1102,6 +1103,7 @@ impl App {
             }
             "split" => self.with_file(|app, path| app.dialog("input", Pending::Split(path, app.target().to_path_buf()), Dialog {
                 title: "Datei teilen", description: "Im Total-Commander-Modus entsteht zusätzlich eine CRC-Begleitdatei mit Originalname und Prüfsumme.",
+                confirm_label: "Teilen",
                 value: "64", placeholder: "Teilgröße in MiB", options: &["Total Commander (.crc)", "Nur Dateiteile"], ..Default::default()
             })),
             "join" => {
@@ -1118,7 +1120,7 @@ impl App {
                                 "Verbindet die ausgewählten Dateien in lexikografischer Reihenfolge. Ausgabe im anderen Fenster."
                             };
                             self.dialog("input", Pending::Join(paths, self.target().to_path_buf(), manifest), Dialog {
-                                title: "Dateien verbinden", description, value: &name,
+                                title: "Dateien verbinden", description, value: &name, confirm_label: "Verbinden",
                                 placeholder: "Name der Ausgabedatei", ..Default::default()
                             });
                         }
@@ -1167,15 +1169,13 @@ impl App {
                 };
                 self.dialog("input", Pending::Mask(mode), Dialog { title, value: "*", placeholder: "Dateimaske", ..Default::default() });
             }
-            "configure-editor" => {
-                let editor = self.profile.editor.as_deref().map(display_path).unwrap_or_default();
-                self.dialog("input", Pending::Editor, Dialog { title: "Editor einstellen", value: &editor,
-                    description: "Absoluter Pfad zum Editor. Ein leeres Feld stellt den Windows-Editor wieder her.",
-                    placeholder: "Editorprogramm", ..Default::default() });
-            }
-            "palette" => {
-                let options = COMMANDS.iter().filter(|(_, command)| *command != "palette").map(|(label, _)| *label).collect::<Vec<_>>();
-                self.dialog("input", Pending::Palette, Dialog { title: "Befehlspalette", placeholder: "Befehlsname oder cm_-Alias (optional)", options: &options, ..Default::default() });
+            "palette" => self.show_palette(),
+            "job-details" => {
+                if self.job.is_some() {
+                    self.ui().set_job_expanded(true);
+                } else {
+                    self.status("Derzeit läuft kein Auftrag.");
+                }
             }
             "help" => self.text("Arco Commander · Tastatur", &self.keyboard_help()),
             "cancel-job" => self.cancel(),
@@ -1186,6 +1186,7 @@ impl App {
         if self.ui().get_dialog_kind().is_empty()
             && !self.ui().get_settings_open()
             && self.ui().get_drive_side() < 0
+            && !self.ui().get_job_activity_open()
         {
             self.ui().invoke_focus_panels();
         }
@@ -1218,8 +1219,10 @@ impl App {
         self.pending = Some(pending);
         let ui = self.ui();
         ui.set_dialog_transfer_filters(Default::default());
+        ui.set_dialog_transfer_filter(0);
         ui.set_dialog_title(crate::locale::tr(data.title).into());
         ui.set_dialog_description(crate::locale::tr(data.description).into());
+        ui.set_dialog_content_lines(content_lines(data.value));
         ui.set_dialog_value(data.value.into());
         ui.set_dialog_second(data.second.into());
         ui.set_dialog_placeholder(crate::locale::tr(data.placeholder).into());
@@ -1227,6 +1230,8 @@ impl App {
         ui.set_dialog_secret(data.secret);
         ui.set_dialog_second_secret(data.second_secret);
         ui.set_dialog_options(strings(data.options.iter().copied()));
+        ui.set_dialog_options_label(crate::locale::tr(data.options_label).into());
+        ui.set_dialog_confirm_label(crate::locale::tr(data.confirm_label).into());
         ui.set_dialog_kind(kind.into());
         ui.set_dialog_revision(ui.get_dialog_revision().wrapping_add(1));
     }
@@ -1243,6 +1248,7 @@ impl App {
         ui.set_dialog_value("".into());
         ui.set_dialog_second("".into());
         ui.set_viewer_image(slint::Image::default());
+        ui.set_viewer_notice("".into());
         ui.set_file_conflict(Default::default());
         ui.set_diff_data(Default::default());
         ui.set_sync_rows(Default::default());
@@ -1270,18 +1276,6 @@ impl App {
         transfer_filter: usize,
     ) -> io::Result<()> {
         match pending {
-            Pending::Language(languages) => {
-                let Some(language) = languages.get(option).copied() else {
-                    return Ok(());
-                };
-                crate::locale::select(language).map_err(io::Error::other)?;
-                self.profile.language = language;
-                self.sync_tools_menu();
-                self.save();
-                self.publish(0);
-                self.publish(1);
-                self.status("Bereit");
-            }
             Pending::TabFileFilter(side, request) => {
                 if self.panels[side].request != request {
                     return Ok(());
@@ -1309,14 +1303,7 @@ impl App {
                 }
             }
             Pending::TransferManager => self.transfer_manager_action(option)?,
-            Pending::TransferQueueChoose(ids) => {
-                if let Some(id) = ids.get(option) {
-                    self.open_queued_transfer(*id);
-                }
-            }
             Pending::TransferQueueOrder(id) => self.reorder_transfer(id, option),
-            Pending::TransferSettings => self.save_transfer_settings(value, second)?,
-            Pending::NtfsOptions => (),
             Pending::TransferConflict(ticket) => ticket.answer(option, second == "all", value),
             Pending::ViewSetup(setup) => self.submit_view_setup(setup, value, option)?,
             Pending::Associations(setup) => self.submit_association(setup, value, option)?,
@@ -1324,7 +1311,6 @@ impl App {
                 self.submit_administration(setup, value, second, option)?
             }
             Pending::TextCompare(_, _) | Pending::BinaryCompare(_, _) => (),
-            Pending::EverythingPath => self.save_everything_path(value)?,
             Pending::PrintText(title, body) => {
                 if arco_windows::print_text(&title, &body)? {
                     self.status("Druckauftrag übergeben.");
@@ -1957,74 +1943,92 @@ impl App {
                 if option == 6 && second.encode_utf16().count() > archives::ZIP_SFX_PASSWORD_LIMIT {
                     return Err(io::Error::other("Das Passwort ist für ZIP-SFX zu lang."));
                 }
-                self.start_job("Erstelle Archiv …", true, move |job| {
-                    let password = password.as_ref().map(|password| password.as_str());
-                    if option == 6 {
-                        let stub = std::env::current_exe()?.with_file_name("arco-zip-sfx.exe");
-                        if !stub.is_file() {
-                            return Err(io::Error::new(
-                                io::ErrorKind::NotFound,
-                                "arco-zip-sfx.exe fehlt neben Arco Commander.",
-                            ));
+                self.start_progress_job(
+                    "Erstelle Archiv …",
+                    true,
+                    display_path(&destination),
+                    move |job| {
+                        let password = password.as_ref().map(|password| password.as_str());
+                        if option == 6 {
+                            let stub = std::env::current_exe()?.with_file_name("arco-zip-sfx.exe");
+                            if !stub.is_file() {
+                                return Err(io::Error::new(
+                                    io::ErrorKind::NotFound,
+                                    "arco-zip-sfx.exe fehlt neben Arco Commander.",
+                                ));
+                            }
+                            archives::create_zip_sfx(
+                                &paths,
+                                &base,
+                                &destination,
+                                &stub,
+                                password,
+                                &job.cancel,
+                            )?;
+                        } else if let Some(password) = password.filter(|_| option == 4) {
+                            archive_view::pack_encrypted_7z_sfx(
+                                &paths,
+                                &base,
+                                &destination,
+                                password,
+                                &job.cancel,
+                            )?;
+                        } else if extension == ".ace" {
+                            let pack = match option {
+                                12 => arco_core::legacy_archives::pack_ace_compressed,
+                                13 => arco_core::legacy_archives::pack_ace_blocked,
+                                _ => arco_core::legacy_archives::pack_ace,
+                            };
+                            pack(&paths, &base, &destination, &job.cancel)?;
+                        } else if extension == ".7z" {
+                            archive_view::pack_7z(
+                                &paths,
+                                &base,
+                                &destination,
+                                password,
+                                &job.cancel,
+                            )?;
+                        } else if extension == ".uc2" {
+                            arco_core::legacy_archives::pack_uc2(
+                                &paths,
+                                &base,
+                                &destination,
+                                &job.cancel,
+                            )?;
+                        } else if let Some(format) = format {
+                            ExternalArchiver::discover(&job.cancel)?.pack(
+                                &paths,
+                                &base,
+                                &destination,
+                                format,
+                                &job.cancel,
+                            )?;
+                        } else if option == 14 {
+                            let password = password
+                                .ok_or_else(|| io::Error::other("ZipCrypto-Passwort fehlt."))?;
+                            archives::create_zip_zipcrypto(
+                                &paths,
+                                &base,
+                                &destination,
+                                password,
+                                &job.cancel,
+                            )?;
+                        } else {
+                            archives::create_zip_with_progress(
+                                &paths,
+                                &base,
+                                &destination,
+                                password,
+                                &job.cancel,
+                                job.archive_progress(),
+                            )?;
                         }
-                        archives::create_zip_sfx(
-                            &paths,
-                            &base,
-                            &destination,
-                            &stub,
-                            password,
-                            &job.cancel,
-                        )?;
-                    } else if let Some(password) = password.filter(|_| option == 4) {
-                        archive_view::pack_encrypted_7z_sfx(
-                            &paths,
-                            &base,
-                            &destination,
-                            password,
-                            &job.cancel,
-                        )?;
-                    } else if extension == ".ace" {
-                        let pack = match option {
-                            12 => arco_core::legacy_archives::pack_ace_compressed,
-                            13 => arco_core::legacy_archives::pack_ace_blocked,
-                            _ => arco_core::legacy_archives::pack_ace,
-                        };
-                        pack(&paths, &base, &destination, &job.cancel)?;
-                    } else if extension == ".7z" {
-                        archive_view::pack_7z(&paths, &base, &destination, password, &job.cancel)?;
-                    } else if extension == ".uc2" {
-                        arco_core::legacy_archives::pack_uc2(
-                            &paths,
-                            &base,
-                            &destination,
-                            &job.cancel,
-                        )?;
-                    } else if let Some(format) = format {
-                        ExternalArchiver::discover(&job.cancel)?.pack(
-                            &paths,
-                            &base,
-                            &destination,
-                            format,
-                            &job.cancel,
-                        )?;
-                    } else if option == 14 {
-                        let password = password
-                            .ok_or_else(|| io::Error::other("ZipCrypto-Passwort fehlt."))?;
-                        archives::create_zip_zipcrypto(
-                            &paths,
-                            &base,
-                            &destination,
-                            password,
-                            &job.cancel,
-                        )?;
-                    } else {
-                        archives::create_zip(&paths, &base, &destination, password, &job.cancel)?;
-                    }
-                    Ok(Outcome::Notice(format!(
-                        "Erstellt: {}",
-                        display_path(&destination)
-                    )))
-                });
+                        Ok(Outcome::Notice(format!(
+                            "Erstellt: {}",
+                            display_path(&destination)
+                        )))
+                    },
+                );
             }
             Pending::ArchiveVolumes(paths, base, destination, format, password) => {
                 let sea = matches!(format, VolumePacking::Sea);
@@ -2047,33 +2051,40 @@ impl App {
                             "Gib eine Teilgröße von 1 bis 4095 MiB ein."
                         })
                     })?;
-                self.start_job("Erstelle Mehrteiler …", true, move |job| {
-                    let count = match format {
-                        VolumePacking::Sas => arco_core::legacy_archives::pack_uc2_sas(
-                            &paths,
-                            &base,
-                            &destination,
-                            size,
-                            &job.cancel,
-                        ),
-                        VolumePacking::Sea => arco_core::legacy_archives::pack_uc2_sea(
-                            &paths,
-                            &base,
-                            &destination,
-                            size,
-                            &job.cancel,
-                        ),
-                        VolumePacking::Zip | VolumePacking::SevenZip => archive_view::pack_split(
-                            &paths,
-                            &base,
-                            &destination,
-                            size,
-                            password.as_ref().map(|password| password.as_str()),
-                            &job.cancel,
-                        ),
-                    }?;
-                    Ok(Outcome::Notice(format!("{count} Archivteile erstellt.")))
-                });
+                self.start_progress_job(
+                    "Erstelle Mehrteiler …",
+                    true,
+                    display_path(&destination),
+                    move |job| {
+                        let count = match format {
+                            VolumePacking::Sas => arco_core::legacy_archives::pack_uc2_sas(
+                                &paths,
+                                &base,
+                                &destination,
+                                size,
+                                &job.cancel,
+                            ),
+                            VolumePacking::Sea => arco_core::legacy_archives::pack_uc2_sea(
+                                &paths,
+                                &base,
+                                &destination,
+                                size,
+                                &job.cancel,
+                            ),
+                            VolumePacking::Zip | VolumePacking::SevenZip => {
+                                archive_view::pack_split(
+                                    &paths,
+                                    &base,
+                                    &destination,
+                                    size,
+                                    password.as_ref().map(|password| password.as_str()),
+                                    &job.cancel,
+                                )
+                            }
+                        }?;
+                        Ok(Outcome::Notice(format!("{count} Archivteile erstellt.")))
+                    },
+                );
             }
             Pending::ArchiveExtract(archive, target, selection) => {
                 self.extract_archive_selection(
@@ -2125,19 +2136,26 @@ impl App {
             }
             Pending::ZipRead(path, target, test) => {
                 let password = (!value.is_empty()).then(|| Zeroizing::new(value.to_owned()));
-                self.start_job(
+                self.start_progress_job(
                     if test {
                         "Prüfe Archiv …"
                     } else {
                         "Entpacke Archiv …"
                     },
                     !test,
+                    display_path(&path),
                     move |job| {
                         let password = password.as_ref().map(|password| password.as_str());
                         let count = if test {
                             archive_view::test(&path, password, &job.cancel)?
                         } else {
-                            archive_view::extract_all(&path, &target, password, &job.cancel)?
+                            archive_view::extract_all_with_progress(
+                                &path,
+                                &target,
+                                password,
+                                &job.cancel,
+                                job.archive_progress(),
+                            )?
                         };
                         Ok(Outcome::Notice(format!(
                             "{count} Einträge {}.",
@@ -2329,49 +2347,7 @@ impl App {
                 }
             }
             Pending::Favorites(setup) => self.submit_favorite(setup, value, option)?,
-            Pending::Editor => {
-                if value.trim().is_empty() {
-                    self.profile.editor = None;
-                } else {
-                    let path = PathBuf::from(value.trim().trim_matches('"'));
-                    if !path.is_absolute() || !path.is_file() {
-                        return Err(io::Error::other(
-                            "Editor benötigt einen absoluten Programmpfad",
-                        ));
-                    }
-                    self.profile.editor = Some(path);
-                }
-                self.status("Editor-Einstellung gespeichert.");
-            }
-            Pending::Palette => {
-                let value = value.trim();
-                let command = if value.is_empty() {
-                    COMMANDS
-                        .iter()
-                        .filter(|(_, command)| *command != "palette")
-                        .nth(option)
-                        .map(|(_, command)| *command)
-                } else if let Some(command) = compatibility_command(value) {
-                    Some(command)
-                } else {
-                    let value = value.to_lowercase();
-                    let mut matches = COMMANDS.iter().filter(|(label, command)| {
-                        label.to_lowercase().contains(&value) || command.contains(&value)
-                    });
-                    let first = matches.next();
-                    if matches.next().is_some() {
-                        return Err(io::Error::other(
-                            "Mehrere Befehle passen. Gib einen genaueren Namen ein.",
-                        ));
-                    }
-                    first.map(|(_, command)| *command)
-                };
-                if let Some(command) = command {
-                    self.action(command);
-                } else {
-                    return Err(io::Error::other("Befehl wurde nicht gefunden"));
-                }
-            }
+            Pending::Palette => (),
             Pending::ImportTc => {
                 let path = PathBuf::from(value.trim().trim_matches('"'));
                 if !path.is_absolute() {
@@ -2598,21 +2574,15 @@ impl App {
         target: TransferDestination,
         operation: Transfer,
     ) {
-        let (kind, description, destinations, placeholder, second_placeholder) = match &target {
+        let (description, destinations, multiple) = match &target {
             TransferDestination::Folder(target) => (
-                "input",
-                format!(
-                    "{} Einträge. Relative Zielordner werden vom vorgeschlagenen Ordner aus aufgelöst.",
-                    paths.len()
-                ),
+                format!("{} ausgewählte Einträge", paths.len()),
                 display_path(target),
-                "Zielordner",
-                "Optionale Zielmaske, z. B. *.bak oder *-Kopie.*",
+                false,
             ),
             TransferDestination::Marked(targets) => (
-                "review",
                 format!(
-                    "{} Einträge in jeden der {} markierten Zielordner kopieren.",
+                    "{} ausgewählte Einträge · {} Zielordner",
                     paths.len(),
                     targets.len()
                 ),
@@ -2621,10 +2591,10 @@ impl App {
                     .map(|target| display_path(target))
                     .collect::<Vec<_>>()
                     .join("\n"),
-                "",
-                "",
+                true,
             ),
         };
+        self.prepare_operation_dialog(&paths, "", multiple, operation == Transfer::Move);
         let mut conflicts = vec![
             "Bei jeder vorhandenen Datei nachfragen",
             "Bei Namenskonflikten Fehler melden",
@@ -2638,7 +2608,7 @@ impl App {
             conflicts.push("An vorhandene Dateien anhängen");
         }
         self.dialog(
-            kind,
+            "transfer",
             Pending::Transfer(paths, target, operation),
             Dialog {
                 title: if operation == Transfer::Copy {
@@ -2648,9 +2618,13 @@ impl App {
                 },
                 description: &description,
                 value: &destinations,
-                placeholder,
-                second_placeholder,
                 options: &conflicts,
+                options_label: "Bei Namenskonflikten",
+                confirm_label: if operation == Transfer::Copy {
+                    "Kopieren"
+                } else {
+                    "Verschieben"
+                },
                 ..Default::default()
             },
         );
@@ -2665,11 +2639,24 @@ impl App {
             .collect();
         if !local_profiles.is_empty() {
             let ui = self.ui();
-            ui.set_dialog_transfer_filter(0);
             ui.set_dialog_transfer_filters(strings(
                 std::iter::once("Alle Dateien").chain(local_profiles),
             ));
         }
+    }
+
+    fn prepare_operation_dialog(
+        &self,
+        paths: &[PathBuf],
+        target: &str,
+        multiple: bool,
+        moving: bool,
+    ) {
+        let ui = self.ui();
+        ui.set_dialog_operation_selection(selection_preview(paths).into());
+        ui.set_dialog_operation_target(target.into());
+        ui.set_dialog_operation_multiple(multiple);
+        ui.set_dialog_operation_move(moving);
     }
 
     fn delete_dialog(&mut self, permanent: bool) {
@@ -2690,8 +2677,9 @@ impl App {
         if permanent && self.ignore_list().is_some() && paths.iter().any(|path| path.is_dir()) {
             description.push_str("\nDer Vorgang löscht auch ausgeblendete Inhalte dieser Ordner.");
         }
+        let selection = selection_preview(&paths);
         self.dialog(
-            "confirm",
+            "delete",
             Pending::Delete(paths, permanent),
             Dialog {
                 title: if permanent {
@@ -2700,6 +2688,12 @@ impl App {
                     "Papierkorb"
                 },
                 description: &description,
+                value: &selection,
+                confirm_label: if permanent {
+                    "Endgültig löschen"
+                } else {
+                    "In den Papierkorb"
+                },
                 ..Default::default()
             },
         );
@@ -3006,6 +3000,8 @@ impl App {
                     title: "Prüfsumme aus Zwischenablage prüfen",
                     description: &display_path(&path),
                     options: &options,
+                    options_label: "Algorithmus",
+                    confirm_label: "Prüfen",
                     ..Default::default()
                 },
             );
@@ -3029,7 +3025,8 @@ impl App {
         self.dialog(if verify { "confirm" } else { "input" }, Pending::Hash(paths, self.current().path.clone(), verify), Dialog {
             title: if verify { "Prüfsummendatei prüfen" } else { "Prüfsummen erzeugen" },
             description: if verify { "Wähle den Algorithmus der Datei." } else { "Optionaler Dateiname für die Ausgabe. Ohne Namen erscheint das Ergebnis nur in der Vorschau." },
-            placeholder: "Ausgabedatei (optional)", options: HASHES, ..Default::default()
+            placeholder: "Ausgabedatei (optional)", options: HASHES, options_label: "Algorithmus",
+            confirm_label: if verify { "Prüfen" } else { "Erzeugen" }, ..Default::default()
         });
     }
 
@@ -3039,11 +3036,41 @@ impl App {
             self.status("Wähle Dateien oder Ordner.");
             return;
         }
-        self.dialog("input", Pending::ZipPack(paths, self.current().path.clone(), self.target().to_path_buf()), Dialog {
-            title: "Dateien packen", description: "Das Archiv wird im anderen Fenster erstellt. ZIP und 7z unterstützen AES-256 auch als SFX und Mehrteiler. Bei 7z schützt das Passwort auch die Dateinamen.",
-            value: "archiv", placeholder: "Archivname", second_placeholder: "ZIP-/7z-Passwort (optional)", second_secret: true,
-            options: &["ZIP", "7z", "TAR über 7-Zip", "GZIP über 7-Zip", "Selbstentpackendes 7z (.exe)", "UC2 über Python", "Selbstentpackendes ZIP (.exe)", "ACE (ohne Kompression)", "UC2-SAS-Mehrteiler", "ZIP-Mehrteiler", "7z-Mehrteiler", "Selbstentpackendes DOS-UC2SEA", "ACE (LZ77)", "ACE 2.0 (Blocked)", "ZIP (ZipCrypto)"], ..Default::default()
-        });
+        let target = self.target().to_path_buf();
+        let description = format!("{} ausgewählte Einträge", paths.len());
+        self.prepare_operation_dialog(&paths, &display_path(&target), false, false);
+        self.dialog(
+            "archive-pack",
+            Pending::ZipPack(paths, self.current().path.clone(), target),
+            Dialog {
+                title: "Dateien packen",
+                description: &description,
+                value: "archiv",
+                placeholder: "Archivname",
+                second_placeholder: "ZIP-/7z-Passwort (optional)",
+                second_secret: true,
+                options_label: "Archivformat",
+                confirm_label: "Packen",
+                options: &[
+                    "ZIP",
+                    "7z",
+                    "TAR über 7-Zip",
+                    "GZIP über 7-Zip",
+                    "Selbstentpackendes 7z (.exe)",
+                    "UC2 über Python",
+                    "Selbstentpackendes ZIP (.exe)",
+                    "ACE (ohne Kompression)",
+                    "UC2-SAS-Mehrteiler",
+                    "ZIP-Mehrteiler",
+                    "7z-Mehrteiler",
+                    "Selbstentpackendes DOS-UC2SEA",
+                    "ACE (LZ77)",
+                    "ACE 2.0 (Blocked)",
+                    "ZIP (ZipCrypto)",
+                ],
+                ..Default::default()
+            },
+        );
     }
 
     fn archive_read_dialog(&mut self, path: PathBuf, test: bool) {
@@ -3060,7 +3087,8 @@ impl App {
                 else if brotli { "Die Brotli-Datei wird ohne Zusatzprogramm gelesen. Vorhandene Dateien im Ziel bleiben erhalten." }
                 else if legacy { "Der Legacy-Adapter verwendet die konfigurierte Python-Installation. Vorhandene Dateien im Ziel bleiben erhalten." }
                 else { "Der Archiv-Adapter verwendet 7-Zip. Vorhandene Dateien im Ziel bleiben erhalten." },
-            placeholder: "Archivpasswort (optional)", secret: true, ..Default::default()
+            placeholder: "Archivpasswort (optional)", secret: true,
+            confirm_label: if test { "Prüfen" } else { "Entpacken" }, ..Default::default()
         });
     }
 
@@ -3741,6 +3769,7 @@ impl App {
     }
 
     fn read_viewer_page(&mut self, request: ViewerRequest) {
+        self.ui().set_viewer_notice("".into());
         let storage = self
             .staged_preview
             .as_ref()
@@ -3750,7 +3779,7 @@ impl App {
             let _storage = storage;
             Ok(match request.load(&job.cancel)? {
                 Some((viewer, page)) => Outcome::ViewerPage(viewer, page),
-                None => Outcome::Notice("Kein weiterer Treffer.".into()),
+                None => Outcome::ViewerNotice("Kein weiterer Treffer.".into()),
             })
         });
     }
@@ -3773,7 +3802,7 @@ impl App {
             match viewer.control(operation, value, option) {
                 Ok(Some(request)) => self.read_viewer_page(request),
                 Ok(None) => (),
-                Err(error) => self.status(error),
+                Err(error) => self.ui().set_viewer_notice(crate::locale::tr(error).into()),
             }
         }
     }
@@ -3794,6 +3823,7 @@ impl App {
             );
         ui.set_dialog_title(title.into());
         ui.set_dialog_description(viewer.description(&page).into());
+        ui.set_viewer_notice("".into());
         viewer.update_page(&page);
         ui.set_dialog_value(page.text.into());
         ui.set_dialog_options(strings(std::iter::empty::<&str>()));
@@ -3808,6 +3838,24 @@ impl App {
         ui.set_dialog_kind("viewer".into());
         self.viewer = Some(viewer);
     }
+}
+
+pub(crate) fn content_lines(body: &str) -> i32 {
+    body.lines().take(28).count() as i32
+}
+
+fn selection_preview(paths: &[PathBuf]) -> String {
+    const PREVIEW_LIMIT: usize = 16;
+    let mut selection = paths
+        .iter()
+        .take(PREVIEW_LIMIT)
+        .map(|path| display_path(path))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if paths.len() > PREVIEW_LIMIT {
+        let _ = write!(selection, "\n… +{}", paths.len() - PREVIEW_LIMIT);
+    }
+    selection
 }
 
 fn delete_path(path: &Path) -> io::Result<()> {
@@ -3864,7 +3912,7 @@ pub(crate) fn valid_button_command(line: &str) -> bool {
             })
 }
 
-fn compatibility_command(name: &str) -> Option<&'static str> {
+pub(crate) fn compatibility_command(name: &str) -> Option<&'static str> {
     let name = name.to_ascii_lowercase();
     if let Some((command, parameter)) = name.split_once(char::is_whitespace) {
         return match (command, parameter.trim()) {

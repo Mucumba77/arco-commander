@@ -227,42 +227,6 @@ pub(crate) fn duplicate_result(
 }
 
 impl App {
-    pub(crate) fn configure_everything_dialog(&mut self) {
-        let value = self
-            .profile
-            .everything_cli
-            .as_deref()
-            .map(display_path)
-            .unwrap_or_default();
-        self.dialog("input", Pending::EverythingPath, Dialog {
-            title: "Everything-Suche",
-            description: "Absoluter Pfad zur Everything-Kommandozeile es.exe. Leerlassen deaktiviert die Anbindung.",
-            value: &value, placeholder: "Pfad zu es.exe", ..Default::default()
-        });
-    }
-
-    pub(crate) fn save_everything_path(&mut self, value: &str) -> io::Result<()> {
-        if !self.save_profile {
-            return Err(io::Error::other("Das Arco-Profil ist nicht verfügbar."));
-        }
-        let value = value.trim().trim_matches('"');
-        let executable = (!value.is_empty()).then(|| PathBuf::from(value));
-        if let Some(path) = &executable
-            && (!path.is_absolute()
-                || !path
-                    .extension()
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("exe")))
-        {
-            return Err(io::Error::other("Gib den absoluten EXE-Pfad an."));
-        }
-        let mut draft = self.profile_snapshot();
-        draft.everything_cli = executable;
-        draft.save(&self.profile_path)?;
-        self.profile = draft;
-        self.status("Everything-Einstellung gespeichert.");
-        Ok(())
-    }
-
     fn search_setup(&self) -> Setup {
         let tab = self.current();
         Setup {

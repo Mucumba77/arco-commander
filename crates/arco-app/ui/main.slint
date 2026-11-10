@@ -1,4 +1,12 @@
-import { Button, CheckBox, ComboBox, LineEdit, ListView, Palette, ScrollView, TextEdit } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, LineEdit, ListView, Palette, ProgressIndicator, ScrollView, TextEdit } from "std-widgets.slint";
+import { Colors, NavButton, ActionButton, DetailCell } from "dialog-theme.slint";
+import { DialogHeading, FieldLabel, FileOperationCard, ReaderPane, ImagePane, TransferManagerCard, TransferManagerData, CompactDialogCard } from "operation-dialogs.slint";
+export { Colors } from "dialog-theme.slint";
+export { TransferManagerData } from "operation-dialogs.slint";
+
+export struct CommandRow { key: string, label: string, menu-label: string, icon: image, shortcut: string }
+export struct MenuSection { title: string, icon: image, rows: [CommandRow] }
+export struct MenuCategory { title: string, primary: [CommandRow], sections: [MenuSection] }
 
 export struct FileRow {
     comment: string,
@@ -147,6 +155,13 @@ export struct SettingsData {
     show-hidden: bool,
     list-font: int,
     list-font-size: int,
+    language: int,
+    editor: string,
+    everything: string,
+    transfer-rate: string,
+    transfer-log: string,
+    transfer-comments: bool,
+    ntfs: NtfsDraft,
 }
 
 global Typography {
@@ -233,7 +248,7 @@ component SearchCard inherits Rectangle {
     VerticalLayout {
         padding: 16px;
         spacing: 10px;
-        Text { text: "Erweiterte Dateisuche"; color: Colors.text; font-size: 20px; font-weight: 700; }
+        DialogHeading { icon: @image-url("icons/search.svg"); title: @tr("Erweiterte Dateisuche"); }
         Text { text: root.base; color: Colors.muted; overflow: elide; }
         ScrollView {
             vertical-stretch: 1;
@@ -299,13 +314,13 @@ component SearchCard inherits Rectangle {
             spacing: 7px;
             Rectangle { horizontal-stretch: 1; }
             Button { text: @tr("Abbrechen"); clicked => { root.close(); } }
-            Button { text: @tr("Suchen"); clicked => { root.configure(root.values(), "", 2); } }
+            Button { text: @tr("Suchen"); primary: true; clicked => { root.configure(root.values(), "", 2); } }
         }
     }
 }
 
 export component SearchWindow inherits Window {
-    title: "Arco Commander · Dateisuche";
+    title: @tr("Arco Commander · Dateisuche");
     default-font-family: "Segoe UI";
     default-font-size: 14px;
     preferred-width: 760px;
@@ -313,6 +328,9 @@ export component SearchWindow inherits Window {
     min-width: 540px;
     min-height: 370px;
     background: Colors.background;
+    property <ColorScheme> scheme: Colors.light ? ColorScheme.light : ColorScheme.dark;
+    init => { Palette.color-scheme = root.scheme; }
+    changed scheme => { Palette.color-scheme = root.scheme; }
 
     in property <SearchDraft> draft;
     in property <string> base;
@@ -332,44 +350,72 @@ export component SearchWindow inherits Window {
     callback use-results();
     callback close-search();
 
-    VerticalLayout {
-        padding: 12px;
-        spacing: 8px;
-        if !root.busy && !root.has-result : SearchCard {
-            draft: root.draft;
-            base: root.base;
-            profiles: root.profiles;
-            wdx-profiles: root.wdx-profiles;
-            archive: root.archive;
-            notice: root.notice;
-            has-selection: root.has-selection;
-            configure(data, name, operation) => { root.configure(data, name, operation); }
-            close => { root.close-search(); }
+    FocusScope {
+        width: 100%; height: 100%;
+        focus-on-tab-navigation: false;
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                if (root.busy) { root.cancel-search(); }
+                else { root.close-search(); }
+                return accept;
+            }
+            return reject;
         }
-        if root.busy || root.has-result : VerticalLayout {
+
+        VerticalLayout {
+            padding: 12px;
             spacing: 8px;
-            Text {
-                text: root.busy ? "Dateisuche" : root.result-title;
-                color: Colors.text;
-                font-size: 20px;
-                font-weight: 700;
+            if !root.busy && !root.has-result : SearchCard {
+                draft: root.draft;
+                base: root.base;
+                profiles: root.profiles;
+                wdx-profiles: root.wdx-profiles;
+                archive: root.archive;
+                notice: root.notice;
+                has-selection: root.has-selection;
+                configure(data, name, operation) => { root.configure(data, name, operation); }
+                close => { root.close-search(); }
             }
-            Text { text: root.base; color: Colors.muted; overflow: elide; }
-            if root.has-result : TextEdit {
-                text: root.result-list;
-                read-only: true;
-                vertical-stretch: 1;
-                accessible-label: "Suchtreffer und Lesefehler";
-            }
-            if root.busy : Rectangle { vertical-stretch: 1; }
-            Text { text: root.notice; color: Colors.accent; wrap: word-wrap; visible: root.notice != ""; }
-            HorizontalLayout {
-                spacing: 7px;
-                Rectangle { horizontal-stretch: 1; }
-                Button { text: @tr("Schließen"); clicked => { root.close-search(); } }
-                if root.busy : Button { text: "Suchlauf abbrechen"; clicked => { root.cancel-search(); } }
-                if root.has-result : Button { text: "Suchkriterien"; clicked => { root.has-result = false; } }
-                if root.has-result : Button { text: "Treffer übernehmen"; enabled: root.can-use; clicked => { root.use-results(); } }
+            if root.busy || root.has-result : VerticalLayout {
+                spacing: 10px;
+                DialogHeading {
+                    icon: @image-url("icons/search.svg");
+                    title: root.busy ? @tr("Dateisuche") : root.result-title;
+                    subtitle: root.base;
+                    wrap-subtitle: false;
+                }
+                if root.busy : ProgressIndicator { indeterminate: true; height: 4px; }
+                if root.notice != "" : Text { text: root.notice; color: Colors.accent; wrap: word-wrap; }
+                if root.has-result : TextEdit {
+                    text: root.result-list;
+                    read-only: true;
+                    vertical-stretch: 1;
+                    accessible-label: @tr("Suchtreffer und Lesefehler");
+                }
+                if root.busy : Rectangle { vertical-stretch: 1; }
+                Rectangle { height: 1px; background: Colors.edge; }
+                HorizontalLayout {
+                    spacing: 7px;
+                    Rectangle { horizontal-stretch: 1; }
+                    Button { text: @tr("Schließen"); clicked => { root.close-search(); } }
+                    if root.busy : Button {
+                        text: @tr("Suchlauf abbrechen");
+                        clicked => { root.cancel-search(); }
+                        init => { self.focus(); }
+                    }
+                    if root.has-result : Button {
+                        text: @tr("Suchkriterien");
+                        clicked => { root.has-result = false; }
+                        init => { if (!root.can-use) { self.focus(); } }
+                    }
+                    if root.has-result : Button {
+                        text: @tr("Treffer übernehmen");
+                        enabled: root.can-use;
+                        primary: true;
+                        clicked => { root.use-results(); }
+                        init => { if (root.can-use) { self.focus(); } }
+                    }
+                }
             }
         }
     }
@@ -431,59 +477,110 @@ component FtpProfilesCard inherits Rectangle {
     VerticalLayout {
         padding: 18px;
         spacing: 10px;
-        Text { text: @tr("FTP-Verbindungen"); color: Colors.text; font-size: 21px; }
+        DialogHeading { icon: @image-url("icons/network.svg"); title: @tr("FTP-Verbindungen"); }
+        HorizontalLayout {
+            spacing: 8px;
+            profile-list := ComboBox {
+                model: root.profiles;
+                current-index: root.selected;
+                accessible-label: @tr("Gespeicherte FTP-Verbindungen");
+                horizontal-stretch: 1;
+                selected => { root.select(self.current-index); }
+            }
+            Button { text: @tr("Neu"); clicked => { root.select(0); } }
+            Button { text: @tr("Importieren"); clicked => { root.operate("import", root.data, ""); } }
+        }
+        Rectangle { height: 1px; background: Colors.edge; }
         ScrollView {
+            viewport-width: self.visible-width;
             VerticalLayout {
+                width: parent.visible-width;
                 spacing: 8px;
                 HorizontalLayout {
-                    spacing: 8px;
-                    profile-list := ComboBox {
-                        model: root.profiles;
-                        current-index: root.selected;
-                        accessible-label: "Gespeicherte FTP-Verbindungen";
+                    spacing: 10px;
+                    VerticalLayout {
                         horizontal-stretch: 1;
-                        selected => { root.select(self.current-index); }
+                        spacing: 4px;
+                        FieldLabel { text: @tr("Profilname"); }
+                        name := LineEdit { text: root.data.name; accessible-label: @tr("Profilname"); }
                     }
-                    Button { text: "Neu"; clicked => { root.select(0); } }
-                    Button { text: "Importieren"; clicked => { root.operate("import", root.data, ""); } }
+                    VerticalLayout {
+                        horizontal-stretch: 2;
+                        spacing: 4px;
+                        FieldLabel { text: @tr("FTP-Adresse und Startordner"); }
+                        address := LineEdit { text: root.data.address; placeholder-text: "ftp://server:port/startordner/"; accessible-label: @tr("FTP-Adresse und Startordner"); }
+                    }
                 }
-                name := LineEdit { text: root.data.name; placeholder-text: "Profilname"; accessible-label: "Profilname"; }
-                address := LineEdit { text: root.data.address; placeholder-text: "ftp://server:port/startordner/"; accessible-label: "FTP-Adresse und Startordner"; }
-                user := LineEdit { text: root.data.user; placeholder-text: "Benutzername (leer für anonym)"; accessible-label: "Benutzername"; }
-                proxy := LineEdit { text: root.data.proxy; placeholder-text: "HTTP-/SOCKS-Proxy (optional)"; accessible-label: "Proxy"; }
-                local := LineEdit { text: root.data.local-directory; placeholder-text: "Lokaler Startordner im anderen Fenster (optional)"; accessible-label: "Lokaler Startordner"; }
-                security := ComboBox {
-                    model: ["Explizites FTPS (FTP mit TLS)", "Implizites FTPS", "Klartext-FTP"];
-                    current-index: root.data.security;
-                    accessible-label: "Verschlüsselungsmodus";
+                HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        spacing: 4px;
+                        FieldLabel { text: @tr("Verschlüsselungsmodus"); }
+                        security := ComboBox {
+                            model: [@tr("Explizites FTPS (FTP mit TLS)"), @tr("Implizites FTPS"), @tr("Klartext-FTP")];
+                            current-index: root.data.security;
+                            accessible-label: @tr("Verschlüsselungsmodus");
+                        }
+                    }
+                    VerticalLayout {
+                        spacing: 4px;
+                        FieldLabel { text: @tr("Format der Verzeichnisliste"); }
+                        listing := ComboBox {
+                            model: [@tr("Automatisch"), @tr("Nur MLSD"), @tr("Nur LIST (Unix / IIS)")];
+                            current-index: root.data.listing;
+                            accessible-label: @tr("Format der Verzeichnisliste");
+                        }
+                    }
                 }
                 Text {
                     text: security.current-index == 2
-                        ? "Klartext-FTP überträgt Passwort und Dateien unverschlüsselt."
-                        : security.current-index == 1 ? "Für implizites FTPS ftps:// verwenden." : "Für explizites FTPS ftp:// verwenden.";
-                    color: Colors.text;
+                        ? @tr("Klartext-FTP überträgt Passwort und Dateien unverschlüsselt.")
+                        : security.current-index == 1 ? @tr("Für implizites FTPS ftps:// verwenden.") : @tr("Für explizites FTPS ftp:// verwenden.");
+                    color: security.current-index == 2 ? Colors.archive : Colors.muted;
                     wrap: word-wrap;
                 }
-                active := CheckBox { text: "Aktiver FTP-Modus (Direktverbindung)"; checked: root.data.active; }
-                listing := ComboBox {
-                    model: ["Verzeichnisliste automatisch", "Nur MLSD", "Nur LIST (Unix / IIS)"];
-                    current-index: root.data.listing;
-                    accessible-label: "Format der Verzeichnisliste";
+                HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        spacing: 4px;
+                        FieldLabel { text: @tr("Lokaler Startordner"); }
+                        local := LineEdit { text: root.data.local-directory; placeholder-text: @tr("Absoluter Pfad (optional)"); accessible-label: @tr("Lokaler Startordner"); }
+                    }
+                    VerticalLayout {
+                        spacing: 4px;
+                        FieldLabel { text: @tr("Proxy"); }
+                        proxy := LineEdit { text: root.data.proxy; placeholder-text: @tr("HTTP-/SOCKS-Proxy (optional)"); accessible-label: @tr("Proxy"); }
+                    }
                 }
-                remember := CheckBox { text: "Passwort in Windows-Anmeldeinformationen speichern"; checked: root.data.remember; }
-                password-field := LineEdit {
-                    placeholder-text: root.data.remember ? "Neues Passwort (optional)" : "Passwort zum Speichern";
-                    input-type: password;
-                    enabled: remember.checked;
-                    accessible-label: "FTP-Passwort";
+                active := CheckBox { text: @tr("Aktiver FTP-Modus (Direktverbindung)"); checked: root.data.active; }
+                Rectangle { height: 1px; background: Colors.edge; }
+                HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        spacing: 4px;
+                        FieldLabel { text: @tr("Benutzername"); }
+                        user := LineEdit { text: root.data.user; placeholder-text: @tr("Leer für anonyme Anmeldung"); accessible-label: @tr("Benutzername"); }
+                    }
+                    VerticalLayout {
+                        spacing: 4px;
+                        FieldLabel { text: @tr("FTP-Passwort"); }
+                        password-field := LineEdit {
+                            placeholder-text: root.data.remember ? @tr("Neues Passwort (optional)") : @tr("Passwort zum Speichern");
+                            input-type: password;
+                            enabled: remember.checked;
+                            accessible-label: @tr("FTP-Passwort");
+                        }
+                    }
                 }
+                remember := CheckBox { text: @tr("Passwort in Windows-Anmeldeinformationen speichern"); checked: root.data.remember; }
             }
         }
-        Text { text: root.notice; wrap: word-wrap; color: Colors.text; }
+        if root.notice != "" : Text { text: root.notice; wrap: word-wrap; color: Colors.text; }
+        Rectangle { height: 1px; background: Colors.edge; }
         HorizontalLayout {
             spacing: 8px;
             Button {
-                text: "Löschen";
+                text: @tr("Löschen");
                 enabled: root.selected > 0;
                 clicked => { root.operate("delete", root.data, ""); }
             }
@@ -501,7 +598,8 @@ component FtpProfilesCard inherits Rectangle {
                 }
             }
             Button {
-                text: "Verbinden";
+                text: @tr("Verbinden");
+                primary: true;
                 enabled: root.selected > 0 && name.text == root.data.name && address.text == root.data.address
                     && user.text == root.data.user && proxy.text == root.data.proxy
                     && local.text == root.data.local-directory
@@ -540,37 +638,8 @@ export struct ShortcutLabels {
     move-file: string,
     mkdir: string,
     delete: string,
-}
-
-export global Colors {
-    in property <bool> light;
-    in property <bool> custom-selection;
-    in property <bool> custom-cursor;
-    in property <color> selection-light;
-    in property <color> selection-dark;
-    in property <color> cursor-light;
-    in property <color> cursor-dark;
-    out property <color> background: light ? #e8eff0 : #10181e;
-    out property <color> panel: light ? #f9fcfc : #18232b;
-    out property <color> surface: light ? #f1f6f7 : #212e38;
-    out property <color> edge: light ? #c2d1d5 : #334852;
-    out property <color> accent: light ? #046d5c : #72e3c6;
-    out property <color> text: light ? #1b2f3a : #eff6f7;
-    out property <color> muted: light ? #49616d : #a8bdc7;
-    out property <color> selection: custom-selection ? (light ? selection-light : selection-dark) : (light ? #cfece4 : #264b48);
-    out property <color> cursor: custom-cursor ? (light ? cursor-light : cursor-dark) : (light ? #e3f3ef : #293d45);
-    out property <color> folder: light ? #8c5105 : #efbc78;
-    out property <color> media: light ? #604395 : #c6aefa;
-    out property <color> archive: light ? #8e3a55 : #f1a2b7;
-}
-
-component NavButton inherits Button {
-    in property <string> label;
-    accessible-label: root.label;
-    width: 34px;
-    icon-size: 16px;
-    colorize-icon: true;
-    Tooltip { text: @markdown("\{root.label}"); }
+    palette: string,
+    job-details: string,
 }
 
 component CustomBarButton inherits NavButton {
@@ -591,16 +660,84 @@ component CustomBarButton inherits NavButton {
         : @image-url("icons/file.svg");
 }
 
-component ActionButton inherits Button {
-    colorize-icon: true;
-    icon-size: 17px;
-}
+component CommandPaletteCard inherits Rectangle {
+    in property <[CommandRow]> rows;
+    property <int> current: 0;
+    callback query(string);
+    callback pick(string);
+    callback dismiss();
+    background: Colors.panel;
+    border-radius: 14px;
+    border-color: Colors.edge;
+    border-width: 1px;
 
-component DetailCell inherits Text {
-    color: Colors.muted;
-    font-size: 12px;
-    vertical-alignment: center;
-    overflow: elide;
+    function select(index: int) {
+        if (root.rows.length > 0) {
+            root.current = min(max(index, 0), root.rows.length - 1);
+            if (root.current * 34px < -results.viewport-y) {
+                results.viewport-y = -root.current * 34px;
+            } else if ((root.current + 1) * 34px > -results.viewport-y + results.visible-height) {
+                results.viewport-y = results.visible-height - (root.current + 1) * 34px;
+            }
+        }
+    }
+    function run-current() {
+        if (root.current >= 0 && root.current < root.rows.length) {
+            root.pick(root.rows[root.current].key);
+        }
+    }
+
+    FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.UpArrow) { root.select(root.current - 1); return accept; }
+            if (event.text == Key.DownArrow) { root.select(root.current + 1); return accept; }
+            if (event.text == Key.Escape) { root.dismiss(); return accept; }
+            return reject;
+        }
+        VerticalLayout {
+            padding: 16px;
+            spacing: 8px;
+            HorizontalLayout {
+                spacing: 8px;
+                Image { source: @image-url("icons/search.svg"); width: 20px; height: 20px; colorize: Colors.accent; }
+                Text { text: @tr("Befehlspalette"); color: Colors.text; font-size: 20px; font-weight: 650; }
+                Rectangle { horizontal-stretch: 1; }
+                NavButton { icon: @image-url("icons/close.svg"); label: @tr("Schließen"); clicked => { root.dismiss(); } }
+            }
+            input := LineEdit {
+                placeholder-text: @tr("Befehl oder Tastenkürzel suchen …");
+                accessible-label: self.placeholder-text;
+                edited(text) => { root.current = 0; results.viewport-y = 0px; root.query(text); }
+                accepted => { root.run-current(); }
+            }
+            results := ListView {
+                vertical-stretch: 1;
+                accessible-label: @tr("Gefundene Befehle");
+                for row[i] in root.rows : Rectangle {
+                    height: 34px;
+                    border-radius: 5px;
+                    background: i == root.current || hit.has-hover ? Colors.selection : transparent;
+                    accessible-role: button;
+                    accessible-label: row.label + (row.shortcut == "" ? "" : " · " + row.shortcut);
+                    accessible-action-default => { root.pick(row.key); }
+                    HorizontalLayout {
+                        padding-left: 8px; padding-right: 10px;
+                        spacing: 9px;
+                        Image { source: row.icon; width: 17px; height: 17px; colorize: Colors.accent; }
+                        DetailCell { text: row.label; color: Colors.text; font-size: 13px; horizontal-stretch: 1; }
+                        DetailCell { text: row.shortcut; }
+                    }
+                    hit := TouchArea { clicked => { root.pick(row.key); } }
+                }
+            }
+            if root.rows.length == 0 : DetailCell { text: @tr("Keine passenden Befehle."); }
+            HorizontalLayout {
+                DetailCell { text: @tr("↑ ↓ Auswählen · Enter Ausführen · Esc Schließen"); horizontal-stretch: 1; }
+                Button { text: @tr("Ausführen"); enabled: root.rows.length > 0; clicked => { root.run-current(); } }
+            }
+        }
+        init => { input.focus(); }
+    }
 }
 
 component PluginManagerCard inherits Rectangle {
@@ -619,7 +756,7 @@ component PluginManagerCard inherits Rectangle {
     VerticalLayout {
         padding: 16px;
         spacing: 8px;
-        Text { text: "Plugin-Verwaltung"; color: Colors.text; font-size: 21px; }
+        DialogHeading { icon: @image-url("icons/settings.svg"); title: @tr("Plugin-Verwaltung"); }
         HorizontalLayout {
             spacing: 7px;
             Button { text: "DLL registrieren …"; enabled: !root.busy; clicked => { root.operate("add", -1); } }
@@ -715,7 +852,7 @@ component FtpBrowserCard inherits FocusScope {
         VerticalLayout {
             padding: 16px;
             spacing: 8px;
-            Text { text: "FTP-Verzeichnis"; color: Colors.text; font-size: 20px; font-weight: 700; }
+            DialogHeading { icon: @image-url("icons/network.svg"); title: @tr("FTP-Verzeichnis"); }
             HorizontalLayout {
                 spacing: 6px;
                 NavButton { icon: @image-url("icons/up.svg"); label: "Übergeordneter FTP-Ordner"; enabled: root.has-parent && !root.busy; clicked => { root.browse("up", -1); } }
@@ -820,7 +957,7 @@ component SyncOptionsCard inherits Rectangle {
     VerticalLayout {
         padding: 16px;
         spacing: 10px;
-        Text { text: root.ftp ? @tr("FTP mit lokalem Ordner abgleichen") : (root.archive-side == 2 ? "Archive vergleichen" : @tr("Verzeichnisse synchronisieren")); color: Colors.text; font-size: 20px; font-weight: 700; }
+        DialogHeading { icon: @image-url("icons/sync.svg"); title: root.ftp ? @tr("FTP mit lokalem Ordner abgleichen") : (root.archive-side == 2 ? @tr("Archive vergleichen") : @tr("Verzeichnisse synchronisieren")); }
         for folder[index] in root.roots : DetailCell {
             text: (index == 0 ? (root.ftp ? "Lokal  " : "Links  ") : (root.ftp ? "FTP  " : "Rechts  ")) + folder;
             Tooltip { text: @markdown("\{folder}"); }
@@ -967,7 +1104,7 @@ component FileConflictCard inherits Rectangle {
     VerticalLayout {
         padding: 14px;
         spacing: 9px;
-        Text { text: @tr("Datei am Ziel vorhanden"); color: Colors.text; font-size: 20px; font-weight: 700; }
+        DialogHeading { icon: @image-url("icons/compare.svg"); title: @tr("Datei am Ziel vorhanden"); }
         HorizontalLayout {
             vertical-stretch: 1;
             spacing: 8px;
@@ -982,37 +1119,6 @@ component FileConflictCard inherits Rectangle {
             Button { text: @tr("Anwenden"); enabled: choice.current-index >= 0 && (!root.manual-name || target-name.text != ""); clicked => { root.decide(choice.current-index, !root.manual-name && all.checked, target-name.text); } }
         }
         target-name := LineEdit { visible: root.manual-name; placeholder-text: @tr("Neuer Dateiname im selben Ordner"); accessible-label: @tr("Neuer Zielname"); }
-    }
-}
-
-component NtfsOptionsCard inherits Rectangle {
-    in property <NtfsDraft> draft;
-    callback save(NtfsDraft);
-    callback close();
-    background: Colors.panel;
-    border-color: Colors.accent;
-    border-width: 1px;
-    border-radius: 10px;
-    VerticalLayout {
-        padding: 16px;
-        spacing: 8px;
-        Text { text: "NTFS-Kopieroptionen"; color: Colors.text; font-size: 20px; font-weight: 700; }
-        Text { text: "Die Optionen gelten für neue lokale Kopier- und Verschiebeaufträge. Ein Verschieben per direkter Umbenennung erhält die Dateisystemmerkmale ohnehin."; color: Colors.muted; wrap: word-wrap; }
-        streams := CheckBox { text: "Benannte Datenströme übernehmen"; checked: root.draft.streams; }
-        acl := CheckBox { text: "Quellberechtigungen als geschützte DACL übernehmen"; checked: root.draft.permissions; }
-        owner := CheckBox { text: "Datei- und Ordnerbesitzer übernehmen"; checked: root.draft.owner; }
-        audit := CheckBox { text: "Überwachungs-ACL übernehmen (erfordert Windows-Recht)"; checked: root.draft.audit; }
-        links := CheckBox { text: "Hardlink-Gruppen im Ziel erhalten"; checked: root.draft.hardlinks; }
-        sparse := CheckBox { text: "Nur belegte Bereiche von Sparse-Dateien kopieren"; checked: root.draft.sparse; }
-        created := CheckBox { text: @tr("Erstellungszeit übernehmen"); checked: root.draft.creation-time; }
-        junctions := CheckBox { text: @tr("Ausgewählte Verzeichnisjunctions als Links kopieren"); checked: root.draft.copy-links; }
-        Rectangle { vertical-stretch: 1; }
-        HorizontalLayout {
-            spacing: 8px;
-            Rectangle { horizontal-stretch: 1; }
-            Button { text: @tr("Abbrechen"); clicked => { root.close(); } }
-            Button { text: @tr("Speichern"); clicked => { root.save({ streams: streams.checked, permissions: acl.checked, owner: owner.checked, audit: audit.checked, hardlinks: links.checked, sparse: sparse.checked, creation-time: created.checked, copy-links: junctions.checked }); } }
-        }
     }
 }
 
@@ -1045,7 +1151,7 @@ component TextComparisonCard inherits Rectangle {
     VerticalLayout {
         padding: 14px;
         spacing: 8px;
-        Text { text: root.data.binary ? "Binärvergleich" : "Dateien nach Inhalt vergleichen"; color: Colors.text; font-size: 20px; font-weight: 700; }
+        DialogHeading { icon: @image-url("icons/compare.svg"); title: root.data.binary ? @tr("Binärvergleich") : @tr("Dateien nach Inhalt vergleichen"); }
         HorizontalLayout {
             visible: !root.data.binary;
             spacing: 5px;
@@ -1133,7 +1239,7 @@ component SyncReviewCard inherits Rectangle {
     VerticalLayout {
         padding: 16px;
         spacing: 8px;
-        Text { text: root.copy-only ? "FTP-Kopie prüfen" : (root.comparison-only ? "Archivvergleich" : "Synchronisierung prüfen"); color: Colors.text; font-size: 20px; font-weight: 700; }
+        DialogHeading { icon: @image-url("icons/sync.svg"); title: root.copy-only ? @tr("FTP-Kopie prüfen") : (root.comparison-only ? @tr("Archivvergleich") : @tr("Synchronisierung prüfen")); }
         for folder[index] in root.roots : DetailCell {
             text: (index == 0 ? "Links  " : "Rechts  ") + folder;
             Tooltip { text: @markdown("\{folder}"); }
@@ -1697,6 +1803,9 @@ component FilePanel inherits Rectangle {
 
 component SettingsCard inherits Rectangle {
     in property <SettingsData> current;
+    in property <int> initial-page;
+    in property <[string]> languages;
+    in property <string> error;
     in property <[ShortcutRow]> shortcut-commands;
     in property <[ShortcutRow]> shortcut-assigned;
     in property <string> shortcut-query;
@@ -1711,7 +1820,7 @@ component SettingsCard inherits Rectangle {
     callback edit-shortcut(string, string);
     callback apply(SettingsData, bool);
     callback close();
-    property <int> page;
+    property <int> page: root.initial-page;
     property <bool> toolbar: root.current.toolbar;
     property <bool> panel-toolbar: root.current.panel-toolbar;
     property <bool> drive-buttons: root.current.drive-buttons;
@@ -1732,6 +1841,20 @@ component SettingsCard inherits Rectangle {
     property <bool> show-hidden: root.current.show-hidden;
     property <int> list-font: root.current.list-font;
     property <int> list-font-size: root.current.list-font-size;
+    property <int> language: root.current.language;
+    property <string> editor: root.current.editor;
+    property <string> everything: root.current.everything;
+    property <string> transfer-rate: root.current.transfer-rate;
+    property <string> transfer-log: root.current.transfer-log;
+    property <bool> transfer-comments: root.current.transfer-comments;
+    property <bool> ntfs-streams: root.current.ntfs.streams;
+    property <bool> ntfs-permissions: root.current.ntfs.permissions;
+    property <bool> ntfs-owner: root.current.ntfs.owner;
+    property <bool> ntfs-audit: root.current.ntfs.audit;
+    property <bool> ntfs-hardlinks: root.current.ntfs.hardlinks;
+    property <bool> ntfs-sparse: root.current.ntfs.sparse;
+    property <bool> ntfs-creation-time: root.current.ntfs.creation-time;
+    property <bool> ntfs-copy-links: root.current.ntfs.copy-links;
     property <SettingsData> draft: {
         toolbar: root.toolbar, panel-toolbar: root.panel-toolbar, drive-buttons: root.drive-buttons,
         drive-list: root.drive-list, folder-tabs: root.folder-tabs, current-path: root.current-path,
@@ -1741,33 +1864,59 @@ component SettingsCard inherits Rectangle {
         numpad-folders: root.numpad-folders, stacked: root.stacked, light: root.light,
         quick-find-start: root.quick-find-start,
         system-theme: root.system-theme,
-        show-hidden: root.show-hidden, list-font: root.list-font, list-font-size: root.list-font-size
+        show-hidden: root.show-hidden, list-font: root.list-font, list-font-size: root.list-font-size,
+        language: root.language, editor: root.editor, everything: root.everything,
+        transfer-rate: root.transfer-rate, transfer-log: root.transfer-log, transfer-comments: root.transfer-comments,
+        ntfs: {
+            streams: root.ntfs-streams, permissions: root.ntfs-permissions, owner: root.ntfs-owner,
+            audit: root.ntfs-audit, hardlinks: root.ntfs-hardlinks, sparse: root.ntfs-sparse,
+            creation-time: root.ntfs-creation-time, copy-links: root.ntfs-copy-links
+        }
     };
     border-radius: 10px;
     border-width: 1px;
-    border-color: Colors.accent;
+    border-color: Colors.edge;
     background: Colors.panel;
 
     VerticalLayout {
         padding: 16px;
         spacing: 12px;
-        Text { text: @tr("Einstellungen"); color: Colors.text; font-size: 20px; font-weight: 700; }
+        DialogHeading { icon: @image-url("icons/settings.svg"); title: @tr("Einstellungen"); }
+        Rectangle { height: 1px; background: Colors.edge; }
         HorizontalLayout {
             spacing: 14px;
             vertical-stretch: 1;
             VerticalLayout {
-                width: 155px;
+                width: 178px;
                 alignment: start;
                 spacing: 5px;
-                for label[index] in ["Layout", @tr("Bedienung"), @tr("Tastatur"), @tr("Schrift")] : Button {
+                for label[index] in [@tr("Allgemein"), @tr("Layout"), @tr("Bedienung"), @tr("Tastatur"), @tr("Schrift"), @tr("Dateiübertragung"), @tr("Programme")] : ActionButton {
                     text: label;
+                    min-height: 32px;
+                    icon: index == 0 ? @image-url("icons/settings.svg")
+                        : index == 1 ? @image-url("icons/folder.svg")
+                        : index == 2 ? @image-url("icons/check.svg")
+                        : index == 3 ? @image-url("icons/terminal.svg")
+                        : index == 4 ? @image-url("icons/edit.svg")
+                        : index == 5 ? @image-url("icons/move.svg") : @image-url("icons/code.svg");
                     checkable: true;
                     checked: root.page == index;
-                    clicked => { root.page = index; if (index != 2) { root.edit-shortcut("stop", ""); } }
-                    init => { if (index == 0) { self.focus(); } }
+                    clicked => { root.page = index; if (index != 3) { root.edit-shortcut("stop", ""); } }
+                    init => { if (index == root.initial-page) { self.focus(); } }
                 }
             }
-            if root.page == 0 : ScrollView {
+            Rectangle { width: 1px; background: Colors.edge; }
+            if root.page == 0 : VerticalLayout {
+                alignment: start;
+                spacing: 10px;
+                Text { text: @tr("Oberflächensprache"); color: Colors.text; font-weight: 650; }
+                ComboBox { model: root.languages; current-index <=> root.language; accessible-label: @tr("Oberflächensprache"); }
+                Rectangle { height: 1px; background: Colors.edge; }
+                Text { text: @tr("Farbschema"); color: Colors.text; font-weight: 650; }
+                CheckBox { text: @tr("Windows-Farbschema verwenden"); checked <=> root.system-theme; }
+                CheckBox { text: @tr("Helles Farbschema"); checked <=> root.light; enabled: !root.system-theme; }
+            }
+            if root.page == 1 : ScrollView {
                 VerticalLayout {
                     spacing: 5px;
                     alignment: start;
@@ -1786,18 +1935,16 @@ component SettingsCard inherits Rectangle {
                     CheckBox { text: @tr("Dateifenster übereinander"); checked <=> root.stacked; }
                 }
             }
-            if root.page == 1 : VerticalLayout {
+            if root.page == 2 : VerticalLayout {
                 alignment: start;
                 spacing: 7px;
                 CheckBox { text: @tr("Mit Num + und Num * auch Ordner markieren"); checked <=> root.numpad-folders; }
                 Text { text: @tr("Schnellsuche starten"); color: Colors.text; }
                 ComboBox { model: [@tr("Über das Tastenkürzel"), @tr("Beim Tippen"), @tr("Mit Alt"), @tr("Mit Strg+Alt")]; current-index <=> root.quick-find-start; accessible-label: @tr("Schnellsuche starten"); }
                 CheckBox { text: @tr("Versteckte Dateien anzeigen"); checked <=> root.show-hidden; }
-                CheckBox { text: @tr("Windows-Farbschema verwenden"); checked <=> root.system-theme; }
-                CheckBox { text: @tr("Helles Farbschema"); checked <=> root.light; enabled: !root.system-theme; }
                 DetailCell { text: @tr("Strg-Klick markiert einzelne Einträge. Umschalt-Klick markiert einen Bereich."); wrap: word-wrap; }
             }
-            if root.page == 2 : VerticalLayout {
+            if root.page == 3 : VerticalLayout {
                 spacing: 7px;
                 LineEdit {
                     text: root.shortcut-query;
@@ -1859,7 +2006,7 @@ component SettingsCard inherits Rectangle {
                     Button { text: @tr("Standardbelegung laden"); clicked => { root.edit-shortcut("reset", ""); } }
                 }
             }
-            if root.page == 3 : VerticalLayout {
+            if root.page == 4 : VerticalLayout {
                 alignment: start;
                 spacing: 10px;
                 Text { text: @tr("Schrift in den Dateilisten"); color: Colors.text; }
@@ -1881,13 +2028,50 @@ component SettingsCard inherits Rectangle {
                     }
                 }
             }
+            if root.page == 5 : ScrollView {
+                viewport-width: self.visible-width;
+                VerticalLayout {
+                    width: parent.visible-width;
+                    spacing: 8px;
+                    Text { text: @tr("Geschwindigkeit und Protokoll"); color: Colors.text; font-weight: 650; }
+                    Text { text: @tr("Übertragungsrate (KiB/s)"); color: Colors.muted; }
+                    LineEdit { text <=> root.transfer-rate; accessible-label: @tr("Übertragungsrate (KiB/s)"); }
+                    DetailCell { text: @tr("0 bedeutet unbegrenzt."); }
+                    Text { text: @tr("Protokolldatei"); color: Colors.muted; }
+                    LineEdit { text <=> root.transfer-log; placeholder-text: @tr("Absoluter Pfad (optional)"); accessible-label: @tr("Protokolldatei"); }
+                    CheckBox { text: @tr("Dateikommentare mitführen"); checked <=> root.transfer-comments; }
+                    Rectangle { height: 1px; background: Colors.edge; }
+                    Text { text: @tr("NTFS-Kopieroptionen"); color: Colors.text; font-weight: 650; }
+                    CheckBox { text: @tr("Benannte Datenströme übernehmen"); checked <=> root.ntfs-streams; }
+                    CheckBox { text: @tr("Zugriffsrechte der Quelle übernehmen"); checked <=> root.ntfs-permissions; }
+                    CheckBox { text: @tr("Besitzer übernehmen"); checked <=> root.ntfs-owner; }
+                    CheckBox { text: @tr("Überwachungs-ACL übernehmen (erfordert Windows-Recht)"); checked <=> root.ntfs-audit; }
+                    CheckBox { text: @tr("Hardlink-Gruppen im Ziel erhalten"); checked <=> root.ntfs-hardlinks; }
+                    CheckBox { text: @tr("Nur belegte Bereiche von Sparse-Dateien kopieren"); checked <=> root.ntfs-sparse; }
+                    CheckBox { text: @tr("Erstellungszeit übernehmen"); checked <=> root.ntfs-creation-time; }
+                    CheckBox { text: @tr("Ausgewählte Verzeichnisjunctions als Links kopieren"); checked <=> root.ntfs-copy-links; }
+                }
+            }
+            if root.page == 6 : VerticalLayout {
+                alignment: start;
+                spacing: 9px;
+                Text { text: @tr("Externer Editor"); color: Colors.text; font-weight: 650; }
+                LineEdit { text <=> root.editor; placeholder-text: @tr("Absoluter Programmpfad"); accessible-label: @tr("Externer Editor"); }
+                DetailCell { text: @tr("Bei leerem Feld verwendet Arco den Windows-Editor."); wrap: word-wrap; }
+                Rectangle { height: 1px; background: Colors.edge; }
+                Text { text: @tr("Everything-Suche"); color: Colors.text; font-weight: 650; }
+                LineEdit { text <=> root.everything; placeholder-text: @tr("Pfad zu es.exe"); accessible-label: @tr("Everything-Suche"); }
+                DetailCell { text: @tr("Bei leerem Feld verwendet Arco die interne Suche."); wrap: word-wrap; }
+            }
         }
+        Rectangle { height: 1px; background: Colors.edge; }
+        if root.error != "" : Text { text: root.error; color: Colors.archive; wrap: word-wrap; }
         HorizontalLayout {
             spacing: 6px;
             Rectangle { horizontal-stretch: 1; }
             Button { text: @tr("Abbrechen"); clicked => { root.close(); } }
             Button { text: @tr("Anwenden"); clicked => { root.apply(root.draft, false); } }
-            Button { text: "OK"; clicked => { root.apply(root.draft, true); } }
+            Button { text: "OK"; primary: true; clicked => { root.apply(root.draft, true); } }
         }
     }
 }
@@ -1992,14 +2176,15 @@ export component ListerWindow inherits Window {
     title: root.lister-title;
     default-font-family: "Segoe UI";
     default-font-size: 14px;
-    preferred-width: 850px;
-    preferred-height: 620px;
-    min-width: 540px;
-    min-height: 300px;
-    background: root.light ? #f3f6f8 : #17232a;
+    preferred-width: 900px;
+    preferred-height: 650px;
+    min-width: 550px;
+    min-height: 320px;
+    background: Colors.background;
 
     in property <bool> light;
     in property <string> lister-title: "Arco Lister";
+    in property <string> file-title;
     in property <bool> busy;
     in property <bool> has-page;
     in property <bool> has-image;
@@ -2013,19 +2198,29 @@ export component ListerWindow inherits Window {
     in property <string> preview-text;
     in property <image> preview-image;
     property <int> zoom-percent;
+    out property <PreviewBounds> rich-bounds: {
+        x: rich-host.absolute-position.x / 1px,
+        y: rich-host.absolute-position.y / 1px,
+        width: rich-host.width / 1px,
+        height: rich-host.height / 1px
+    };
 
     callback navigate(string);
     callback control(int, string, int);
     callback close-lister();
     callback view-raw();
     callback toggle-fullscreen();
+    callback rich-resized();
+    changed rich-bounds => { root.rich-resized(); }
+    changed light => { Palette.color-scheme = root.light ? ColorScheme.light : ColorScheme.dark; }
 
     keyboard := FocusScope {
         width: 100%;
         height: 100%;
         focus-on-tab-navigation: false;
-        init => { self.focus(); }
+        init => { self.focus(); Palette.color-scheme = root.light ? ColorScheme.light : ColorScheme.dark; }
         key-pressed(event) => {
+            if event.text == Key.Escape { root.close-lister(); return accept; }
             if event.modifiers.alt && event.text == Key.Return {
                 root.toggle-fullscreen();
                 return accept;
@@ -2051,77 +2246,53 @@ export component ListerWindow inherits Window {
 
         VerticalLayout {
             padding: 12px;
-            spacing: 8px;
-            if root.has-page : VerticalLayout {
-                spacing: 6px;
-                HorizontalLayout {
-                    spacing: 6px;
-                    search := LineEdit {
-                        horizontal-stretch: 1;
-                        placeholder-text: root.hex ? @tr("Hexbytes suchen") : @tr("Text suchen");
-                        enabled: !root.busy;
-                        accepted => { if self.text != "" { root.control(2, self.text, 0); } }
-                    }
-                    Button { text: @tr("Suchen"); enabled: !root.busy && search.text != ""; clicked => { root.control(2, search.text, 0); } }
-                    Button { text: @tr("Ab Anfang"); enabled: !root.busy && search.text != ""; clicked => { root.control(3, search.text, 0); } }
-                }
-                HorizontalLayout {
-                    spacing: 6px;
-                    ComboBox {
-                        model: root.encodings;
-                        current-index: root.encoding;
-                        enabled: !root.busy && !root.hex;
-                        selected => { root.control(0, "", self.current-index); }
-                    }
-                    position := LineEdit {
-                        horizontal-stretch: 1;
-                        placeholder-text: @tr("Byte-Offset (dezimal oder 0x)");
-                        enabled: !root.busy;
-                        accepted => { if self.text != "" { root.control(1, self.text, 0); } }
-                    }
-                    Button { text: @tr("Springen"); enabled: !root.busy && position.text != ""; clicked => { root.control(1, position.text, 0); } }
-                }
-                TextEdit {
-                    vertical-stretch: 1;
-                    read-only: true;
-                    font-family: "Consolas";
-                    wrap: no-wrap;
-                    text: root.preview-text;
-                }
+            spacing: 9px;
+            DialogHeading {
+                icon: @image-url("icons/eye.svg");
+                title: @tr("Arco Lister");
+                subtitle: root.file-title;
+                wrap-subtitle: false;
             }
-            if root.has-image && root.zoom-percent == 0 : Image {
+            if root.busy : ProgressIndicator { height: 4px; indeterminate: true; }
+            Rectangle {
                 vertical-stretch: 1;
-                image-fit: contain;
-                source: root.preview-image;
-            }
-            if root.has-image && root.zoom-percent > 0 : ScrollView {
-                vertical-stretch: 1;
-                viewport-width: max(self.visible-width, root.preview-image.width * root.zoom-percent * 1px / 100);
-                viewport-height: max(self.visible-height, root.preview-image.height * root.zoom-percent * 1px / 100);
-                Image {
-                    width: root.preview-image.width * root.zoom-percent * 1px / 100;
-                    height: root.preview-image.height * root.zoom-percent * 1px / 100;
-                    x: max(0px, (parent.viewport-width - self.width) / 2);
-                    y: max(0px, (parent.viewport-height - self.height) / 2);
-                    image-fit: contain;
-                    source: root.preview-image;
+                if root.has-page : ReaderPane {
+                    width: 100%; height: 100%;
+                    busy: root.busy;
+                    hex: root.hex;
+                    can-back: root.can-back;
+                    can-next: root.can-next;
+                    encoding: root.encoding;
+                    encodings: root.encodings;
+                    body: root.preview-text;
+                    navigate(action) => { root.navigate(action); }
+                    control(operation, value, option) => { root.control(operation, value, option); }
+                }
+                if root.has-image : ImagePane {
+                    width: 100%; height: 100%;
+                    picture: root.preview-image;
+                    zoom: root.zoom-percent;
+                }
+                rich-host := Rectangle {
+                    width: 100%; height: 100%;
+                    visible: !root.has-page && !root.has-image;
+                    background: Colors.panel;
+                    border-radius: 8px;
                 }
             }
-            if !root.has-page && !root.has-image : Rectangle { vertical-stretch: 1; }
-            Text {
-                text: root.status;
-                color: root.light ? #263e49 : #d9e4ea;
-                overflow: elide;
-            }
+            Rectangle { height: 1px; background: Colors.edge; }
+            DetailCell { text: root.status; accessible-label: self.text; }
             HorizontalLayout {
                 spacing: 6px;
-                if root.has-page : Button { text: @tr("Zurück"); enabled: !root.busy && root.can-back; clicked => { root.navigate("viewer-back"); } }
-                if root.has-page : Button { text: @tr("Weiter"); enabled: !root.busy && root.can-next; clicked => { root.navigate("viewer-next"); } }
-                if root.has-page : Button { text: root.hex ? "Text" : "Hex"; enabled: !root.busy; clicked => { root.navigate("viewer-toggle"); } }
-                if root.has-rich : Button { text: @tr("Quelldaten anzeigen"); enabled: !root.busy; clicked => { root.view-raw(); } }
+                if root.has-rich : ActionButton {
+                    icon: @image-url("icons/code.svg");
+                    text: @tr("Quelldaten anzeigen");
+                    enabled: !root.busy;
+                    clicked => { root.view-raw(); }
+                }
                 if root.has-image : Button { text: @tr("Einpassen"); checkable: true; checked: root.zoom-percent == 0; clicked => { root.zoom-percent = 0; } }
                 if root.has-image : Button { text: "−"; accessible-label: @tr("Bild verkleinern"); enabled: root.zoom-percent != 25; clicked => { root.step-zoom(-25); } }
-                if root.has-image : Button { text: root.zoom-percent > 0 ? "\{root.zoom-percent} %" : "100 %"; accessible-label: "Originalgröße"; clicked => { root.zoom-percent = 100; } }
+                if root.has-image : Button { text: root.zoom-percent > 0 ? "\{root.zoom-percent} %" : "100 %"; accessible-label: @tr("Originalgröße"); clicked => { root.zoom-percent = 100; } }
                 if root.has-image : Button { text: "+"; accessible-label: @tr("Bild vergrößern"); enabled: root.zoom-percent != 400; clicked => { root.step-zoom(25); } }
                 Rectangle { horizontal-stretch: 1; }
                 Button { text: @tr("Vollbild"); clicked => { root.toggle-fullscreen(); } }
@@ -2162,7 +2333,6 @@ export component MainWindow inherits Window {
     in property <PanelData> left;
     in property <PanelData> right;
     in property <FileConflictData> file-conflict;
-    in property <NtfsDraft> ntfs-draft;
     in property <DiffData> diff-data;
     in property <int> diff-revision;
     in property <int> separate-tree-mode;
@@ -2184,6 +2354,10 @@ export component MainWindow inherits Window {
     in property <bool> stacked;
     in property <SettingsData> settings;
     in property <bool> settings-open;
+    in property <SettingsData> settings-current;
+    in property <int> settings-page;
+    in property <[string]> settings-languages;
+    in property <string> settings-error;
     in property <ShortcutLabels> shortcut-labels;
     in property <[ShortcutRow]> shortcut-commands;
     in property <[ShortcutRow]> shortcut-assigned;
@@ -2196,7 +2370,9 @@ export component MainWindow inherits Window {
     in property <bool> shortcut-conflict;
     in property <int> drive-side: -1;
     in property <int> drive-selection;
-    property <bool> modal-open: root.dialog-kind != "" || root.settings-open || root.drive-side >= 0;
+    property <bool> dialog-open: root.dialog-kind != "" || root.settings-open || root.drive-side >= 0;
+    out property <bool> job-activity-open: root.job-active && root.job-expanded && !root.dialog-open;
+    property <bool> modal-open: root.dialog-open || root.job-activity-open;
     in-out property <float> split-ratio: 0.5;
     in property <bool> quick-open;
     in property <string> quick-title;
@@ -2206,23 +2382,38 @@ export component MainWindow inherits Window {
     in-out property <PreviewBounds> quick-bounds;
     in property <image> quick-image;
     in property <[string]> drives;
-    in property <[string]> tools-menu;
-    callback tool-selected(int);
+    in property <[MenuCategory]> command-menu;
+    in property <[CommandRow]> palette-rows;
+    callback menu-action(string);
+    callback palette-query(string);
+    callback palette-pick(string);
     in property <string> status: "Bereit";
     in property <bool> job-active;
+    in property <bool> job-cancelling;
+    in-out property <bool> job-expanded;
+    in property <string> job-title;
+    in property <float> job-progress: -1;
     in property <string> job-status;
     in property <string> dialog-kind;
     in property <int> dialog-revision;
     in property <string> dialog-title;
     in property <string> dialog-description;
     in property <string> dialog-value;
+    in property <int> dialog-content-lines;
     in property <string> dialog-second;
     in property <string> dialog-placeholder;
     in property <string> dialog-second-placeholder;
     in property <bool> dialog-secret;
     in property <bool> dialog-second-secret;
     in property <[string]> dialog-options;
+    in property <string> dialog-options-label;
+    in property <string> dialog-confirm-label;
     in property <[string]> dialog-transfer-filters;
+    in property <string> dialog-operation-selection;
+    in property <string> dialog-operation-target;
+    in property <bool> dialog-operation-multiple;
+    in property <bool> dialog-operation-move;
+    in property <TransferManagerData> transfer-manager-data;
     in-out property <int> dialog-transfer-filter;
     in property <SyncOptionsData> sync-draft;
     in property <int> sync-draft-revision;
@@ -2265,6 +2456,7 @@ export component MainWindow inherits Window {
     in property <bool> viewer-next;
     in property <string> viewer-mode;
     in property <int> viewer-encoding;
+    in property <string> viewer-notice;
     callback action(string);
     callback command-line(string) -> bool;
     callback panel-action(int, string);
@@ -2291,7 +2483,6 @@ export component MainWindow inherits Window {
     in property <RenameSearch> rename-search;
     callback submit-multi-rename(string, string, RenameSearch);
     callback rename-edited();
-    callback ntfs-apply(NtfsDraft);
     callback viewer-control(int, string, int);
     callback diff-navigate(int);
     callback diff-options(bool, bool, bool);
@@ -2332,178 +2523,24 @@ export component MainWindow inherits Window {
     }
 
     MenuBar {
-        Menu {
-            title: @tr("Dateien");
+        for category in root.command-menu : Menu {
+            title: category.title;
             enabled: !root.modal-open;
-            MenuItem { title: @tr("Anzeigen"); activated => { root.action("view"); } }
-            MenuItem { title: @tr("Intern anzeigen"); activated => { root.action("view-internal"); } }
-            MenuItem { title: @tr("Lister in eigenem Fenster"); activated => { root.action("view-separate"); } }
-            MenuItem { title: @tr("Bearbeiten"); activated => { root.action("edit"); } }
-            MenuItem { title: @tr("Dateikommentar bearbeiten"); activated => { root.action("edit-comment"); } }
-            MenuItem { title: @tr("Attribute und Zeitstempel ändern"); activated => { root.action("edit-metadata"); } }
-            MenuItem { title: @tr("Textdatei drucken"); activated => { root.action("print-file"); } }
-            MenuItem { title: @tr("Dateiliste drucken"); activated => { root.action("print-directory"); } }
-            MenuItem { title: @tr("Dateiliste mit Unterordnern drucken"); activated => { root.action("print-directory-recursive"); } }
-            MenuItem { title: @tr("Kopieren"); activated => { root.action("copy"); } }
-            MenuItem { title: @tr("Transfermanager"); activated => { root.action("transfer-manager"); } }
-            MenuItem { title: @tr("In markierte Zielordner kopieren"); activated => { root.action("copy-to-marked"); } }
-            MenuItem { title: @tr("Dateinamen als Text kopieren"); activated => { root.action("copy-names"); } }
-            MenuItem { title: @tr("Dateidetails als TSV kopieren"); activated => { root.action("copy-details"); } }
-            MenuItem { title: @tr("Dateien kodieren (MIME, UUE, XXE)"); activated => { root.action("encode-files"); } }
-            MenuItem { title: @tr("Dateien dekodieren (MIME, UUE, XXE, BinHex)"); activated => { root.action("decode-files"); } }
-            MenuItem { title: @tr("Verschieben"); activated => { root.action("move"); } }
-            MenuItem { title: @tr("Neuer Ordner"); activated => { root.action("mkdir"); } }
-            MenuItem { title: @tr("Papierkorb"); activated => { root.action("delete"); } }
-            MenuSeparator { }
-            MenuItem { title: @tr("Windows-Kontextmenü"); activated => { root.open-keyboard-context(); } }
-            MenuItem { title: @tr("Mit Windows öffnen"); activated => { root.action("system-open"); } }
-            MenuItem { title: @tr("Öffnen mit …"); activated => { root.action("open-with"); } }
-            MenuItem { title: @tr("Interne Dateiaktionen …"); activated => { root.action("internal-verbs"); } }
-            MenuItem { title: @tr("Windows-Verknüpfung erstellen …"); activated => { root.action("create-shortcut"); } }
-            MenuItem { title: @tr("Datenträgerbezeichnung ändern …"); activated => { root.action("volume-label"); } }
-            MenuItem { title: @tr("Als Administrator starten"); activated => { root.action("run-admin"); } }
-            MenuItem { title: @tr("Dateiauftrag mit Windows-Rechteabfrage …"); activated => { root.action("shell-elevation"); } }
-            MenuItem { title: @tr("Als anderer Benutzer starten …"); activated => { root.action("run-other-user"); } }
-            MenuItem { title: @tr("Eigenschaften"); activated => { root.action("properties"); } }
-        }
-        Menu {
-            title: @tr("Markieren");
-            MenuItem { title: @tr("Auswahl in Dateiliste speichern"); activated => { root.action("selection-save"); } }
-            MenuItem { title: @tr("Auswahl aus Dateiliste laden"); activated => { root.action("selection-load"); } }
-            MenuItem { title: @tr("Auswahl aus Zwischenablage laden"); activated => { root.action("selection-paste"); } }
-            enabled: !root.modal-open;
-            MenuItem { title: @tr("Alles markieren"); activated => { root.action("select-all"); } }
-            MenuItem { title: @tr("Nach Maske markieren"); activated => { root.action("mask"); } }
-            MenuItem { title: @tr("Auswahl umkehren"); activated => { root.action("invert"); } }
-            MenuItem { title: @tr("Auswahl wiederherstellen"); activated => { root.action("restore-selection"); } }
-            MenuItem { title: @tr("Dateifenster vergleichen"); activated => { root.action("compare-dirs"); } }
-            MenuItem { title: @tr("Dateifenster einschließlich Ordner vergleichen"); activated => { root.action("compare-dirs-folders"); } }
-            MenuItem { title: @tr("Vergleichen und gleiche Dateien ausblenden"); activated => { root.action("dir-match"); } }
-        }
-        Menu {
-            title: @tr("Befehle");
-            enabled: !root.modal-open;
-            MenuItem { title: @tr("Suchen"); activated => { root.action("search"); } }
-            MenuItem { title: @tr("Suchen in separatem Fenster"); activated => { root.action("search-separate"); } }
-            MenuItem { title: @tr("Schnellsuche"); activated => { root.action("quick-find"); } }
-            MenuItem { title: @tr("Prüfsumme aus Zwischenablage prüfen"); activated => { root.action("verify-clipboard"); } }
-            MenuItem { title: @tr("Nach Plugin-Feld suchen"); activated => { root.action("search-wdx"); } }
-            MenuItem { title: @tr("WDX-Suchprofile"); activated => { root.action("wdx-search-profiles"); } }
-            MenuItem { title: @tr("WDX-Feld ändern …"); activated => { root.action("wdx-edit"); } }
-            MenuItem { title: @tr("Dateien vergleichen"); activated => { root.action("compare"); } }
-            MenuItem { title: @tr("Verzeichnisse synchronisieren"); activated => { root.action("sync"); } }
-            MenuItem { title: @tr("Synchronisierungsprofile"); activated => { root.action("sync-profiles"); } }
-            MenuItem { title: @tr("Mehrfach umbenennen"); activated => { root.action("multi-rename"); } }
-            MenuItem { title: @tr("Umbenennvorlagen …"); activated => { root.action("rename-templates"); } }
-            MenuItem { title: @tr("Namensliste bearbeiten …"); activated => { root.action("rename-names"); } }
-            MenuItem { title: @tr("Namensliste im externen Editor bearbeiten …"); activated => { root.action("rename-external"); } }
-            MenuItem { title: @tr("Ordnerfavoriten"); activated => { root.action("favorites"); } }
-            MenuItem { title: @tr("Aktuellen Ordner zu Favoriten hinzufügen …"); activated => { root.action("add-favorite"); } }
-            MenuItem { title: @tr("Ordnerfavoriten verwalten …"); activated => { root.action("favorites-manage"); } }
-            MenuItem { title: @tr("Befehlspalette"); activated => { root.action("palette"); } }
-        }
-        Menu {
-            title: @tr("Archive");
-            enabled: !root.modal-open;
-            MenuItem { title: @tr("Öffnen"); activated => { root.action("zip-open"); } }
-            MenuItem { title: @tr("Packen"); activated => { root.action("zip-pack"); } }
-            MenuItem { title: @tr("Mit Profil packen …"); activated => { root.action("external-pack"); } }
-            MenuItem { title: @tr("Entpacken"); activated => { root.action("zip-extract"); } }
-            MenuItem { title: @tr("Prüfen"); activated => { root.action("zip-test"); } }
-        }
-        Menu {
-            title: @tr("Netz");
-            enabled: !root.modal-open;
-            MenuItem { title: @tr("Netzlaufwerk verbinden …"); activated => { root.action("map-drive"); } }
-            MenuItem { title: @tr("Netzlaufwerk trennen …"); activated => { root.action("unmap-drive"); } }
-            MenuItem { title: @tr("Lokale Windows-Freigaben …"); activated => { root.action("shares"); } }
-            MenuItem { title: @tr("Ordner freigeben …"); activated => { root.action("share-create"); } }
-            MenuSeparator { }
-            MenuItem { title: @tr("FTP-Verbindungen …"); activated => { root.action("ftp-profiles"); } }
-            MenuItem { title: @tr("FTP-Schnellverbindung …"); activated => { root.action("ftp-connect"); } }
-            MenuItem { title: @tr("FTP-Verzeichnis anzeigen"); activated => { root.action("ftp-list"); } }
-            MenuItem { title: @tr("FTP-Ordner wechseln"); activated => { root.action("ftp-directory"); } }
-            MenuItem { title: @tr("FTP herunterladen"); activated => { root.action("ftp-download"); } }
-            MenuItem { title: @tr("FTP hochladen"); activated => { root.action("ftp-upload"); } }
-            MenuItem { title: @tr("FTP-Unix-Rechte ändern …"); activated => { root.action("ftp-permissions"); } }
-            MenuItem { title: @tr("Offene FTP-Bearbeitungen …"); activated => { root.action("ftp-edits"); } }
-            MenuItem { title: @tr("FTP mit lokalem Ordner abgleichen"); activated => { root.action("ftp-sync"); } }
-            MenuItem { title: @tr("FTP trennen"); activated => { root.action("ftp-close"); } }
-            MenuSeparator { }
-            MenuItem { title: @tr("WFX-Dateisystem öffnen …"); activated => { root.action("wfx-inspect"); } }
-            MenuItem { title: @tr("WFX verlassen"); activated => { root.action("wfx-local"); } }
-        }
-        Menu {
-            title: @tr("Ansicht");
-            enabled: !root.modal-open;
-            MenuItem { title: @tr("Windows-Ordner öffnen …"); activated => { root.action("known-folder"); } }
-            MenuItem { title: @tr("Kurz- und Detailansicht wechseln"); activated => { root.action("details"); } }
-            MenuItem { title: @tr("Miniaturansicht"); activated => { root.action("thumbnail-view"); } }
-            MenuItem { title: @tr("Kommentaransicht"); activated => { root.action("comment-view"); } }
-            MenuItem { title: @tr("Spaltensätze …"); activated => { root.action("column-sets"); } }
-            MenuItem { title: @tr("Ansichtsmodi …"); activated => { root.action("view-modes"); } }
-            MenuItem { title: @tr("Automatische Ansichten umschalten"); activated => { root.action("auto-view-toggle"); } }
-            MenuItem { title: @tr("Mehrfachsortierung …"); activated => { root.action("multi-sort"); } }
-            MenuItem { title: @tr("Unsortierte Dateiliste"); activated => { root.action("sort-unsorted"); } }
-            MenuItem { title: @tr("Ordnerbaum umschalten"); activated => { root.action("directory-tree"); } }
-            MenuItem { title: @tr("Windows-Desktop im Dateifenster"); activated => { root.action("shell-desktop"); } }
-            MenuItem { title: @tr("Dieser PC im Dateifenster"); activated => { root.action("shell-computer"); } }
-            MenuItem { title: @tr("Weitere Windows-Orte …"); activated => { root.action("shell-virtual-folders"); } }
-            MenuItem { title: @tr("Gemeinsamer Ordnerbaum"); activated => { root.action("separate-tree-one"); } }
-            MenuItem { title: @tr("Ordnerbaum je Fenster"); activated => { root.action("separate-tree-two"); } }
-            MenuItem { title: @tr("Separate Ordnerbäume ausblenden"); activated => { root.action("separate-tree-off"); } }
-            MenuItem { title: @tr("Schnellansicht"); activated => { root.action("quick-view"); } }
-            MenuItem { title: @tr("Ordnergrößen berechnen"); activated => { root.action("folder-sizes"); } }
-            MenuItem { title: @tr("Zweigansicht"); activated => { root.action("branch"); } }
-            MenuItem { title: @tr("Zweigansicht der Auswahl"); activated => { root.action("branch-selected"); } }
-            MenuItem { title: @tr("Nur markierte Einträge umschalten"); activated => { root.action("only-marked"); } }
-            MenuItem { title: @tr("Nur Programme anzeigen"); activated => { root.action("only-programs"); } }
-            MenuItem { title: @tr("Dateitypen im Tab filtern …"); activated => { root.action("tab-file-filter"); } }
-            MenuItem { title: @tr("Alle Dateien anzeigen"); activated => { root.action("clear-filter"); } }
-            MenuItem { title: @tr("Tab-Gruppen verwalten …"); activated => { root.action("tab-groups"); } }
-            MenuItem { title: @tr("Ordner-Tabs als .tab exportieren …"); activated => { root.action("tab-export"); } }
-            MenuItem { title: @tr("Kürzlich geschlossene Tabs …"); activated => { root.action("tab-reopen"); } }
-            MenuItem { title: @tr("Markierte Ordner in Tabs öffnen"); activated => { root.action("tabs-open-folders"); } }
-            MenuItem { title: @tr("Markierte Ordner auf Gegenseite in Tabs öffnen"); activated => { root.action("tabs-open-folders-other"); } }
-            MenuItem { title: @tr("Versteckte Dateien umschalten"); activated => { root.action("hidden"); } }
-            MenuItem { title: @tr("Ignorierliste umschalten"); activated => { root.action("ignore-toggle"); } }
-            MenuItem { title: @tr("Fenster tauschen"); activated => { root.action("swap"); } }
-            MenuItem { title: @tr("Fenster angleichen"); activated => { root.action("match"); } }
-            MenuItem { title: @tr("Anordnung wechseln"); activated => { root.action("stacked"); } }
-            MenuItem { title: @tr("Farbschema wechseln"); activated => { root.action("theme"); } }
-            MenuItem { title: @tr("Windows-Farbschema umschalten"); activated => { root.action("system-theme"); } }
-        }
-        Menu {
-            title: @tr("Konfigurieren");
-            MenuItem { title: @tr("Everything-Suche"); activated => { root.action("everything-configure"); } }
-            MenuItem { title: @tr("Eigene Buttonbars"); activated => { root.action("buttonbars"); } }
-            MenuItem { title: @tr("NTFS-Kopieroptionen …"); activated => { root.action("ntfs-options"); } }
-            MenuItem { title: @tr("Buttonbar- und Startervorlagen …"); activated => { root.action("buttonbar-templates"); } }
-            enabled: !root.modal-open;
-            MenuItem { title: @tr("Einstellungen"); activated => { root.action("settings"); } }
-            MenuItem { title: @tr("Sprache …"); activated => { root.action("language"); } }
-            MenuItem { title: @tr("Ignorierliste bearbeiten …"); activated => { root.action("ignore-edit"); } }
-            MenuItem { title: @tr("Ignorierliste importieren …"); activated => { root.action("ignore-import"); } }
-            MenuItem { title: @tr("Plugin-Verwaltung …"); activated => { root.action("plugins"); } }
-            MenuItem { title: @tr("Externe Packerprofile …"); activated => { root.action("packer-profiles"); } }
-            MenuItem { title: @tr("WDX-Spalten verwalten …"); activated => { root.action("wdx-columns"); } }
-            MenuItem { title: @tr("Automatische Ansichtsregeln …"); activated => { root.action("auto-view-rules"); } }
-            MenuItem { title: @tr("TC-Ansichten importieren …"); activated => { root.action("view-rules-import"); } }
-            MenuItem { title: @tr("Datei- und Auswahlfarben …"); activated => { root.action("file-colors"); } }
-            MenuItem { title: @tr("Interne Dateizuordnungen …"); activated => { root.action("associations"); } }
-        }
-        Menu {
-            title: @tr("Starter");
-            enabled: !root.modal-open;
-            MenuItem { title: @tr("Programme und Befehle …"); activated => { root.action("starter"); } }
-            MenuItem { title: @tr("Starter bearbeiten …"); activated => { root.action("starter-edit"); } }
-        }
-        Menu {
-            title: @tr("Hilfe");
-            enabled: !root.modal-open;
-            MenuItem { title: @tr("Tastatur und Befehle"); activated => { root.action("help"); } }
-            MenuItem { title: @tr("Systeminformationen"); activated => { root.action("system-information"); } }
-            MenuItem { title: @tr("Windows-Version"); activated => { root.action("windows-version"); } }
+            for row in category.primary : MenuItem {
+                title: row.menu-label;
+                icon: row.icon;
+                activated => { root.menu-action(row.key); }
+            }
+            if category.sections.length > 0 : MenuSeparator {}
+            for section in category.sections : Menu {
+                title: section.title;
+                icon: section.icon;
+                for row in section.rows : MenuItem {
+                    title: row.menu-label;
+                    icon: row.icon;
+                    activated => { root.menu-action(row.key); }
+                }
+            }
         }
     }
 
@@ -2519,6 +2556,9 @@ export component MainWindow inherits Window {
             if (root.dialog-kind != "") {
                 if (event.text == Key.Escape) { root.action("close-dialog"); return accept; }
                 return reject;
+            }
+            if (root.job-activity-open && event.text == Key.Escape) {
+                root.job-expanded = false; keyboard.focus(); return accept;
             }
             if (event.text == Key.Escape && (left-view.cancel-path() || right-view.cancel-path())) { return accept; }
             if (event.text == Key.Escape && command.has-focus) { keyboard.focus(); return accept; }
@@ -2582,12 +2622,10 @@ export component MainWindow inherits Window {
                     if root.top-buttons.length == 0 : Rectangle { horizontal-stretch: 1; }
                     NavButton { icon: Colors.light ? @image-url("icons/moon.svg") : @image-url("icons/sun.svg"); label: @tr("Farbschema wechseln"); clicked => { root.action("theme"); } }
                     NavButton { icon: @image-url("icons/settings.svg"); label: @tr("Einstellungen"); clicked => { root.action("settings"); } }
-                    ComboBox {
-                        model: root.tools-menu;
-                        current-index: 0;
-                        width: 155px;
-                        accessible-label: @tr("Werkzeuge");
-                        selected => { root.tool-selected(self.current-index); self.current-index = 0; }
+                    ActionButton {
+                        icon: @image-url("icons/search.svg");
+                        text: @tr("Befehlspalette") + (root.shortcut-labels.palette == "" ? "" : "  " + root.shortcut-labels.palette);
+                        clicked => { root.action("palette"); }
                     }
                 }
             }
@@ -2759,8 +2797,61 @@ export component MainWindow inherits Window {
             HorizontalLayout {
                 spacing: 8px;
                 Image { source: root.job-active ? @image-url("icons/sync.svg") : @image-url("icons/check.svg"); width: 15px; height: 15px; colorize: Colors.accent; }
-                Text { text: root.job-active ? root.job-status : root.status; color: root.job-active ? Colors.accent : Colors.muted; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; font-size: 12px; min-height: 24px; }
-                if root.job-active : Button { text: @tr("Abbrechen"); clicked => { root.action("cancel-job"); } }
+                Text { text: root.job-active ? root.job-title : root.status; color: root.job-active ? Colors.accent : Colors.muted; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; font-size: 12px; min-height: 24px; }
+                if root.job-active : VerticalLayout {
+                    width: 118px;
+                    alignment: center;
+                    ProgressIndicator { progress: max(0, root.job-progress); indeterminate: root.job-progress < 0; }
+                }
+                if root.job-active : Button {
+                    text: root.button-label(@tr("Fortschritt"), root.shortcut-labels.job-details);
+                    clicked => { root.job-expanded = true; }
+                }
+            }
+        }
+
+        if root.job-activity-open : Rectangle {
+            width: 100%; height: 100%;
+            background: #050a14a8;
+            TouchArea { }
+            Rectangle {
+                width: min(610px, parent.width - 32px);
+                height: 222px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                background: Colors.panel;
+                border-radius: 14px;
+                border-width: 1px;
+                border-color: Colors.edge;
+                VerticalLayout {
+                    padding: 18px;
+                    spacing: 12px;
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Image { source: @image-url("icons/sync.svg"); width: 22px; height: 22px; colorize: Colors.accent; }
+                        Text { text: root.job-title; color: Colors.text; font-size: 20px; font-weight: 650; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                        Text { text: root.job-progress < 0 ? "" : "\{floor(root.job-progress * 100)} %"; color: Colors.accent; font-size: 16px; vertical-alignment: center; }
+                    }
+                    ProgressIndicator { height: 6px; progress: max(0, root.job-progress); indeterminate: root.job-progress < 0; }
+                    Text {
+                        text: root.job-status == "" ? @tr("Auftrag läuft …") : root.job-status;
+                        color: Colors.muted;
+                        font-size: 13px;
+                        wrap: word-wrap;
+                        overflow: elide;
+                        vertical-stretch: 1;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Rectangle { horizontal-stretch: 1; }
+                        Button { text: @tr("Abbrechen"); enabled: !root.job-cancelling; clicked => { root.action("cancel-job"); } }
+                        background-button := Button {
+                            text: @tr("Im Hintergrund");
+                            clicked => { root.job-expanded = false; keyboard.focus(); }
+                        }
+                    }
+                }
+                init => { background-button.focus(); }
             }
         }
 
@@ -2769,9 +2860,12 @@ export component MainWindow inherits Window {
             background: #050a14a8;
             TouchArea { }
             SettingsCard {
-                width: min(800px, parent.width - 36px);
-                height: min(450px, parent.height - 26px);
-                current: root.settings;
+                width: min(900px, parent.width - 36px);
+                height: min(560px, parent.height - 36px);
+                current: root.settings-current;
+                initial-page: root.settings-page;
+                languages: root.settings-languages;
+                error: root.settings-error;
                 shortcut-commands: root.shortcut-commands;
                 shortcut-assigned: root.shortcut-assigned;
                 shortcut-query: root.shortcut-query;
@@ -2830,7 +2924,7 @@ export component MainWindow inherits Window {
             }
             if root.dialog-kind == "sync-review" : SyncReviewCard {
                 width: min(parent.width - 46px, 1100px);
-                height: parent.height - 46px;
+                height: min(parent.height - 46px, 760px);
                 roots: root.sync-roots;
                 rows: root.sync-rows;
                 summary: root.sync-summary;
@@ -2850,7 +2944,7 @@ export component MainWindow inherits Window {
             TouchArea { }
             FtpBrowserCard {
                 width: min(parent.width - 46px, 940px);
-                height: parent.height - 46px;
+                height: min(parent.height - 46px, clamp(230px + root.ftp-rows.length * 30px, 370px, 690px));
                 url: root.ftp-url;
                 rows: root.ftp-rows;
                 selection <=> root.ftp-cursor;
@@ -2950,245 +3044,358 @@ export component MainWindow inherits Window {
                 close => { root.action("close-dialog"); }
             }
         }
-        if root.dialog-kind == "ntfs-options" : Rectangle {
+        if root.dialog-kind == "palette" : Rectangle {
+            width: 100%; height: 100%;
+            background: #050a14a8;
+            TouchArea { }
+            CommandPaletteCard {
+                width: min(680px, parent.width - 32px);
+                height: min(470px, parent.height - 32px);
+                x: (parent.width - self.width) / 2;
+                y: min(60px, (parent.height - self.height) / 2);
+                rows: root.palette-rows;
+                query(text) => { root.palette-query(text); }
+                pick(key) => { root.palette-pick(key); }
+                dismiss => { root.action("close-dialog"); }
+            }
+        }
+        if root.dialog-kind == "transfer-manager" : Rectangle {
             background: #050a14a8;
             width: 100%; height: 100%;
             TouchArea { }
-            NtfsOptionsCard {
-                width: min(parent.width - 32px, 560px); height: 430px;
-                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-                draft: root.ntfs-draft;
-                save(data) => { root.ntfs-apply(data); }
-                close => { root.action("close-dialog"); }
+            TransferManagerCard {
+                width: min(660px, parent.width - 36px);
+                height: min(500px, parent.height - 36px);
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                data: root.transfer-manager-data;
+                cancelling: root.job-cancelling;
+                choose(action) => { root.submit("", "", action); }
+                dismiss => { root.action("close-dialog"); }
             }
         }
-        if root.dialog-kind != "" && root.dialog-kind != "ntfs-options" && root.dialog-kind != "text-comparison" && root.dialog-kind != "transfer-conflict" && root.dialog-kind != "advanced-search" && root.dialog-kind != "sync-options" && root.dialog-kind != "sync-review" && root.dialog-kind != "ftp-browser" && root.dialog-kind != "ftp-profiles" && root.dialog-kind != "plugins" : Rectangle {
+        if root.dialog-kind == "transfer" || root.dialog-kind == "archive-pack" : Rectangle {
+            background: #050a14a8;
+            width: 100%; height: 100%;
+            TouchArea { }
+            FileOperationCard {
+                width: min(640px, parent.width - 36px);
+                height: min(self.content-height, parent.height - 36px);
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                title: root.dialog-title;
+                selection-count: root.dialog-description;
+                selected-paths: root.dialog-operation-selection;
+                initial-value: root.dialog-value;
+                archive-target: root.dialog-operation-target;
+                pack: root.dialog-kind == "archive-pack";
+                multiple: root.dialog-operation-multiple;
+                move-files: root.dialog-operation-move;
+                choices: root.dialog-options;
+                filters: root.dialog-transfer-filters;
+                filter-index <=> root.dialog-transfer-filter;
+                confirm-label: root.dialog-confirm-label;
+                start(value, second, choice) => { root.submit(value, second, choice); }
+                dismiss => { root.action("close-dialog"); }
+            }
+        }
+        if root.dialog-kind == "viewer" || root.dialog-kind == "image" : Rectangle {
+            background: #050a14a8;
+            width: 100%; height: 100%;
+            TouchArea { }
+            preview-card := Rectangle {
+                width: min(1100px, parent.width - 32px);
+                height: parent.height - 36px;
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                background: Colors.panel;
+                border-color: Colors.edge;
+                border-width: 1px;
+                border-radius: 14px;
+                property <int> zoom;
+                VerticalLayout {
+                    padding: 15px;
+                    spacing: 8px;
+                    DialogHeading {
+                        icon: @image-url("icons/eye.svg");
+                        title: root.dialog-kind == "image" ? @tr("Bildvorschau") : @tr("Dateivorschau");
+                        subtitle: root.dialog-title;
+                        wrap-subtitle: false;
+                    }
+                    if root.job-active : ProgressIndicator { height: 4px; indeterminate: true; }
+                    if root.dialog-kind == "viewer" : ReaderPane {
+                        vertical-stretch: 1;
+                        busy: root.job-active;
+                        hex: root.viewer-mode == "hex";
+                        can-back: root.viewer-back;
+                        can-next: root.viewer-next;
+                        encoding: root.viewer-encoding;
+                        encodings: [@tr("Automatische Kodierung"), "UTF-8", "UTF-16LE", "UTF-16BE", "Windows-1252"];
+                        body: root.dialog-value;
+                        navigate(action) => { root.action(action); }
+                        control(operation, value, option) => { root.viewer-control(operation, value, option); }
+                    }
+                    if root.dialog-kind == "image" : ImagePane {
+                        vertical-stretch: 1;
+                        picture: root.viewer-image;
+                        zoom: preview-card.zoom;
+                    }
+                    Rectangle { height: 1px; background: Colors.edge; }
+                    DetailCell {
+                        text: root.job-active ? root.job-title : root.viewer-notice != "" ? root.viewer-notice : root.dialog-description;
+                    }
+                    HorizontalLayout {
+                        spacing: 6px;
+                        if root.dialog-kind == "viewer" : ActionButton {
+                            icon: @image-url("icons/copy.svg");
+                            text: @tr("Text kopieren");
+                            clicked => { root.action("copy-result"); }
+                        }
+                        if root.dialog-kind == "viewer" : Button { text: @tr("Drucken …"); clicked => { root.action("print-file"); } }
+                        if root.dialog-kind == "image" : Button {
+                            text: @tr("Einpassen");
+                            checkable: true;
+                            checked: preview-card.zoom == 0;
+                            clicked => { preview-card.zoom = 0; }
+                        }
+                        if root.dialog-kind == "image" : Button {
+                            text: "100 %";
+                            checkable: true;
+                            checked: preview-card.zoom == 100;
+                            clicked => { preview-card.zoom = 100; }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        Button { text: @tr("Eigenes Fenster"); enabled: !root.job-active; clicked => { root.action("viewer-detach"); } }
+                        Button { text: @tr("Schließen"); primary: true; clicked => { root.action("close-dialog"); } }
+                    }
+                }
+            }
+        }
+        if root.dialog-kind == "input" || root.dialog-kind == "confirm" : Rectangle {
+            background: #050a14a8;
+            width: 100%; height: 100%;
+            TouchArea { }
+            CompactDialogCard {
+                width: min(550px, parent.width - 32px);
+                height: min(self.preferred-height, parent.height - 32px);
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                input: root.dialog-kind == "input";
+                revision: root.dialog-revision;
+                title: root.dialog-title;
+                description: root.dialog-description;
+                value: root.dialog-value;
+                secondary-value: root.dialog-second;
+                label: root.dialog-placeholder;
+                secondary-label: root.dialog-second-placeholder;
+                options: root.dialog-options;
+                options-label: root.dialog-options-label;
+                confirm-label: root.dialog-confirm-label;
+                secret: root.dialog-secret;
+                secondary-secret: root.dialog-second-secret;
+                submit(value, second, option) => { root.submit(value, second, option); }
+                dismiss => { root.action("close-dialog"); }
+            }
+        }
+        if root.dialog-kind != "" && root.dialog-kind != "input" && root.dialog-kind != "confirm" && root.dialog-kind != "viewer" && root.dialog-kind != "image" && root.dialog-kind != "transfer" && root.dialog-kind != "transfer-manager" && root.dialog-kind != "archive-pack" && root.dialog-kind != "palette" && root.dialog-kind != "text-comparison" && root.dialog-kind != "transfer-conflict" && root.dialog-kind != "advanced-search" && root.dialog-kind != "sync-options" && root.dialog-kind != "sync-review" && root.dialog-kind != "ftp-browser" && root.dialog-kind != "ftp-profiles" && root.dialog-kind != "plugins" : Rectangle {
             background: #050a14a8;
             width: 100%; height: 100%;
             TouchArea { }
             dialog-card := Rectangle {
-                property <int> revision: root.dialog-revision;
-                property <bool> tall: root.dialog-kind == "text" || root.dialog-kind == "viewer" || root.dialog-kind == "image" || root.dialog-kind == "review" || root.dialog-kind == "search-results" || root.dialog-kind == "print-preview" || root.dialog-kind == "multiline";
+                property <bool> document: root.dialog-kind == "text" || root.dialog-kind == "review" || root.dialog-kind == "search-results" || root.dialog-kind == "print-preview";
                 property <bool> rename: root.dialog-kind == "multi-rename";
-                width: min(parent.width - 46px, tall ? 1000px : rename ? 760px : 650px);
-                height: tall ? parent.height - 74px : rename ? min(parent.height - 26px, 420px) : 330px;
+                property <bool> editable: root.dialog-kind == "multiline" || root.dialog-kind == "buttonbar-edit";
+                width: min(parent.width - 36px, document && root.dialog-content-lines > 8 ? 900px : rename ? 760px : 650px);
+                height: min(parent.height - 32px, card.preferred-height);
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
-                border-radius: 10px;
+                border-radius: 14px;
                 border-width: 1px;
-                border-color: Colors.accent;
+                border-color: Colors.edge;
                 background: Colors.panel;
-                function submit-rename() {
-                    root.submit-multi-rename(input.text, extension.text, {
-                        find: rename-find.text,
-                        replacement: rename-replacement.text,
-                        regex: rename-regex.checked,
-                        wildcards: rename-wildcards.checked,
-                        match-case: rename-case.checked,
-                        first-only: rename-first.checked,
-                        include-extension: rename-suffix.checked,
-                        substitute: rename-whole.checked,
-                    });
-                }
+
                 card := VerticalLayout {
                     padding: 16px;
                     spacing: 10px;
-                    Text { text: root.dialog-title; color: Colors.text; font-size: 20px; font-weight: 700; overflow: elide; }
-                    Text { text: root.dialog-description; color: Colors.muted; wrap: word-wrap; }
-                    if root.dialog-kind == "viewer" : VerticalLayout {
-                        spacing: 5px;
-                        HorizontalLayout {
-                            spacing: 5px;
-                            search := LineEdit {
-                                placeholder-text: root.viewer-mode == "hex" ? @tr("Hexbytes suchen") : @tr("Text suchen");
-                                enabled: !root.job-active;
-                                accepted => { root.viewer-control(2, self.text, 0); }
-                            }
-                            Button { text: @tr("Suchen"); enabled: !root.job-active && search.text != ""; clicked => { root.viewer-control(2, search.text, 0); } }
-                            Button { text: @tr("Ab Anfang"); enabled: !root.job-active && search.text != ""; clicked => { root.viewer-control(3, search.text, 0); } }
+                    alignment: start;
+                    DialogHeading {
+                        title: root.dialog-title;
+                        subtitle: root.dialog-description;
+                        icon: root.dialog-kind == "delete" ? @image-url("icons/trash.svg")
+                            : root.dialog-kind == "search-results" ? @image-url("icons/search.svg")
+                            : dialog-card.editable || dialog-card.rename ? @image-url("icons/edit.svg") : @image-url("icons/file.svg");
+                    }
+                    if dialog-card.rename : rename-form := VerticalLayout {
+                        property <int> revision: root.dialog-revision;
+                        property <string> extension-mask: root.rename-extension;
+                        property <bool> include-extension: root.rename-search.include-extension;
+                        spacing: 10px;
+                        function preview() {
+                            root.submit-multi-rename(name-mask.text, self.extension-mask, {
+                                find: find.text, replacement: replacement.text,
+                                regex: regex.checked, wildcards: wildcards.checked,
+                                match-case: match-case.checked, first-only: first-only.checked,
+                                include-extension: self.include-extension, substitute: substitute.checked,
+                            });
+                        }
+                        changed revision => {
+                            name-mask.text = root.dialog-value;
+                            self.extension-mask = root.rename-extension;
+                            find.text = root.rename-search.find;
+                            replacement.text = root.rename-search.replacement;
+                            regex.checked = root.rename-search.regex;
+                            wildcards.checked = root.rename-search.wildcards;
+                            match-case.checked = root.rename-search.match-case;
+                            first-only.checked = root.rename-search.first-only;
+                            self.include-extension = root.rename-search.include-extension;
+                            substitute.checked = root.rename-search.substitute;
+                            name-mask.focus();
                         }
                         HorizontalLayout {
-                            spacing: 5px;
+                            spacing: 10px;
+                            VerticalLayout {
+                                spacing: 4px;
+                                FieldLabel { text: root.dialog-placeholder; }
+                                name-mask := LineEdit {
+                                    text: root.dialog-value;
+                                    accessible-label: root.dialog-placeholder;
+                                    edited => { root.rename-edited(); }
+                                    accepted => { rename-form.preview(); }
+                                    init => { self.focus(); }
+                                }
+                            }
+                            if root.rename-separate : VerticalLayout {
+                                spacing: 4px;
+                                FieldLabel { text: @tr("Erweiterungsmaske"); }
+                                LineEdit {
+                                    text <=> rename-form.extension-mask;
+                                    accessible-label: @tr("Erweiterungsmaske");
+                                    edited => { root.rename-edited(); }
+                                    accepted => { rename-form.preview(); }
+                                }
+                            }
+                        }
+                        Rectangle { height: 1px; background: Colors.edge; }
+                        HorizontalLayout {
+                            spacing: 10px;
+                            VerticalLayout {
+                                spacing: 4px;
+                                FieldLabel { text: @tr("Suchen nach (optional)"); }
+                                find := LineEdit {
+                                    text: root.rename-search.find;
+                                    accessible-label: @tr("Suchen nach (optional)");
+                                    edited => { root.rename-edited(); }
+                                    accepted => { rename-form.preview(); }
+                                }
+                            }
+                            VerticalLayout {
+                                spacing: 4px;
+                                FieldLabel { text: @tr("Ersetzen durch"); }
+                                replacement := LineEdit {
+                                    text: root.rename-search.replacement;
+                                    accessible-label: @tr("Ersetzen durch");
+                                    edited => { root.rename-edited(); }
+                                    accepted => { rename-form.preview(); }
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 10px;
+                            regex := CheckBox { text: @tr("Regulärer Ausdruck"); checked: root.rename-search.regex; toggled => { root.rename-edited(); } }
+                            match-case := CheckBox { text: @tr("Schreibweise beachten"); checked: root.rename-search.match-case; toggled => { root.rename-edited(); } }
+                            first-only := CheckBox { text: @tr("Nur erster Treffer"); checked: root.rename-search.first-only; toggled => { root.rename-edited(); } }
+                        }
+                        HorizontalLayout {
+                            spacing: 10px;
+                            if root.rename-separate : CheckBox {
+                                text: @tr("Erweiterung einbeziehen");
+                                checked <=> rename-form.include-extension;
+                                toggled => { root.rename-edited(); }
+                            }
+                            substitute := CheckBox { text: @tr("Ganzen Namen ersetzen"); checked: root.rename-search.substitute; toggled => { root.rename-edited(); } }
+                            wildcards := CheckBox { text: @tr("Platzhalter * und ?"); enabled: !regex.checked; checked: root.rename-search.wildcards; toggled => { root.rename-edited(); } }
+                        }
+                        Rectangle { height: 1px; background: Colors.edge; }
+                        HorizontalLayout {
+                            spacing: 7px;
+                            Rectangle { horizontal-stretch: 1; }
+                            Button { text: @tr("Abbrechen"); clicked => { root.action("close-dialog"); } }
+                            Button { text: @tr("Vorschau"); primary: true; clicked => { rename-form.preview(); } }
+                        }
+                    }
+                    if !dialog-card.rename : content := VerticalLayout {
+                        property <int> revision: root.dialog-revision;
+                        property <int> choice;
+                        property <string> body: root.dialog-value;
+                        property <string> extra: root.dialog-second;
+                        spacing: 10px;
+                        changed revision => {
+                            self.choice = 0;
+                            self.body = root.dialog-value;
+                            self.extra = root.dialog-second;
+                        }
+                        if root.dialog-kind == "buttonbar-edit" && root.dialog-second-placeholder != "" : VerticalLayout {
+                            spacing: 4px;
+                            FieldLabel { text: root.dialog-second-placeholder; }
+                            LineEdit {
+                                text <=> content.extra;
+                                accessible-label: root.dialog-second-placeholder;
+                                input-type: root.dialog-second-secret ? password : text;
+                            }
+                        }
+                        if root.dialog-options.length > 0 : VerticalLayout {
+                            spacing: 4px;
+                            FieldLabel { text: root.dialog-options-label == "" ? @tr("Auswahl") : root.dialog-options-label; }
                             ComboBox {
-                                model: ["Automatische Kodierung", "UTF-8", "UTF-16LE", "UTF-16BE", "Windows-1252"];
-                                current-index: root.viewer-encoding;
-                                enabled: !root.job-active && root.viewer-mode != "hex";
-                                accessible-label: "Textkodierung";
-                                selected => { root.viewer-control(0, "", self.current-index); }
+                                model: root.dialog-options;
+                                current-index <=> content.choice;
+                                accessible-label: root.dialog-options-label == "" ? @tr("Auswahl") : root.dialog-options-label;
                             }
-                            position := LineEdit {
-                                placeholder-text: "Byte-Offset, z. B. 1024 oder 0x400";
-                                enabled: !root.job-active;
-                                accepted => { root.viewer-control(1, self.text, 0); }
+                        }
+                        if dialog-card.document && root.dialog-value != "" : TextEdit {
+                            text: root.dialog-value;
+                            read-only: true;
+                            height: min(min(root.height / 2, 430px), max(65px, root.dialog-content-lines * 18px + 24px));
+                            font-family: "Consolas";
+                            accessible-label: @tr("Inhalt");
+                        }
+                        if root.dialog-kind == "delete" : TextEdit {
+                            height: min(120px, max(52px, root.dialog-content-lines * 18px + 24px));
+                            read-only: true;
+                            wrap: no-wrap;
+                            text: root.dialog-value;
+                            accessible-label: @tr("Ausgewählte Einträge");
+                        }
+                        if dialog-card.editable : TextEdit {
+                            text <=> content.body;
+                            height: min(290px, root.height / 2);
+                            font-family: "Consolas";
+                            accessible-label: root.dialog-title;
+                            init => { self.focus(); }
+                        }
+                        Rectangle { height: 1px; background: Colors.edge; }
+                        HorizontalLayout {
+                            spacing: 7px;
+                            if root.dialog-kind == "text" || root.dialog-kind == "search-results" : Button { text: @tr("Text kopieren"); clicked => { root.action("copy-result"); } }
+                            Rectangle { horizontal-stretch: 1; }
+                            Button {
+                                text: root.dialog-kind == "text" ? @tr("Schließen") : @tr("Abbrechen");
+                                clicked => { root.action("close-dialog"); }
+                                init => { if (root.dialog-kind == "delete" || root.dialog-kind == "text") { self.focus(); } }
                             }
-                            Button { text: @tr("Springen"); enabled: !root.job-active && position.text != ""; clicked => { root.viewer-control(1, position.text, 0); } }
+                            if root.dialog-kind == "delete" || root.dialog-kind == "review" || root.dialog-kind == "search-results" || root.dialog-kind == "print-preview" : Button {
+                                text: root.dialog-confirm-label != "" ? root.dialog-confirm-label : root.dialog-kind == "search-results" ? @tr("Treffer übernehmen") : (root.dialog-kind == "print-preview" ? @tr("Drucken …") : @tr("Bestätigen"));
+                                primary: root.dialog-kind != "delete";
+                                clicked => { root.submit(root.dialog-value, content.extra, content.choice); }
+                                init => { if (root.dialog-kind != "delete") { self.focus(); } }
+                            }
+                            if dialog-card.editable : Button {
+                                text: @tr("Speichern");
+                                primary: true;
+                                clicked => { root.submit(content.body, root.dialog-kind == "buttonbar-edit" ? content.extra : "", 0); }
+                            }
                         }
                     }
-                    input := LineEdit {
-                        visible: root.dialog-kind == "input" || root.dialog-kind == "multi-rename";
-                        text: root.dialog-value;
-                        placeholder-text: root.dialog-placeholder;
-                        accessible-label: root.dialog-placeholder;
-                        input-type: root.dialog-secret ? password : text;
-                        edited => { if dialog-card.rename { root.rename-edited(); } }
-                        accepted => {
-                            if dialog-card.rename { dialog-card.submit-rename(); }
-                            else { root.submit(self.text, second.text, options.current-index); }
-                        }
-                    }
-                    extension := LineEdit {
-                        visible: dialog-card.rename && root.rename-separate;
-                        text: root.rename-extension;
-                        placeholder-text: @tr("Erweiterungsmaske");
-                        accessible-label: @tr("Erweiterungsmaske");
-                        edited => { root.rename-edited(); }
-                        accepted => { dialog-card.submit-rename(); }
-                    }
-                    second := LineEdit {
-                        visible: (root.dialog-kind == "input" || root.dialog-kind == "buttonbar-edit") && root.dialog-second-placeholder != "";
-                        text: root.dialog-second;
-                        placeholder-text: root.dialog-second-placeholder;
-                        accessible-label: root.dialog-second-placeholder;
-                        input-type: root.dialog-second-secret ? password : text;
-                        accepted => {
-                            if root.dialog-kind == "input" { root.submit(input.text, self.text, options.current-index); }
-                        }
-                    }
-                    rename-find := LineEdit {
-                        visible: dialog-card.rename;
-                        text: root.rename-search.find;
-                        placeholder-text: @tr("Suchen nach (optional)");
-                        accessible-label: @tr("Suchen nach (optional)");
-                        edited => { root.rename-edited(); }
-                        accepted => { dialog-card.submit-rename(); }
-                    }
-                    rename-replacement := LineEdit {
-                        visible: dialog-card.rename;
-                        text: root.rename-search.replacement;
-                        placeholder-text: @tr("Ersetzen durch");
-                        accessible-label: @tr("Ersetzen durch");
-                        edited => { root.rename-edited(); }
-                        accepted => { dialog-card.submit-rename(); }
-                    }
-                    HorizontalLayout {
-                        spacing: 12px;
-                        rename-regex := CheckBox {
-                            visible: dialog-card.rename;
-                            text: @tr("Regulärer Ausdruck");
-                            checked: root.rename-search.regex;
-                            toggled => { root.rename-edited(); }
-                        }
-                        rename-case := CheckBox {
-                            visible: dialog-card.rename;
-                            text: @tr("Schreibweise beachten");
-                            checked: root.rename-search.match-case;
-                            toggled => { root.rename-edited(); }
-                        }
-                        rename-first := CheckBox {
-                            visible: dialog-card.rename;
-                            text: @tr("Nur erster Treffer");
-                            checked: root.rename-search.first-only;
-                            toggled => { root.rename-edited(); }
-                        }
-                    }
-                    HorizontalLayout {
-                        spacing: 12px;
-                        rename-suffix := CheckBox {
-                            visible: dialog-card.rename && root.rename-separate;
-                            text: @tr("Erweiterung einbeziehen");
-                            checked: root.rename-search.include-extension;
-                            toggled => { root.rename-edited(); }
-                        }
-                        rename-whole := CheckBox {
-                            visible: dialog-card.rename;
-                            text: @tr("Ganzen Namen ersetzen");
-                            checked: root.rename-search.substitute;
-                            toggled => { root.rename-edited(); }
-                        }
-                        rename-wildcards := CheckBox {
-                            visible: dialog-card.rename;
-                            enabled: !rename-regex.checked;
-                            text: @tr("Platzhalter * und ?");
-                            checked: root.rename-search.wildcards;
-                            toggled => { root.rename-edited(); }
-                        }
-                    }
-                    options := ComboBox {
-                        visible: root.dialog-options.length > 0;
-                        model: root.dialog-options;
-                        current-index: 0;
-                        accessible-label: "Option";
-                    }
-                    if root.dialog-transfer-filters.length > 0 : ComboBox {
-                        model: root.dialog-transfer-filters;
-                        current-index <=> root.dialog-transfer-filter;
-                        accessible-label: "Gespeicherter Suchfilter";
-                    }
-                    if root.dialog-kind == "text" || root.dialog-kind == "viewer" || root.dialog-kind == "review" || root.dialog-kind == "search-results" || root.dialog-kind == "print-preview" : TextEdit {
-                        text: root.dialog-value;
-                        read-only: true;
-                        vertical-stretch: 1;
-                        font-family: "Consolas";
-                        accessible-label: @tr("Inhalt");
-                    }
-                    editor := TextEdit {
-                        visible: root.dialog-kind == "multiline" || root.dialog-kind == "buttonbar-edit";
-                        text: root.dialog-value;
-                        vertical-stretch: 1;
-                        font-family: "Consolas";
-                        accessible-label: root.dialog-title;
-                    }
-                    if root.dialog-kind == "image" : Image {
-                        source: root.viewer-image;
-                        image-fit: contain;
-                        vertical-stretch: 1;
-                        accessible-label: root.dialog-title;
-                    }
-                    HorizontalLayout {
-                        spacing: 7px;
-                        if root.dialog-kind == "viewer" : Button { text: @tr("Zurück"); enabled: root.viewer-back; clicked => { root.action("viewer-back"); } }
-                        if root.dialog-kind == "viewer" : Button { text: @tr("Weiter"); enabled: root.viewer-next; clicked => { root.action("viewer-next"); } }
-                        if root.dialog-kind == "viewer" : Button { text: "Drucken …"; clicked => { root.action("print-file"); } }
-                        if root.dialog-kind == "viewer" : Button { text: root.viewer-mode == "hex" ? "Text" : "Hex"; clicked => { root.action("viewer-toggle"); } }
-                        if root.dialog-kind == "viewer" || root.dialog-kind == "image" : Button { text: @tr("Eigenes Fenster"); enabled: !root.job-active; clicked => { root.action("viewer-detach"); } }
-                        if root.dialog-kind == "text" || root.dialog-kind == "viewer" || root.dialog-kind == "search-results" : Button { text: @tr("Text kopieren"); clicked => { root.action("copy-result"); } }
-                        Rectangle { horizontal-stretch: 1; }
-                        Button { text: root.dialog-kind == "text" || root.dialog-kind == "viewer" || root.dialog-kind == "image" ? @tr("Schließen") : @tr("Abbrechen"); clicked => { root.action("close-dialog"); } }
-                        if root.dialog-kind == "input" || root.dialog-kind == "confirm" || root.dialog-kind == "review" || root.dialog-kind == "search-results" || root.dialog-kind == "print-preview" : Button {
-                            text: root.dialog-kind == "search-results" ? "Treffer übernehmen" : (root.dialog-kind == "print-preview" ? "Drucken …" : @tr("Ausführen"));
-                            clicked => { root.submit(input.text, second.text, options.current-index); }
-                            init => { if (root.dialog-kind != "input") { self.focus(); } }
-                        }
-                        if root.dialog-kind == "multiline" || root.dialog-kind == "buttonbar-edit" : Button {
-                            text: @tr("Speichern");
-                            clicked => { root.submit(editor.text, root.dialog-kind == "buttonbar-edit" ? second.text : "", 0); }
-                        }
-                        if root.dialog-kind == "multi-rename" : Button {
-                            text: @tr("Vorschau");
-                            clicked => { dialog-card.submit-rename(); }
-                        }
-                    }
-                }
-                init => {
-                    if (root.dialog-kind == "input" || root.dialog-kind == "multi-rename") { input.focus(); }
-                    if (root.dialog-kind == "multiline" || root.dialog-kind == "buttonbar-edit") { editor.focus(); }
-                }
-                changed revision => {
-                    input.text = root.dialog-value;
-                    second.text = root.dialog-second;
-                    extension.text = root.rename-extension;
-                    rename-find.text = root.rename-search.find;
-                    rename-replacement.text = root.rename-search.replacement;
-                    rename-regex.checked = root.rename-search.regex;
-                    rename-wildcards.checked = root.rename-search.wildcards;
-                    rename-case.checked = root.rename-search.match-case;
-                    rename-first.checked = root.rename-search.first-only;
-                    rename-suffix.checked = root.rename-search.include-extension;
-                    rename-whole.checked = root.rename-search.substitute;
-                    options.current-index = 0;
-                    editor.text = root.dialog-value;
-                    if (root.dialog-kind == "input" || root.dialog-kind == "multi-rename") { input.focus(); }
-                    if (root.dialog-kind == "multiline" || root.dialog-kind == "buttonbar-edit") { editor.focus(); }
                 }
             }
         }

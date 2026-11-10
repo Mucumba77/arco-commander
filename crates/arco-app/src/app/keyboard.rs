@@ -60,7 +60,8 @@ impl Editor {
     fn matches(&self, id: &str) -> bool {
         let filter = self.filter.to_lowercase();
         id.contains(&filter)
-            || shortcuts::label(id).is_some_and(|label| label.to_lowercase().contains(&filter))
+            || shortcuts::label(id)
+                .is_some_and(|label| crate::locale::tr(label).to_lowercase().contains(&filter))
     }
 
     fn update_selection(&mut self) {
@@ -120,7 +121,8 @@ impl Editor {
 }
 
 impl App {
-    pub(crate) fn open_settings(&mut self) {
+    pub(crate) fn open_settings(&mut self, page: super::SettingsPage) {
+        self.sync_ui_settings();
         self.shortcut_editor = Some(Editor {
             overrides: self.profile.shortcuts.clone(),
             command: Some("search"),
@@ -130,7 +132,13 @@ impl App {
             notice: String::new(),
         });
         self.sync_editor(true);
-        self.ui().set_settings_open(true);
+        let ui = self.ui();
+        ui.set_settings_error("".into());
+        ui.set_settings_page(page as i32);
+        ui.set_settings_languages(super::strings(
+            crate::locale::LANGUAGES.map(crate::locale::label),
+        ));
+        ui.set_settings_open(true);
     }
 
     pub(crate) fn close_settings(&mut self) {
@@ -141,11 +149,10 @@ impl App {
         ui.invoke_focus_panels();
     }
 
-    pub(super) fn apply_shortcuts(&mut self) {
-        if let Some(editor) = &self.shortcut_editor {
-            self.profile.shortcuts.clone_from(&editor.overrides);
-            self.reload_shortcuts();
-        }
+    pub(super) fn draft_shortcuts(&self) -> Option<&shortcuts::Overrides> {
+        self.shortcut_editor
+            .as_ref()
+            .map(|editor| &editor.overrides)
     }
 
     pub(crate) fn reload_shortcuts(&mut self) {
@@ -153,7 +160,7 @@ impl App {
         self.sync_shortcut_labels();
     }
 
-    pub(super) fn sync_shortcut_labels(&self) {
+    pub(crate) fn sync_shortcut_labels(&self) {
         let key = |id| {
             shortcuts::keys_for(&self.bindings, id)
                 .first()
@@ -167,7 +174,10 @@ impl App {
             move_file: key("move").into(),
             mkdir: key("mkdir").into(),
             delete: key("delete").into(),
+            palette: key("palette").into(),
+            job_details: key("job-details").into(),
         });
+        self.sync_command_menu();
     }
 
     pub(crate) fn keyboard_help(&self) -> String {
@@ -186,7 +196,7 @@ impl App {
         result
     }
 
-    fn sync_editor(&self, rebuild_list: bool) {
+    pub(super) fn sync_editor(&self, rebuild_list: bool) {
         let Some(editor) = &self.shortcut_editor else {
             return;
         };
@@ -198,7 +208,7 @@ impl App {
                 .filter(|(_, id)| editor.matches(id))
                 .map(|(label, id)| ShortcutRow {
                     key: id.into(),
-                    label: label.into(),
+                    label: crate::locale::tr(label).into(),
                 })
                 .collect();
             rows.sort_by_cached_key(|row| row.label.to_lowercase());
@@ -208,6 +218,7 @@ impl App {
         ui.set_shortcut_command(selected.into());
         ui.set_shortcut_title(
             shortcuts::label(selected)
+                .map(crate::locale::tr)
                 .unwrap_or("Kein Befehl gewählt")
                 .into(),
         );
@@ -345,7 +356,7 @@ fn quick_find_only_accepts_printable_letters_and_the_configured_modifiers() {
 }
 
 fn route(app: &Rc<RefCell<App>>, chord: Option<String>, repeat: bool) -> bool {
-    let (ui, command) = {
+    let command = {
         let Ok(mut state) = app.try_borrow_mut() else {
             return false;
         };
@@ -365,6 +376,7 @@ fn route(app: &Rc<RefCell<App>>, chord: Option<String>, repeat: bool) -> bool {
             || ui.get_settings_open()
             || !ui.get_dialog_kind().is_empty()
             || ui.get_drive_side() >= 0
+            || ui.get_job_activity_open()
         {
             return false;
         }
@@ -375,11 +387,17 @@ fn route(app: &Rc<RefCell<App>>, chord: Option<String>, repeat: bool) -> bool {
         if !ui.invoke_file_list_focused() && !shortcuts::available_during_edit(&key, command) {
             return false;
         }
-        (ui, command)
+        command
     };
     if repeat && !shortcuts::repeatable(command) {
         return true;
     }
+    activate(app, command);
+    true
+}
+
+pub(super) fn activate(app: &Rc<RefCell<App>>, command: &str) {
+    let ui = app.borrow().ui();
     match command {
         "context-menu" => ui.invoke_open_keyboard_context(),
         "drive-left" => app.borrow().show_drives(0),
@@ -389,7 +407,6 @@ fn route(app: &Rc<RefCell<App>>, chord: Option<String>, repeat: bool) -> bool {
         "focus-command-line" => ui.invoke_focus_command_line(),
         _ => app.borrow_mut().action(command),
     }
-    true
 }
 
 #[cfg(windows)]
