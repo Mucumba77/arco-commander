@@ -1,4 +1,4 @@
-# Arco Commander
+# ![Arco Commander](docs/branding/arco-commander.svg)
 
 Arco Commander ist ein Zwei-Fenster-Dateimanager für Windows, geschrieben in Rust und inspiriert von Norton Commander und Total Commander. Die Desktop-Oberfläche verwendet Slint.
 
@@ -14,6 +14,29 @@ Arco Commander ist ein Zwei-Fenster-Dateimanager für Windows, geschrieben in Ru
 Das portable ZIP ist für Windows 10 22H2 und Windows 11 vorgesehen. Entpacke es vollständig und starte `arco-commander.exe`. Das Paket enthält beide Plugin-Hosts, das ZIP-SFX-Modul, die Kurzanleitung und Drittanbieterhinweise. Es ist unsigniert. [Release-Hinweise und SHA-256-Prüfsumme](https://github.com/Mucumba77/arco-commander/releases/tag/v1.0.0)
 
 Für ein Update entpacke die neue Version in einen eigenen Ordner. Arco verwendet das bisherige Standardprofil weiter. Bei Verwendung von `--portable` übernimm zusätzlich die Profildatei `arco-commander.json` aus dem bisherigen Programmordner.
+
+![Arco Commander mit Arbeitsstand und Archiv nebeneinander](docs/screenshots/hauptfenster.jpg)
+
+## Schnellstart
+
+1. Lade das Windows-x64-ZIP herunter, entpacke es vollständig und starte `arco-commander.exe`.
+2. Öffne links deinen Quellordner und rechts den Zielordner. Ein Doppelklick öffnet einen Ordner. Mit `Tab` wechselst du die aktive Seite.
+3. Wähle im Quellordner eine Datei und drücke `F5`. Prüfe das vorgeschlagene Ziel im anderen Dateifenster und bestätige mit **Kopieren**.
+4. Mit `F3` zeigst du die fokussierte Datei an. Mit `Strg+K` öffnest du die Befehlspalette und findest weitere Aktionen samt Tastenkürzel.
+
+## Einblicke
+
+### Kopierfortschritt
+
+Die Fortschrittskarte zeigt die aktuelle Datei und den Stand der Kopie. Über **Im Hintergrund** arbeitest du in den Dateifenstern weiter.
+
+![Kopierfortschritt für ein neutrales Beispielarchiv bei 39 Prozent](docs/screenshots/kopierfortschritt.jpg)
+
+### Lister
+
+Mit **Eigenes Fenster** öffnest du die Dateivorschau im separaten Lister. Dort kannst du im Text suchen oder zur Hexansicht wechseln.
+
+![Arco Lister mit der Projektübersicht aus den Beispieldateien](docs/screenshots/lister.jpg)
 
 ## Bedienung und Funktionen
 
