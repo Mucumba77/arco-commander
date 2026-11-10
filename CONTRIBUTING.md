@@ -18,6 +18,12 @@ cargo test --locked --workspace --all-targets -- --test-threads=1
 
 Die Windows-CI führt diese Prüfungen auf einem x64-Runner aus. Als ignoriert markierte Referenztests benötigen je nach Fall Zusatzprogramme, Test-Plugins, Server oder besondere Windows-Berechtigungen. Für Änderungen an der Bedienung beschreibe die geprüften Schritte mit Maus und Tastatur sowie die verwendete Windows-Version.
 
+Den Referenztest für NTFS-Überwachungs-ACLs kannst du auf einem geeigneten NTFS-Testsystem gezielt starten. Der gehostete Runner verweigert das Schreiben der ACL für den Testaufbau.
+
+```powershell
+cargo test --locked -p arco-core audit_copy_preserves_acl_or_fails_before_publishing -- --ignored
+```
+
 ## Pull Request öffnen
 
 1. Erstelle einen Branch in deinem Fork auf Basis des aktuellen `main`.

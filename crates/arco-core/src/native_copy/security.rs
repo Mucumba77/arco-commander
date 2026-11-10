@@ -394,6 +394,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires an NTFS reference environment with predictable SACL access"]
     fn audit_copy_preserves_acl_or_fails_before_publishing() {
         let fixture = tempfile::tempdir().unwrap();
         let source = fixture.path().join("source");

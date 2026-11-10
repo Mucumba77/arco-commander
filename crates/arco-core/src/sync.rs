@@ -934,9 +934,9 @@ mod tests {
         let left = file(&roots[0], "private/data.txt", b"private", 1000);
         let right = file(&roots[1], "private/data.txt", b"copy", 1000);
         file(&roots[0], "public.txt", b"public", 1000);
+        let ignored_folder = fs::canonicalize(left.parent().unwrap()).unwrap();
         let ignore =
-            crate::ignore::IgnoreList::parse(&format!("{}\\", left.parent().unwrap().display()))
-                .unwrap();
+            crate::ignore::IgnoreList::parse(&format!("{}\\", ignored_folder.display())).unwrap();
         let plan = compare_ignoring(
             roots.each_ref().map(PathBuf::as_path),
             &Options {
