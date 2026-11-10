@@ -23,7 +23,8 @@ WEBVIEW2_PACKAGE = "microsoft.web.webview2"
 WEBVIEW2_GALLERY = f"https://www.nuget.org/packages/Microsoft.Web.WebView2/{WEBVIEW2_SDK}"
 REPO = "https://github.com/Mucumba77/arco-commander"
 DOCS = (
-    "LICENSE", "README.md", "CHANGELOG.md", "FUNKTIONSMATRIX.md", "PLAN.md",
+    "LICENSE", "README.md", "CONTRIBUTING.md", "SECURITY.md",
+    "CHANGELOG.md", "FUNKTIONSMATRIX.md", "PLAN.md",
     "TOTAL-COMMANDER-REFERENZ.md", "docs/RELEASE.md",
 )
 LICENSE_NAME = re.compile(
