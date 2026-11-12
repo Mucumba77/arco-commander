@@ -138,6 +138,20 @@ impl Registration {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PackagePhase {
+    Reading,
+    Extracting,
+    Checking,
+}
+
+pub struct PackageProgress<'a> {
+    pub phase: PackagePhase,
+    pub path: &'a Path,
+    pub completed: u64,
+    pub total: Option<u64>,
+}
+
 pub struct Package {
     pub registrations: Vec<Registration>,
     pub version: String,
@@ -146,6 +160,22 @@ pub struct Package {
 
 impl Package {
     pub fn read(path: &Path, root: &Path, cancel: &AtomicBool) -> io::Result<Self> {
+        Self::read_with_progress(path, root, cancel, |_| {})
+    }
+
+    pub fn read_with_progress(
+        path: &Path,
+        root: &Path,
+        cancel: &AtomicBool,
+        mut progress: impl FnMut(PackageProgress<'_>),
+    ) -> io::Result<Self> {
+        progress(PackageProgress {
+            phase: PackagePhase::Reading,
+            path,
+            completed: 0,
+            total: None,
+        });
+        files::check_cancel(cancel)?;
         const MAX_ZIP: u64 = 256 * 1024 * 1024;
         const MAX_OUTPUT: u64 = 512 * 1024 * 1024;
         if !path.is_absolute()
@@ -186,7 +216,28 @@ impl Package {
         let workspace = tempfile::Builder::new()
             .prefix("package-")
             .tempdir_in(root)?;
-        archives::extract_zip(source.path(), workspace.path(), None, cancel)?;
+        archives::extract_zip_selection_with_progress(
+            source.path(),
+            workspace.path(),
+            None,
+            None,
+            cancel,
+            |p| {
+                progress(PackageProgress {
+                    phase: PackagePhase::Extracting,
+                    path: p.path,
+                    completed: p.copied,
+                    total: Some(p.total),
+                });
+            },
+        )?;
+        progress(PackageProgress {
+            phase: PackagePhase::Checking,
+            path,
+            completed: 0,
+            total: None,
+        });
+        files::check_cancel(cancel)?;
         let text = profile::read_tc_text(&workspace.path().join(&manifest.path))?;
         let values: BTreeMap<_, _> = profile::ini_entries(&text)
             .filter(|(section, _, _)| section == "plugininstall")
@@ -431,6 +482,46 @@ mod tests {
     use super::*;
     use std::io::Write;
     use zip::{ZipWriter, write::SimpleFileOptions};
+
+    #[test]
+    fn package_progress_tracks_extraction_and_cancelled_staging_is_discarded() {
+        use std::sync::atomic::Ordering;
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("progress.zip");
+        let root = fixture.path().join("plugins");
+        let mut zip = ZipWriter::new(File::create(&path).unwrap());
+        zip.start_file("pluginst.inf", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"[plugininstall]\ntype=wcx\nfile=demo.wcx64\ndescription=Fixture")
+            .unwrap();
+        zip.start_file("demo.wcx64", SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(&header(0x8664, true)).unwrap();
+        zip.finish().unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut updates = Vec::new();
+        let package = Package::read_with_progress(&path, &root, &cancel, |p| {
+            updates.push((p.phase, p.completed, p.total));
+        })
+        .unwrap();
+        assert_eq!(package.registrations.len(), 1);
+        assert_eq!(updates.first().unwrap().0, PackagePhase::Reading);
+        assert!(updates.iter().any(|p| p.0 == PackagePhase::Extracting
+            && p.2.is_some_and(|total| total > 0 && p.1 == total)));
+        assert_eq!(updates.last().unwrap(), &(PackagePhase::Checking, 0, None));
+        drop(package);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        let error = Package::read_with_progress(&path, &root, &cancel, |p| {
+            if p.phase == PackagePhase::Extracting {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        })
+        .err()
+        .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+        assert!(path.is_file());
+    }
 
     fn header(machine: u16, library: bool) -> [u8; 88] {
         let mut bytes = [0; 88];

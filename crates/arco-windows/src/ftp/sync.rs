@@ -113,6 +113,17 @@ impl Session {
         output: &File,
         cancel: &AtomicBool,
     ) -> io::Result<()> {
+        self.fetch_sync_with_progress(directory, expected, output, cancel, |_| {})
+    }
+
+    pub fn fetch_sync_with_progress(
+        &self,
+        directory: &Url,
+        expected: &Entry,
+        output: &File,
+        cancel: &AtomicBool,
+        mut progress: impl FnMut(super::DownloadProgress),
+    ) -> io::Result<()> {
         let size = expected
             .size
             .filter(|_| expected.directory == Some(false))
@@ -122,12 +133,25 @@ impl Session {
         self.verify_sync_entry(directory, expected, cancel)?;
         let url = self.file(directory, &expected.name)?;
         let limit = size.max(1).to_string();
-        run(
+        super::run_observed(
             self.command(&url)?,
             &["--max-filesize", &limit],
             Some(output.try_clone()?),
             cancel,
+            || {
+                progress(super::DownloadProgress {
+                    received: output.metadata()?.len(),
+                    total: Some(size),
+                    phase: super::DownloadPhase::Receiving,
+                });
+                Ok(())
+            },
         )?;
+        progress(super::DownloadProgress {
+            received: output.metadata()?.len(),
+            total: Some(size),
+            phase: super::DownloadPhase::Verifying,
+        });
         if output.metadata()?.len() != size {
             return Err(io::Error::other(
                 "Die heruntergeladene Größe weicht vom FTP-Vergleich ab.",

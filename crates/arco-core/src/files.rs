@@ -551,10 +551,20 @@ pub struct TransferReport {
     pub cancelled: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ProgressPhase {
+    #[default]
+    Data,
+    Finalizing,
+}
+
 pub struct Progress<'a> {
     pub path: &'a Path,
     pub copied: u64,
     pub total: u64,
+    pub items: Option<(usize, usize)>,
+    pub current: Option<(u64, u64)>,
+    pub phase: ProgressPhase,
 }
 
 pub type NativeRename = fn(&Path, &Path) -> io::Result<()>;
@@ -600,6 +610,7 @@ pub struct TransferPolicy<'a> {
     pub descriptions: Option<crate::descriptions::ApplyAttributes>,
     pub ignore: Option<&'a crate::ignore::IgnoreList>,
     pub filter: Option<&'a crate::advanced_search::Query>,
+    pub before_entry: Option<&'a dyn Fn(&Path) -> io::Result<()>>,
 }
 
 impl From<Conflict> for TransferPolicy<'_> {
@@ -611,6 +622,7 @@ impl From<Conflict> for TransferPolicy<'_> {
             descriptions: None,
             ignore: None,
             filter: None,
+            before_entry: None,
         }
     }
 }
@@ -932,6 +944,10 @@ fn transfer_item(
     rename: Option<NativeRename>,
     progress: &mut impl FnMut(Progress<'_>),
 ) -> io::Result<(bool, usize)> {
+    check_cancel(cancel)?;
+    if let Some(before_entry) = policy.before_entry {
+        before_entry(source)?;
+    }
     let destination = target.parent().expect("a transfer target has a directory");
     let meta = fs::symlink_metadata(source)?;
     #[cfg(windows)]
@@ -1256,6 +1272,9 @@ fn copy_junction(
         path: source,
         copied: 0,
         total: 0,
+        items: None,
+        current: None,
+        phase: ProgressPhase::Data,
     });
     junction.copy_to(&target, cancel)?;
     if let Some(prepare) = policy.descriptions {
@@ -1482,6 +1501,9 @@ fn copy_file_content(
         path: source,
         copied,
         total: meta.len(),
+        items: None,
+        current: None,
+        phase: ProgressPhase::Data,
     });
     #[cfg(windows)]
     let sparse = !append
@@ -1490,6 +1512,9 @@ fn copy_file_content(
                 path: source,
                 copied,
                 total: meta.len(),
+                items: None,
+                current: None,
+                phase: ProgressPhase::Data,
             });
         })?;
     #[cfg(not(windows))]
@@ -1508,6 +1533,9 @@ fn copy_file_content(
                 path: source,
                 copied,
                 total: meta.len(),
+                items: None,
+                current: None,
+                phase: ProgressPhase::Data,
             });
         }
     }
@@ -1985,6 +2013,7 @@ mod tests {
                 descriptions: None,
                 ignore: None,
                 filter: Some(&filter),
+                before_entry: None,
             },
             &AtomicBool::new(false),
             None,
@@ -2100,6 +2129,7 @@ mod tests {
             descriptions: None,
             ignore: Some(&ignore),
             filter: None,
+            before_entry: None,
         };
         let cancel = AtomicBool::new(false);
         assert!(
@@ -2288,6 +2318,7 @@ mod tests {
                     descriptions: None,
                     ignore: Some(&ignore),
                     filter: None,
+                    before_entry: None,
                 },
                 &cancel,
                 Some(|from, to| fs::rename(from, to)),

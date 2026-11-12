@@ -790,7 +790,19 @@ impl Catalog {
         query: &crate::advanced_search::Query,
         show_hidden: bool,
         cancel: &AtomicBool,
+        inspect: impl FnMut(&files::Entry) -> io::Result<bool>,
+    ) -> io::Result<crate::advanced_search::Found> {
+        self.search_candidates_with_progress(roots, query, show_hidden, cancel, inspect, |_| {})
+    }
+
+    pub fn search_candidates_with_progress(
+        &self,
+        roots: &[PathBuf],
+        query: &crate::advanced_search::Query,
+        show_hidden: bool,
+        cancel: &AtomicBool,
         mut inspect: impl FnMut(&files::Entry) -> io::Result<bool>,
+        mut progress: impl FnMut(crate::advanced_search::Progress<'_>),
     ) -> io::Result<crate::advanced_search::Found> {
         self.check_unchanged()?;
         for root in roots {
@@ -809,6 +821,7 @@ impl Catalog {
         let mut entries = Vec::new();
         let mut errors = Vec::new();
         let mut interrupted = false;
+        let mut examined = 0;
         'folders: for (parent, rows) in &self.folders {
             for row in rows {
                 if cancel.load(std::sync::atomic::Ordering::Relaxed) {
@@ -822,10 +835,25 @@ impl Catalog {
                                 .is_none_or(|depth| relative.components().count() <= depth)
                         })
                 });
-                if !in_scope || !(show_hidden || !row.hidden) || !query.matches_metadata(row) {
+                if !in_scope || !(show_hidden || !row.hidden) {
                     continue;
                 }
-                match inspect(row) {
+                progress(crate::advanced_search::Progress {
+                    path: &row.path,
+                    examined,
+                    matched: entries.len(),
+                    errors: errors.len(),
+                });
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    interrupted = true;
+                    break 'folders;
+                }
+                let result = if query.matches_metadata(row) {
+                    inspect(row)
+                } else {
+                    Ok(false)
+                };
+                match result {
                     Ok(true) => entries.push(row.clone()),
                     Ok(false) => (),
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => {
@@ -837,6 +865,13 @@ impl Catalog {
                     }
                     Err(_) => (),
                 }
+                examined += 1;
+                progress(crate::advanced_search::Progress {
+                    path: &row.path,
+                    examined,
+                    matched: entries.len(),
+                    errors: errors.len(),
+                });
             }
         }
         self.check_unchanged()?;
@@ -1207,6 +1242,65 @@ fn extract_brotli(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn archive_progress_obeys_scope_and_cancels_before_inspection() {
+        use super::*;
+        use crate::advanced_search::Options;
+        use std::sync::atomic::Ordering;
+        let fixture = tempfile::tempdir().unwrap();
+        let base = fixture.path().join("input");
+        fs::create_dir_all(base.join("docs")).unwrap();
+        fs::write(base.join("docs/a.txt"), b"a").unwrap();
+        fs::write(base.join("docs/b.md"), b"b").unwrap();
+        fs::write(base.join("outside.txt"), b"outside").unwrap();
+        let archive = fixture.path().join("test.zip");
+        let cancel = AtomicBool::new(false);
+        archives::create_zip(
+            &[base.join("docs"), base.join("outside.txt")],
+            &base,
+            &archive,
+            None,
+            &cancel,
+        )
+        .unwrap();
+        let catalog = Catalog::read(&archive, &cancel).unwrap();
+        let query = Options {
+            names: "*.txt".into(),
+            ..Default::default()
+        }
+        .compile()
+        .unwrap();
+        let roots = [PathBuf::from("docs")];
+        let mut counts = Vec::new();
+        let found = catalog
+            .search_candidates_with_progress(
+                &roots,
+                &query,
+                true,
+                &cancel,
+                |_| Ok(true),
+                |update| {
+                    assert!(update.path.starts_with("docs"));
+                    counts.push((update.examined, update.matched));
+                },
+            )
+            .unwrap();
+        assert_eq!(counts.last(), Some(&(2, 1)));
+        assert_eq!(found.directory.entries.len(), 1);
+        let aborted = catalog
+            .search_candidates_with_progress(
+                &roots,
+                &query,
+                true,
+                &cancel,
+                |_| panic!("cancelled candidate must not be inspected"),
+                |_| cancel.store(true, Ordering::Relaxed),
+            )
+            .unwrap();
+        assert!(aborted.cancelled);
+        assert!(aborted.directory.entries.is_empty());
+    }
+
     #[test]
     fn archive_write_conflicts_keep_skipped_members_and_publish_the_delta_once() {
         use super::*;

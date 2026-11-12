@@ -35,6 +35,18 @@ pub enum ListingMode {
     List,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DownloadPhase {
+    Receiving,
+    Verifying,
+}
+
+pub struct DownloadProgress {
+    pub received: u64,
+    pub total: Option<u64>,
+    pub phase: DownloadPhase,
+}
+
 pub struct Connection {
     url: Url,
     user: String,
@@ -297,7 +309,7 @@ impl Session {
         destination: &Path,
         cancel: &AtomicBool,
     ) -> io::Result<()> {
-        self.download_file(directory, remote, destination, None, cancel)
+        self.download_file(directory, remote, destination, None, cancel, |_| {})
     }
 
     pub fn download_bounded(
@@ -308,7 +320,37 @@ impl Session {
         limit: u64,
         cancel: &AtomicBool,
     ) -> io::Result<()> {
-        self.download_file(directory, remote, destination, Some(limit), cancel)
+        self.download_file(directory, remote, destination, Some(limit), cancel, |_| {})
+    }
+
+    pub fn download_bounded_with_progress(
+        &self,
+        directory: &Url,
+        remote: &str,
+        destination: &Path,
+        limit: u64,
+        cancel: &AtomicBool,
+        progress: impl FnMut(DownloadProgress),
+    ) -> io::Result<()> {
+        self.download_file(
+            directory,
+            remote,
+            destination,
+            Some(limit),
+            cancel,
+            progress,
+        )
+    }
+
+    pub fn download_with_progress(
+        &self,
+        directory: &Url,
+        remote: &str,
+        destination: &Path,
+        cancel: &AtomicBool,
+        progress: impl FnMut(DownloadProgress),
+    ) -> io::Result<()> {
+        self.download_file(directory, remote, destination, None, cancel, progress)
     }
 
     fn download_file(
@@ -318,6 +360,7 @@ impl Session {
         destination: &Path,
         limit: Option<u64>,
         cancel: &AtomicBool,
+        mut progress: impl FnMut(DownloadProgress),
     ) -> io::Result<()> {
         let url = self.file(directory, remote)?;
         let parent = destination
@@ -336,12 +379,25 @@ impl Session {
         } else {
             &[]
         };
-        run(
+        run_observed(
             self.command(&url)?,
             arguments,
             Some(temporary.reopen()?),
             cancel,
+            || {
+                progress(DownloadProgress {
+                    received: temporary.as_file().metadata()?.len(),
+                    total: None,
+                    phase: DownloadPhase::Receiving,
+                });
+                Ok(())
+            },
         )?;
+        progress(DownloadProgress {
+            received: temporary.as_file().metadata()?.len(),
+            total: None,
+            phase: DownloadPhase::Verifying,
+        });
         if let Some(limit) = limit
             && temporary.as_file().metadata()?.len() > limit
         {
@@ -498,10 +554,20 @@ struct Request {
 }
 
 fn run(
+    request: Request,
+    arguments: &[&str],
+    output: Option<File>,
+    cancel: &AtomicBool,
+) -> io::Result<Vec<u8>> {
+    run_observed(request, arguments, output, cancel, || Ok(()))
+}
+
+fn run_observed(
     mut request: Request,
     arguments: &[&str],
     output: Option<File>,
     cancel: &AtomicBool,
+    mut observe: impl FnMut() -> io::Result<()>,
 ) -> io::Result<Vec<u8>> {
     check_cancel(cancel)?;
     let mut child = request
@@ -529,7 +595,7 @@ fn run(
         .take()
         .map(|stderr| std::thread::spawn(move || read_limited(stderr, 16 * 1024)));
     let result = loop {
-        if let Err(error) = check_cancel(cancel) {
+        if let Err(error) = check_cancel(cancel).and_then(|()| observe()) {
             let _ = child.kill();
             let _ = child.wait();
             break Err(error);
@@ -572,6 +638,8 @@ fn run(
             format!("FTP {}: {}", status.code().unwrap_or(-1), error.trim()),
         ));
     }
+    observe()?;
+    check_cancel(cancel)?;
     Ok(output.transpose()?.unwrap_or_default())
 }
 
@@ -767,9 +835,36 @@ mod tests {
                 )
                 .is_err()
         );
+        let mut updates = Vec::new();
         session
-            .download(&folder, "datei mit Leerzeichen.txt", &target, &cancel)
+            .download_with_progress(
+                &folder,
+                "datei mit Leerzeichen.txt",
+                &target,
+                &cancel,
+                |p| {
+                    updates.push((p.phase, p.received));
+                },
+            )
             .unwrap();
+        assert!(updates.iter().any(|p| p.0 == DownloadPhase::Receiving));
+        assert_eq!(updates.last(), Some(&(DownloadPhase::Verifying, 19)));
+        let aborted = directory.path().join("cancelled.txt");
+        let abort = AtomicBool::new(false);
+        let error = session
+            .download_with_progress(
+                &folder,
+                "datei mit Leerzeichen.txt",
+                &aborted,
+                &abort,
+                |_| {
+                    abort.store(true, Ordering::Relaxed);
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(!aborted.exists());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
         assert_eq!(
             std::fs::read(&target).unwrap(),
             std::fs::read(&source).unwrap()

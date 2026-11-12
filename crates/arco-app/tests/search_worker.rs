@@ -25,6 +25,38 @@ fn search_worker(request: serde_json::Value) -> Vec<serde_json::Value> {
 }
 
 #[test]
+fn opted_in_progress_is_streamed_before_results_with_final_counts() {
+    let fixture = tempfile::tempdir().unwrap();
+    std::fs::write(fixture.path().join("Größe.txt"), b"contents").unwrap();
+    std::fs::write(fixture.path().join("other.md"), b"skip").unwrap();
+    let messages = search_worker(serde_json::json!({
+        "progress": true, "options": {"names": "*.txt"},
+        "roots": [fixture.path().as_os_str()], "show_hidden": false, "plugins": []
+    }));
+    let progress = messages
+        .iter()
+        .filter_map(|message| message.get("Progress"))
+        .collect::<Vec<_>>();
+    let last = progress.last().expect("a final progress snapshot");
+    assert_eq!(last["examined"], 2);
+    assert_eq!(last["matched"], 1);
+    assert_eq!(last["errors"], 0);
+    let last_progress = messages
+        .iter()
+        .rposition(|message| message.get("Progress").is_some())
+        .unwrap();
+    let first_result = messages
+        .iter()
+        .position(|message| message.get("Entry").is_some())
+        .unwrap();
+    assert!(last_progress < first_result);
+    assert_eq!(
+        messages.last().unwrap(),
+        &serde_json::json!({"Done": {"cancelled": false}})
+    );
+}
+
+#[test]
 fn separate_search_process_returns_matching_file_metadata_and_exits() {
     let fixture = tempfile::tempdir().unwrap();
     let found = fixture.path().join("Größe.txt");

@@ -11,6 +11,26 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(super) struct Update {
+    path: std::ffi::OsString,
+    examined: usize,
+    matched: Option<usize>,
+    errors: usize,
+    phase: String,
+}
+
+impl Update {
+    fn sample(self) -> super::job_progress::Sample {
+        super::job_progress::Sample {
+            source: display_path(Path::new(&self.path)),
+            scan: Some((self.examined, self.matched, self.errors)),
+            phase: self.phase,
+            ..Default::default()
+        }
+    }
+}
+
 mod worker;
 pub(crate) use worker::run as run_search_worker;
 
@@ -47,6 +67,7 @@ pub(super) struct SeparateSearch {
     setup: Setup,
     cancel: Option<Arc<AtomicBool>>,
     review: Option<Review>,
+    progress: super::job_progress::Tracker,
 }
 
 pub(super) enum WindowAction {
@@ -55,6 +76,7 @@ pub(super) enum WindowAction {
     Close,
     Use,
     Finished(io::Result<Found>),
+    Progress(Update),
 }
 
 struct SearchTask {
@@ -71,22 +93,65 @@ struct SearchTask {
 }
 
 impl SearchTask {
-    fn run(mut self, cancel: &AtomicBool) -> io::Result<Found> {
+    #[cfg(test)]
+    fn run(self, cancel: &AtomicBool) -> io::Result<Found> {
+        self.run_with_progress(cancel, |_| {})
+    }
+
+    fn run_with_progress(
+        mut self,
+        cancel: &AtomicBool,
+        mut progress: impl FnMut(Update),
+    ) -> io::Result<Found> {
         if let Some(archive) = &self.archive {
-            return self.run_archive(archive, cancel);
+            return self.run_archive(archive, cancel, &mut progress);
         }
-        let mut found = self.run_local(cancel)?;
+        let mut examined = 0;
+        let mut path = self
+            .roots
+            .first()
+            .map(|path| path.as_os_str().to_owned())
+            .unwrap_or_default();
+        let mut found = self.run_local(cancel, &mut |update: Update| {
+            examined = examined.max(update.examined);
+            path.clone_from(&update.path);
+            progress(update);
+        })?;
         if let Some(wdx) = &self.wdx {
             if found.cancelled {
                 found.directory.entries.clear();
             } else {
+                progress(Update {
+                    path: Default::default(),
+                    examined,
+                    matched: None,
+                    errors: found.directory.errors.len(),
+                    phase: "WDX-Bedingungen prüfen …".into(),
+                });
                 wdx.filter(&mut found.directory.entries, cancel)?;
             }
         }
+        progress(Update {
+            path,
+            examined,
+            matched: Some(found.directory.entries.len()),
+            errors: found.directory.errors.len(),
+            phase: if found.cancelled {
+                "Suche abgebrochen"
+            } else {
+                "Suche abgeschlossen"
+            }
+            .into(),
+        });
         Ok(found)
     }
 
-    fn run_archive(&self, archive: &ArchiveTab, cancel: &AtomicBool) -> io::Result<Found> {
+    fn run_archive(
+        &self,
+        archive: &ArchiveTab,
+        cancel: &AtomicBool,
+        progress: &mut impl FnMut(Update),
+    ) -> io::Result<Found> {
         use arco_core::archive_view::{self, Selection};
         let content = self.query.requires_content();
         let reads_files = content || self.wdx.is_some();
@@ -95,7 +160,7 @@ impl SearchTask {
             .as_deref()
             .map(|password| password.as_str())
             .or(archive.password());
-        archive.catalog.search_candidates(
+        archive.catalog.search_candidates_with_progress(
             &self.roots,
             &self.query,
             self.show_hidden,
@@ -127,12 +192,41 @@ impl SearchTask {
                     .as_ref()
                     .map_or(Ok(true), |filter| filter.matches_file(&file, cancel))
             },
+            |value| {
+                progress(Update {
+                    path: format!(
+                        "{}::{}",
+                        display_path(&archive.file),
+                        display_path(value.path)
+                    )
+                    .into(),
+                    examined: value.examined,
+                    matched: Some(value.matched),
+                    errors: value.errors,
+                    phase: "Archiv durchsuchen …".into(),
+                })
+            },
         )
     }
 
-    fn run_local(&mut self, cancel: &AtomicBool) -> io::Result<Found> {
+    fn run_local(
+        &mut self,
+        cancel: &AtomicBool,
+        progress: &mut impl FnMut(Update),
+    ) -> io::Result<Found> {
         let mut fallback = None;
         if let Some((scoped, expression)) = self.indexed.take() {
+            progress(Update {
+                path: self
+                    .roots
+                    .first()
+                    .map(|path| path.as_os_str().to_owned())
+                    .unwrap_or_default(),
+                examined: 0,
+                matched: None,
+                errors: 0,
+                phase: "Everything-Abfrage läuft …".into(),
+            });
             let result = self
                 .executable
                 .take()
@@ -169,13 +263,22 @@ impl SearchTask {
                 }
             }
         }
-        let mut found = advanced_search::search(
+        let mut found = advanced_search::search_with_progress(
             &self.roots,
             self.options.selected_only,
             &self.query,
             self.show_hidden,
             self.ignore.as_deref(),
             cancel,
+            |value| {
+                progress(Update {
+                    path: value.path.as_os_str().to_owned(),
+                    examined: value.examined,
+                    matched: self.wdx.is_none().then_some(value.matched),
+                    errors: value.errors,
+                    phase: "Suchorte durchsuchen …".into(),
+                })
+            },
         );
         if let Some(message) = fallback {
             found.directory.errors.insert(0, message);
@@ -299,14 +402,33 @@ impl App {
         self.profile.search_last = options;
         self.save();
         self.close_dialog();
-        self.start_job("Erweiterte Suche …", false, move |job| {
-            let found = task.run(&job.cancel)?;
-            Ok(Outcome::SearchReview(Box::new(Review {
-                setup,
-                found,
-                duplicate_groups: None,
-            })))
-        });
+        let origin = if task.archive.is_some() {
+            setup.location().display()
+        } else {
+            task.roots
+                .iter()
+                .map(|path| display_path(path))
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
+        self.start_operation_job(
+            "Dateien suchen",
+            false,
+            super::JobDescription::new(crate::OperationKind::Search, origin, String::new()),
+            move |job| {
+                let feed = job.progress_feed();
+                let found = task.run_with_progress(&job.cancel, |update| {
+                    if let Ok(mut latest) = feed.lock() {
+                        *latest = Some(update.sample());
+                    }
+                })?;
+                Ok(Outcome::SearchReview(Box::new(Review {
+                    setup,
+                    found,
+                    duplicate_groups: None,
+                })))
+            },
+        );
         Ok(())
     }
 
@@ -486,6 +608,9 @@ impl App {
         window
             .global::<crate::Colors>()
             .set_light(self.effective_light_theme());
+        window.on_copy_text(|text| {
+            let _ = arco_windows::copy_text(text.as_str());
+        });
         let sender = self.sender.clone();
         window.on_configure(move |data, name, operation| {
             let password = search_password(&data);
@@ -517,6 +642,7 @@ impl App {
             setup,
             cancel: None,
             review: None,
+            progress: super::job_progress::Tracker::default(),
         });
         self.publish_search_profiles();
         Ok(())
@@ -528,6 +654,20 @@ impl App {
                 cancel.store(true, Ordering::Relaxed);
             }
             let _ = search.window.hide();
+        }
+    }
+
+    pub(super) fn update_separate_search_progress(&mut self) {
+        if let Some(search) = &mut self.separate_search {
+            if search.cancel.is_some() {
+                if let Some(metrics) =
+                    search
+                        .progress
+                        .render(false, false, crate::OperationKind::Search)
+                {
+                    search.window.set_metrics(metrics);
+                }
+            }
         }
     }
 
@@ -550,12 +690,20 @@ impl App {
         };
         match action {
             WindowAction::Close => self.close_separate_search(),
+            WindowAction::Progress(update) => {
+                if let Some(search) = self.separate_search.as_mut() {
+                    if search.cancel.is_some() {
+                        search.progress.update(update.sample());
+                    }
+                }
+            }
             WindowAction::Cancel => {
                 if let Some(cancel) = &search.cancel {
                     cancel.store(true, Ordering::Relaxed);
                     search
                         .window
                         .set_notice("Suchlauf wird abgebrochen …".into());
+                    search.window.set_cancelling(true);
                 }
             }
             WindowAction::Use => {
@@ -589,6 +737,7 @@ impl App {
             WindowAction::Finished(result) => {
                 let search = self.separate_search.as_mut().unwrap();
                 search.cancel = None;
+                search.window.set_cancelling(false);
                 search.window.set_busy(false);
                 match result {
                     Ok(found) => {
@@ -599,6 +748,7 @@ impl App {
                         };
                         let (title, list) = review_text(&review);
                         search.window.set_notice("".into());
+                        search.window.set_result_rows(review_rows(&review));
                         search.window.set_result_title(title.into());
                         search.window.set_result_list(list.into());
                         search.window.set_has_result(true);
@@ -645,6 +795,15 @@ impl App {
         password: Option<ArchivePassword>,
     ) -> io::Result<()> {
         let task = self.search_task(setup, options.clone(), password)?;
+        let working_base = if task.archive.is_some() {
+            setup.location().display()
+        } else {
+            task.roots
+                .iter()
+                .map(|path| display_path(path))
+                .collect::<Vec<_>>()
+                .join("; ")
+        };
         let request = worker::Request::from_task(&task, &self.profile);
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
@@ -652,18 +811,32 @@ impl App {
         std::thread::Builder::new()
             .name("arco-search".into())
             .spawn(move || {
-                let result = worker::spawn(request, task.archive.as_ref(), &worker_cancel);
+                let result = worker::spawn_with_progress(
+                    request,
+                    task.archive.as_ref(),
+                    &worker_cancel,
+                    |update| {
+                        let _ = sender.send(Event::SeparateSearch(
+                            id,
+                            Box::new(WindowAction::Progress(update)),
+                        ));
+                    },
+                );
                 let _ = sender.send(Event::SeparateSearch(
                     id,
                     Box::new(WindowAction::Finished(result)),
                 ));
             })?;
         let search = self.separate_search.as_mut().unwrap();
+        search.window.set_working_base(working_base.into());
         search.window.set_draft(to_draft(&options));
         search.window.set_notice("Dateisuche läuft …".into());
         search.window.set_has_result(false);
         search.window.set_can_use(false);
         search.window.set_busy(true);
+        search.progress = super::job_progress::Tracker::default();
+        search.window.set_metrics(Default::default());
+        search.window.set_cancelling(false);
         search.cancel = Some(cancel);
         search.review = None;
         self.profile.search_last = options;
@@ -681,6 +854,10 @@ impl App {
         } else {
             Vec::new()
         };
+        self.ui().set_review_rows(review_rows(&review));
+        self.ui()
+            .set_review_can_confirm(!review.found.directory.entries.is_empty());
+        self.ui().set_review_can_edit(false);
         self.dialog("search-results", Pending::SearchReview(review), Dialog {
             title: &title, description: "Übernimm die Treffer als Dateiliste oder behalte die vorherige Ansicht.",
             value: &list, options: &options, ..Default::default()
@@ -957,6 +1134,74 @@ fn compile_search(options: &Options) -> io::Result<advanced_search::Query> {
     } else {
         options.compile()
     }
+}
+
+fn review_rows(review: &Review) -> slint::ModelRc<crate::ReviewRow> {
+    let mut group = 0;
+    let mut end = review
+        .duplicate_groups
+        .as_ref()
+        .and_then(|groups| groups.first())
+        .copied()
+        .unwrap_or(usize::MAX);
+    let mut rows = review
+        .found
+        .directory
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            if index >= end {
+                group += 1;
+                end += review
+                    .duplicate_groups
+                    .as_ref()
+                    .and_then(|groups| groups.get(group))
+                    .copied()
+                    .unwrap_or(0);
+            }
+            crate::ReviewRow {
+                primary: entry.name.to_string_lossy().as_ref().into(),
+                secondary: if entry.kind == Kind::Directory {
+                    crate::locale::tr("Ordner").to_owned()
+                } else {
+                    crate::human_size(entry.size.unwrap_or(0))
+                }
+                .into(),
+                detail: if review.duplicate_groups.is_some() {
+                    format!(
+                        "{} {} · {}",
+                        crate::locale::tr("Gruppe"),
+                        group + 1,
+                        display_path(&entry.path)
+                    )
+                } else {
+                    display_path(&entry.path)
+                }
+                .into(),
+                kind: if entry.kind == Kind::Directory {
+                    "folder"
+                } else {
+                    "file"
+                }
+                .into(),
+            }
+        })
+        .collect::<Vec<_>>();
+    rows.extend(
+        review
+            .found
+            .directory
+            .errors
+            .iter()
+            .map(|error| crate::ReviewRow {
+                primary: crate::locale::tr("Lesefehler").into(),
+                detail: error.as_str().into(),
+                kind: "error".into(),
+                ..Default::default()
+            }),
+    );
+    slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(rows)))
 }
 
 fn review_text(review: &Review) -> (String, String) {

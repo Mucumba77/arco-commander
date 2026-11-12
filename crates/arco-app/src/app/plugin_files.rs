@@ -6,7 +6,7 @@ use super::{
     },
 };
 use crate::commands::{Dialog, Pending};
-use crate::display_path;
+use crate::{OperationKind, display_path};
 use arco_core::files;
 use arco_core::plugin::{self, Interface, Operation, Registration, WcxOperation, WfxOperation};
 use std::cell::Cell;
@@ -449,31 +449,37 @@ impl App {
                 operation,
                 Operation::Wcx(_) | Operation::Wfx(WfxOperation::Download { .. })
             );
-        self.start_job("Plugin-Dateioperation läuft …", refresh, move |job| {
-            let progress = |message| job.progress(format!("{} · {message}", entry.name));
-            let rows = if let Operation::Wfx(operation) = operation {
-                plugin::operate_interactive(
-                    &entry.path,
-                    operation,
-                    &job.cancel,
-                    progress,
-                    &mut |prompt| job.prompt(&entry.name, prompt),
-                )
-            } else {
-                plugin::operate(&entry.path, &archive, operation, &job.cancel, progress)
-            }
-            .map_err(|error| plugin_error(&entry.name, error))?;
-            let details = rows
-                .iter()
-                .map(|row| format!("{} · {}", row.name, row.value))
-                .collect::<Vec<_>>()
-                .join(", ");
-            Ok(Outcome::Notice(if details.is_empty() {
-                format!("Plugin-Dateioperation abgeschlossen · {}", entry.name)
-            } else {
-                format!("{} · {details}", entry.name)
-            }))
-        });
+        let presentation = operation_presentation(&operation, &archive);
+        self.start_operation_job(
+            "Plugin-Dateioperation läuft …",
+            refresh,
+            presentation,
+            move |job| {
+                let progress = |message| job.progress(format!("{} · {message}", entry.name));
+                let rows = if let Operation::Wfx(operation) = operation {
+                    plugin::operate_interactive(
+                        &entry.path,
+                        operation,
+                        &job.cancel,
+                        progress,
+                        &mut |prompt| job.prompt(&entry.name, prompt),
+                    )
+                } else {
+                    plugin::operate(&entry.path, &archive, operation, &job.cancel, progress)
+                }
+                .map_err(|error| plugin_error(&entry.name, error))?;
+                let details = rows
+                    .iter()
+                    .map(|row| format!("{} · {}", row.name, row.value))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Ok(Outcome::Notice(if details.is_empty() {
+                    format!("Plugin-Dateioperation abgeschlossen · {}", entry.name)
+                } else {
+                    format!("{} · {details}", entry.name)
+                }))
+            },
+        );
         Ok(())
     }
 
@@ -486,7 +492,36 @@ impl App {
         let label = format!("{} · {} Plugin-Aufträge", entry.name, tasks.len());
         let ignore = (self.profile.ignore_enabled && !self.profile.ignore_rules.trim().is_empty())
             .then(|| self.profile.ignore_rules.clone());
-        self.enqueue_virtual_transfer(&label, true, move |job| {
+        let mut presentation = tasks
+            .first()
+            .map(|(_, operation)| operation_presentation(operation, &archive))
+            .unwrap_or_default();
+        if tasks.len() > 1 {
+            if !tasks.iter().all(|(_, operation)| {
+                operation_presentation(operation, &archive).kind == presentation.kind
+            }) {
+                presentation.kind = OperationKind::Task;
+            }
+            presentation.origin =
+                if entry.interface == Interface::Wcx && presentation.kind == OperationKind::Pack {
+                    format!(
+                        "{} · {}",
+                        crate::locale::tr("Ausgewählte Einträge"),
+                        tasks.len()
+                    )
+                } else if entry.interface == Interface::Wcx {
+                    display_path(&archive)
+                } else {
+                    entry.name.clone()
+                };
+            presentation.target =
+                if entry.interface == Interface::Wcx && presentation.kind == OperationKind::Pack {
+                    display_path(&archive)
+                } else {
+                    String::new()
+                };
+        }
+        self.enqueue_virtual_operation(&label, true, presentation, move |job| {
             if entry.interface == Interface::Wfx {
                 let mut operations: Vec<_> = tasks
                     .into_iter()
@@ -542,13 +577,9 @@ impl App {
                     report.skipped += total - index;
                     break;
                 }
-                job.progress(format!(
-                    "{} · {}/{} · {label}",
-                    entry.name,
-                    index + 1,
-                    total
-                ));
-                let progress = |message| job.progress(format!("{label} · {message}"));
+                job.step_progress(format!("{} · {label}", entry.name), index + 1, total);
+                let progress =
+                    |message| job.step_progress(format!("{label} · {message}"), index + 1, total);
                 let result =
                     plugin::operate(&entry.path, &archive, operation, &job.cancel, progress);
                 match result {
@@ -560,6 +591,57 @@ impl App {
             Ok(Outcome::Report(entry.name, report))
         });
     }
+}
+
+fn operation_presentation(operation: &Operation, archive: &Path) -> super::JobDescription {
+    use OperationKind as Kind;
+    let (kind, origin, target) = match operation {
+        Operation::Wcx(WcxOperation::Pack { source }) => {
+            (Kind::Pack, display_path(source), display_path(archive))
+        }
+        Operation::Wcx(WcxOperation::Extract { member, target }) => (
+            Kind::Extract,
+            format!("{}::{member}", display_path(archive)),
+            display_path(target),
+        ),
+        Operation::Wcx(WcxOperation::Delete { .. }) => {
+            (Kind::Delete, display_path(archive), String::new())
+        }
+        Operation::Wfx(operation) => return wfx_presentation(operation),
+        _ => (Kind::Task, display_path(archive), String::new()),
+    };
+    super::JobDescription::new(kind, origin, target)
+}
+
+fn wfx_presentation(operation: &WfxOperation) -> super::JobDescription {
+    use OperationKind as Kind;
+    let (kind, origin, target) = match operation {
+        WfxOperation::Overwrite { operation, .. } => return wfx_presentation(operation),
+        WfxOperation::Download { remote, local } | WfxOperation::DownloadTree { remote, local } => {
+            (Kind::Copy, remote.clone(), display_path(local))
+        }
+        WfxOperation::Upload { local, remote } | WfxOperation::UploadTree { local, remote } => {
+            (Kind::Copy, display_path(local), remote.clone())
+        }
+        WfxOperation::DownloadMove { remote, local, .. }
+        | WfxOperation::RemoveDownloaded { remote, local, .. } => {
+            (Kind::Move, remote.clone(), display_path(local))
+        }
+        WfxOperation::UploadMove { local, remote, .. } => {
+            (Kind::Move, display_path(local), remote.clone())
+        }
+        WfxOperation::Copy { from, to } | WfxOperation::CopyTree { from, to } => {
+            (Kind::Copy, from.clone(), to.clone())
+        }
+        WfxOperation::Rename { from, to } | WfxOperation::MoveTree { from, to } => {
+            (Kind::Move, from.clone(), to.clone())
+        }
+        WfxOperation::Delete { path }
+        | WfxOperation::DeleteTree { path }
+        | WfxOperation::RemoveDir { path } => (Kind::Delete, path.clone(), String::new()),
+        WfxOperation::Mkdir { path } => (Kind::Task, path.clone(), String::new()),
+    };
+    super::JobDescription::new(kind, origin, target)
 }
 
 fn invalid(message: &str) -> io::Error {

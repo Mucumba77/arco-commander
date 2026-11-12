@@ -31,14 +31,23 @@ pub(super) fn ntfs_draft(options: NtfsCopyOptions) -> NtfsDraft {
 
 impl App {
     pub(super) fn apply_settings(&mut self, value: SettingsData, close: bool) {
+        self.ui().set_settings_error_page(-1);
+        self.ui().set_settings_error("".into());
         if let Err(error) = self.commit_settings(value, close) {
             self.ui().set_settings_error(error.to_string().into());
+            let ui = self.ui();
+            ui.set_settings_validation_revision(
+                ui.get_settings_validation_revision().wrapping_add(1),
+            );
         }
     }
 
     fn commit_settings(&mut self, value: SettingsData, close: bool) -> io::Result<()> {
         let mut draft = self.profile_snapshot();
-        apply_configuration(&mut draft, &value)?;
+        apply_configuration(&mut draft, &value).map_err(|invalid| {
+            self.ui().set_settings_error_page(invalid.page);
+            invalid.error
+        })?;
         if let Some(shortcuts) = self.draft_shortcuts() {
             draft.shortcuts.clone_from(shortcuts);
         }
@@ -63,9 +72,7 @@ impl App {
         self.set_hidden(value.show_hidden);
         self.sync_ui_settings();
         self.reload_shortcuts();
-        if language_changed {
-            self.sync_editor(true);
-        }
+        self.sync_editor(language_changed);
         self.publish(0);
         self.publish(1);
         self.ui().set_settings_error("".into());
@@ -74,6 +81,16 @@ impl App {
         } else {
             "Einstellungen gelten für diese Sitzung."
         });
+        self.ui().set_settings_status(
+            locale::tr(if self.save_profile {
+                "Einstellungen angewendet."
+            } else {
+                "Einstellungen gelten für diese Sitzung."
+            })
+            .into(),
+        );
+        let ui = self.ui();
+        ui.set_settings_applied_revision(ui.get_settings_applied_revision().wrapping_add(1));
         if close {
             self.close_settings();
         }
@@ -81,17 +98,34 @@ impl App {
     }
 }
 
-fn apply_configuration(draft: &mut Profile, value: &SettingsData) -> io::Result<()> {
+#[derive(Debug)]
+struct ConfigurationError {
+    page: i32,
+    error: io::Error,
+}
+
+impl ConfigurationError {
+    fn at(page: i32) -> impl FnOnce(io::Error) -> Self {
+        move |error| Self { page, error }
+    }
+}
+
+fn apply_configuration(
+    draft: &mut Profile,
+    value: &SettingsData,
+) -> Result<(), ConfigurationError> {
     let language = locale::LANGUAGES
         .get(value.language as usize)
         .copied()
-        .ok_or_else(|| invalid("Wähle eine verfügbare Oberflächensprache."))?;
+        .ok_or_else(|| invalid("Wähle eine verfügbare Oberflächensprache."))
+        .map_err(ConfigurationError::at(0))?;
     let editor = optional_path(
         &value.editor,
         draft.editor.as_deref(),
         |path| path.is_absolute() && path.is_file(),
         "Editor benötigt einen absoluten Programmpfad",
-    )?;
+    )
+    .map_err(ConfigurationError::at(6))?;
     let everything = optional_path(
         &value.everything,
         draft.everything_cli.as_deref(),
@@ -102,18 +136,21 @@ fn apply_configuration(draft: &mut Profile, value: &SettingsData) -> io::Result<
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
         },
         "Gib den absoluten EXE-Pfad für Everything an.",
-    )?;
+    )
+    .map_err(ConfigurationError::at(6))?;
     let transfer_log = optional_path(
         &value.transfer_log,
         draft.transfer_log.as_deref(),
         |path| path.is_absolute() && path.file_name().is_some(),
         "Gib einen absoluten Pfad zur Protokolldatei ein.",
-    )?;
+    )
+    .map_err(ConfigurationError::at(5))?;
     let transfer_rate_kib = value
         .transfer_rate
         .trim()
         .parse()
-        .map_err(|_| invalid("Gib eine ganze Zahl für KiB/s ein."))?;
+        .map_err(|_| invalid("Gib eine ganze Zahl für KiB/s ein."))
+        .map_err(ConfigurationError::at(5))?;
 
     draft.language = language;
     draft.editor = editor;
@@ -194,6 +231,55 @@ fn invalid(message: &str) -> io::Error {
 mod tests {
     use super::*;
     use arco_core::profile::Language;
+
+    #[test]
+    fn invalid_settings_identify_the_category_without_changing_saved_values() {
+        for (value, page) in [
+            (
+                SettingsData {
+                    language: -1,
+                    ..Default::default()
+                },
+                0,
+            ),
+            (
+                SettingsData {
+                    editor: "relative.exe".into(),
+                    ..Default::default()
+                },
+                6,
+            ),
+            (
+                SettingsData {
+                    everything: "relative.exe".into(),
+                    ..Default::default()
+                },
+                6,
+            ),
+            (
+                SettingsData {
+                    transfer_log: "relative.log".into(),
+                    ..Default::default()
+                },
+                5,
+            ),
+            (
+                SettingsData {
+                    transfer_rate: "-50".into(),
+                    ..Default::default()
+                },
+                5,
+            ),
+        ] {
+            let mut profile = Profile::default();
+            let error = apply_configuration(&mut profile, &value).unwrap_err();
+            assert_eq!(error.page, page);
+            assert_eq!(error.error.kind(), io::ErrorKind::InvalidInput);
+            assert_eq!(profile.language, Language::German);
+            assert!(profile.editor.is_none());
+            assert_eq!(profile.transfer_rate_kib, 0);
+        }
+    }
 
     #[test]
     fn validates_integrated_settings_before_changing_the_draft() {

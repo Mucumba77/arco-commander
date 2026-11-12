@@ -192,6 +192,15 @@ impl App {
             .map(|(name, profile)| (name.to_owned(), profile.clone()));
         let result = match (operation, selected) {
             ("save", selected) => self.save_ftp_profile(selected, data, password),
+            ("save-connect", selected) => {
+                if self.job.is_some() {
+                    Err(invalid("Ein Auftrag läuft bereits."))
+                } else {
+                    let name = data.name.trim().to_owned();
+                    self.save_ftp_profile(selected, data, password)
+                        .and_then(|()| self.connect_deferred_ftp(&name))
+                }
+            }
             ("connect", Some((name, profile))) => self.connect_ftp_profile(name, profile),
             ("delete", Some((name, _))) => {
                 let description =
@@ -322,6 +331,11 @@ impl App {
     }
 
     fn connect_ftp_profile(&mut self, name: String, profile: FtpProfile) -> io::Result<()> {
+        if self.job.is_some() || self.panels[self.active].loading {
+            return Err(invalid(
+                "Warte, bis der laufende Auftrag und das Dateifenster fertig sind.",
+            ));
+        }
         let connection = connection(&profile)?;
         let password = profile
             .credential
@@ -380,6 +394,11 @@ impl App {
         local: Option<PathBuf>,
         profile: Option<String>,
     ) -> io::Result<()> {
+        if self.job.is_some() || self.panels[side].loading {
+            return Err(invalid(
+                "Warte, bis der laufende Auftrag und das Dateifenster fertig sind.",
+            ));
+        }
         let session = Arc::new(connection.authenticate(password)?);
         let deferred = self.panels[side].current().deferred.as_ref();
         let (directory, navigation) = match deferred {
@@ -398,14 +417,36 @@ impl App {
                 }),
             ),
         };
-        self.load_location(
-            side,
-            Location::Ftp(FtpLocation {
-                session,
-                directory,
-                profile,
-            }),
-            navigation,
+        let location = Location::Ftp(FtpLocation {
+            session,
+            directory,
+            profile,
+        });
+        let request = self.panels[side].request;
+        let description = super::JobDescription::new(
+            crate::OperationKind::Ftp,
+            location.display(),
+            String::new(),
+        );
+        self.start_operation_job(
+            "FTP-Verbindung herstellen",
+            false,
+            description,
+            move |job| {
+                job.phase("Anmelden und Verzeichnis laden …");
+                let Location::Ftp(ftp) = &location else {
+                    unreachable!()
+                };
+                let directory = super::ftp_panel::read_panel(ftp, &job.cancel)?;
+                arco_core::files::check_cancel(&job.cancel)?;
+                Ok(Outcome::FtpMounted {
+                    side,
+                    request,
+                    location,
+                    navigation,
+                    directory: Box::new(directory),
+                })
+            },
         );
         Ok(())
     }
@@ -460,8 +501,17 @@ impl App {
         if !path.is_absolute() {
             return Err(invalid("Gib den absoluten Pfad zur wcx_ftp.ini ein."));
         }
-        self.start_job("Lese FTP-Verbindungsprofile …", false, move |_| {
-            Ok(Outcome::ImportedFtp(profile::read_tc_ftp_ini(&path)?))
+        let description = super::JobDescription::new(
+            crate::OperationKind::Ftp,
+            crate::display_path(&path),
+            String::new(),
+        );
+        self.start_operation_job("FTP-Profile lesen", false, description, move |job| {
+            job.phase("FTP-Verbindungsprofile auswerten …");
+            arco_core::files::check_cancel(&job.cancel)?;
+            let profiles = profile::read_tc_ftp_ini(&path)?;
+            arco_core::files::check_cancel(&job.cancel)?;
+            Ok(Outcome::ImportedFtp(profiles))
         });
         Ok(())
     }
@@ -475,6 +525,7 @@ impl App {
             .collect();
         let mut profiles = BTreeMap::new();
         let mut report = String::new();
+        let mut rows = Vec::new();
         for (name, site) in sites {
             let imported = validate_name(&name).and_then(|_| profile_from_tc(site));
             match imported {
@@ -485,10 +536,22 @@ impl App {
                         FtpSecurity::Plain => "Klartext-FTP",
                     };
                     let _ = writeln!(report, "Übernehmen: {name} · {mode} · {}", profile.address);
+                    rows.push(crate::ReviewRow {
+                        primary: name.as_str().into(),
+                        secondary: crate::locale::tr(mode).into(),
+                        detail: profile.address.as_str().into(),
+                        kind: "ftp".into(),
+                    });
                     profiles.insert(name, profile);
                 }
                 Ok(_) => {
                     let _ = writeln!(report, "Überspringen: {name} · Name bereits vorhanden");
+                    rows.push(crate::ReviewRow {
+                        primary: name.as_str().into(),
+                        secondary: crate::locale::tr("Bereits vorhanden").into(),
+                        kind: "skip".into(),
+                        ..Default::default()
+                    });
                 }
                 Err(error) => {
                     let label: String = name
@@ -497,19 +560,27 @@ impl App {
                         .take(120)
                         .collect();
                     let _ = writeln!(report, "Überspringen: {label} · {error}");
+                    rows.push(crate::ReviewRow {
+                        primary: label.into(),
+                        detail: error.to_string().into(),
+                        secondary: crate::locale::tr("Überspringen").into(),
+                        kind: "error".into(),
+                    });
                 }
             }
         }
-        if profiles.is_empty() {
-            self.text("Keine importierbaren FTP-Profile", &report);
-        } else {
-            self.dialog("review", Pending::ApplyFtpImport(profiles), Dialog {
-                title: "FTP-Profilimport prüfen",
-                description: "Passwörter werden beim ersten Verbinden abgefragt. Vorhandene Profile bleiben erhalten.",
-                value: &report,
-                ..Dialog::default()
-            });
-        }
+        self.management_review(
+            crate::OperationKind::Ftp,
+            rows,
+            ["Profil", "Übernahme / Modus"],
+            "Importieren",
+        );
+        self.ui().set_review_can_confirm(!profiles.is_empty());
+        self.dialog("management-review", Pending::ApplyFtpImport(profiles), Dialog {
+            title: "FTP-Profilimport prüfen",
+            description: "Passwörter werden beim ersten Verbinden abgefragt. Vorhandene Profile bleiben erhalten.",
+            value: &report, ..Dialog::default()
+        });
     }
 
     pub(crate) fn apply_ftp_import(

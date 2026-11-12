@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use walkdir::WalkDir;
 
@@ -16,6 +16,37 @@ const CONTENT_LIMIT: u64 = 64 * 1024 * 1024;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn progress_counts_candidates_and_hits_and_can_cancel_before_reading() {
+        let fixture = tempfile::tempdir().unwrap();
+        fs::write(fixture.path().join("found.txt"), b"needle").unwrap();
+        fs::write(fixture.path().join("other.txt"), b"nothing").unwrap();
+        let roots = [fixture.path().to_path_buf()];
+        let query = Options {
+            names: "*.txt".into(),
+            content_mode: 1,
+            content: "needle".into(),
+            ..Default::default()
+        }
+        .compile()
+        .unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut counts = Vec::new();
+        let found = search_with_progress(&roots, false, &query, true, None, &cancel, |update| {
+            assert!(update.path.starts_with(fixture.path()));
+            counts.push((update.examined, update.matched, update.errors));
+        });
+        assert_eq!(counts.first(), Some(&(0, 0, 0)));
+        assert_eq!(counts.last(), Some(&(2, 1, 0)));
+        assert!(counts.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+        assert_eq!(found.directory.entries.len(), 1);
+        let aborted = search_with_progress(&roots, false, &query, true, None, &cancel, |_| {
+            cancel.store(true, Ordering::Relaxed);
+        });
+        assert!(aborted.cancelled);
+        assert!(aborted.directory.entries.is_empty());
+    }
 
     #[test]
     fn finds_encoded_text_across_roots_with_masks_and_depth() {
@@ -282,6 +313,13 @@ pub struct Found {
     pub cancelled: bool,
 }
 
+pub struct Progress<'a> {
+    pub path: &'a Path,
+    pub examined: usize,
+    pub matched: usize,
+    pub errors: usize,
+}
+
 pub fn search(
     roots: &[PathBuf],
     include_roots: bool,
@@ -289,6 +327,26 @@ pub fn search(
     show_hidden: bool,
     ignore: Option<&IgnoreList>,
     cancel: &AtomicBool,
+) -> Found {
+    search_with_progress(
+        roots,
+        include_roots,
+        query,
+        show_hidden,
+        ignore,
+        cancel,
+        |_| {},
+    )
+}
+
+pub fn search_with_progress(
+    roots: &[PathBuf],
+    include_roots: bool,
+    query: &Query,
+    show_hidden: bool,
+    ignore: Option<&IgnoreList>,
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(Progress<'_>),
 ) -> Found {
     let mut found = Found {
         directory: Directory {
@@ -298,6 +356,7 @@ pub fn search(
         cancelled: false,
     };
     let mut seen = BTreeSet::new();
+    let mut examined = 0;
     for root in roots {
         let mut walk = WalkDir::new(root)
             .follow_links(false)
@@ -315,6 +374,22 @@ pub fn search(
                         .metadata()
                         .is_ok_and(|metadata| !files::is_link(&metadata)))
         }) {
+            if cancel.load(Ordering::Relaxed) {
+                found.cancelled = true;
+                return found;
+            }
+            let current = item
+                .as_ref()
+                .ok()
+                .map(|entry| entry.path())
+                .unwrap_or(root)
+                .to_path_buf();
+            progress(Progress {
+                path: &current,
+                examined,
+                matched: found.directory.entries.len(),
+                errors: found.directory.errors.len(),
+            });
             if cancel.load(Ordering::Relaxed) {
                 found.cancelled = true;
                 return found;
@@ -345,6 +420,13 @@ pub fn search(
                 }
                 Err(error) => found.directory.errors.push(error.to_string()),
             }
+            examined += 1;
+            progress(Progress {
+                path: &current,
+                examined,
+                matched: found.directory.entries.len(),
+                errors: found.directory.errors.len(),
+            });
         }
     }
     found

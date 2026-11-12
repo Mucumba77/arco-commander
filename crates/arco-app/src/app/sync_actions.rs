@@ -179,21 +179,31 @@ impl App {
             .each_ref()
             .map(|panel| panel.current().path.clone());
         let requests = self.panels.each_ref().map(|panel| panel.request);
-        self.start_job("Vergleiche die Dateifenster …", false, move |job| {
-            let marks = sync::compare_panels(
-                roots.each_ref().map(PathBuf::as_path),
-                include_folders,
-                show_hidden,
-                rule,
-                &job.cancel,
-            )?;
-            Ok(Outcome::ComparedPanels {
-                roots,
-                requests,
-                marks,
-                hide_equal,
-            })
-        });
+        let description = super::JobDescription::new(
+            crate::OperationKind::Sync,
+            display_path(&roots[0]),
+            display_path(&roots[1]),
+        );
+        self.start_operation_job(
+            "Vergleiche die Dateifenster …",
+            false,
+            description,
+            move |job| {
+                let marks = sync::compare_panels(
+                    roots.each_ref().map(PathBuf::as_path),
+                    include_folders,
+                    show_hidden,
+                    rule,
+                    &job.cancel,
+                )?;
+                Ok(Outcome::ComparedPanels {
+                    roots,
+                    requests,
+                    marks,
+                    hide_equal,
+                })
+            },
+        );
     }
 
     pub(super) fn show_panel_comparison(
@@ -681,102 +691,130 @@ impl App {
         });
         let ignore = self.ignore_list();
         self.close_dialog();
-        self.start_job("Vergleiche Verzeichnisse …", false, move |job| {
-            let SyncSource::Disk {
-                mut roots,
-                archives,
-            } = setup.source
-            else {
-                let SyncSource::Ftp {
-                    local,
-                    endpoint,
-                    profile,
+        let description = super::JobDescription::new(
+            crate::OperationKind::Sync,
+            setup.labels[0].clone(),
+            setup.labels[1].clone(),
+        );
+        self.start_operation_job(
+            "Verzeichnisse vergleichen",
+            false,
+            description,
+            move |job| {
+                job.phase("Verzeichnisse erfassen und vergleichen …");
+                let feed = job.progress_feed();
+                let SyncSource::Disk {
+                    mut roots,
+                    archives,
                 } = setup.source
                 else {
-                    unreachable!()
+                    let SyncSource::Ftp {
+                        local,
+                        endpoint,
+                        profile,
+                    } = setup.source
+                    else {
+                        unreachable!()
+                    };
+                    let mut last = Instant::now() - Duration::from_secs(1);
+                    let remote_ignored =
+                        ftp_ignores(ignore.as_deref(), &endpoint.1, profile.as_deref());
+                    let ignored = |path: &Path, directory| {
+                        remote_ignored(path, directory)
+                            || ignore
+                                .as_ref()
+                                .is_some_and(|ignore| ignore.local(&local.join(path), directory))
+                    };
+                    let mut plan = FtpPlan::compare(
+                        &local,
+                        endpoint.clone(),
+                        &options,
+                        &setup.selected,
+                        &ignored,
+                        &job.cancel,
+                        |path| {
+                            if last.elapsed() >= Duration::from_millis(150) {
+                                last = Instant::now();
+                                if let Ok(mut slot) = feed.lock() {
+                                    *slot = Some(super::job_progress::Sample {
+                                        source: display_path(path),
+                                        phase: "FTP-Einträge vergleichen …".into(),
+                                        ..Default::default()
+                                    });
+                                }
+                            }
+                        },
+                    )?;
+                    let rows = std::mem::take(&mut plan.rows);
+                    return Ok(Outcome::Sync(Box::new(SyncReview {
+                        plan: ReviewPlan::Ftp(plan),
+                        rows,
+                        labels: setup.labels,
+                        visible: Vec::new(),
+                        archives: [None, None],
+                        copy_only: false,
+                    })));
                 };
-                let mut last = Instant::now() - Duration::from_secs(1);
-                let remote_ignored =
-                    ftp_ignores(ignore.as_deref(), &endpoint.1, profile.as_deref());
-                let ignored = |path: &Path, directory| {
-                    remote_ignored(path, directory)
-                        || ignore
-                            .as_ref()
-                            .is_some_and(|ignore| ignore.local(&local.join(path), directory))
-                };
-                let mut plan = FtpPlan::compare(
-                    &local,
-                    endpoint.clone(),
+                let mut stages = [None, None];
+                for (side, (source, password)) in archives.into_iter().zip(passwords).enumerate() {
+                    if let Some(source) = source {
+                        job.phase("Archivdaten für den Vergleich bereitstellen …");
+                        let staged = stage_archive(
+                            source,
+                            &options,
+                            &setup.selected,
+                            password.as_ref().map(|password| password.as_str()),
+                            &job.cancel,
+                        )?;
+                        roots[side] = staged.storage.path().to_path_buf();
+                        stages[side] = Some(staged);
+                    }
+                }
+                job.phase("Verzeichnisse erfassen und vergleichen …");
+                let mut plan = sync::compare_ignoring_with_progress(
+                    roots.each_ref().map(PathBuf::as_path),
                     &options,
                     &setup.selected,
-                    &ignored,
+                    if has_archive { None } else { ignore.as_deref() },
                     &job.cancel,
-                    |path| {
-                        if last.elapsed() >= Duration::from_millis(150) {
-                            last = Instant::now();
-                            job.progress(format!("Vergleiche FTP · {}", display_path(path)));
+                    |path, examined| {
+                        if let Ok(mut slot) = feed.lock() {
+                            *slot = Some(super::job_progress::Sample {
+                                source: display_path(path),
+                                processed_items: Some(examined),
+                                phase: "Verzeichnisse erfassen und vergleichen …".into(),
+                                ..Default::default()
+                            });
                         }
                     },
                 )?;
-                let rows = std::mem::take(&mut plan.rows);
-                return Ok(Outcome::Sync(Box::new(SyncReview {
-                    plan: ReviewPlan::Ftp(plan),
-                    rows,
-                    labels: setup.labels,
-                    visible: Vec::new(),
-                    archives: [None, None],
-                    copy_only: false,
-                })));
-            };
-            let mut stages = [None, None];
-            for (side, (source, password)) in archives.into_iter().zip(passwords).enumerate() {
-                if let Some(source) = source {
-                    job.progress("Entpacke Archivdaten für den Vergleich …".into());
-                    let staged = stage_archive(
-                        source,
-                        &options,
-                        &setup.selected,
-                        password.as_ref().map(|password| password.as_str()),
-                        &job.cancel,
-                    )?;
-                    roots[side] = staged.storage.path().to_path_buf();
-                    stages[side] = Some(staged);
-                }
-            }
-            job.progress("Vergleiche Verzeichnisse …".into());
-            let mut plan = sync::compare_ignoring(
-                roots.each_ref().map(PathBuf::as_path),
-                &options,
-                &setup.selected,
-                if has_archive { None } else { ignore.as_deref() },
-                &job.cancel,
-            )?;
-            let labels = match &stages {
-                [None, None] => plan.roots().each_ref().map(|root| display_path(root)),
-                [Some(_), Some(_)] => {
-                    plan.disable_actions();
-                    setup.labels
-                }
-                _ => {
-                    for (side, archive) in stages.iter().enumerate() {
-                        if let Some(archive) = archive {
-                            for file in archive.source.catalog.storage_paths() {
-                                plan.protect_path(1 - side, file)?;
+                let labels = match &stages {
+                    [None, None] => plan.roots().each_ref().map(|root| display_path(root)),
+                    [Some(_), Some(_)] => {
+                        plan.disable_actions();
+                        setup.labels
+                    }
+                    _ => {
+                        for (side, archive) in stages.iter().enumerate() {
+                            if let Some(archive) = archive {
+                                for file in archive.source.catalog.storage_paths() {
+                                    plan.protect_path(1 - side, file)?;
+                                }
                             }
                         }
+                        setup.labels
                     }
-                    setup.labels
-                }
-            };
-            Ok(Outcome::Sync(Box::new(SyncReview {
-                rows: std::mem::take(&mut plan.rows),
-                plan: ReviewPlan::Disk(plan),
-                labels,
-                visible: Vec::new(),
-                archives: stages,
-                copy_only: false,
-            })))
-        });
+                };
+                Ok(Outcome::Sync(Box::new(SyncReview {
+                    rows: std::mem::take(&mut plan.rows),
+                    plan: ReviewPlan::Disk(plan),
+                    labels,
+                    visible: Vec::new(),
+                    archives: stages,
+                    copy_only: false,
+                })))
+            },
+        );
     }
 
     pub(super) fn show_sync(&mut self, review: Box<SyncReview>) {
@@ -875,15 +913,28 @@ impl App {
         });
         self.close_dialog();
         let copy_only = review.copy_only;
+        let total = review.rows.len();
+        let description = super::JobDescription::new(
+            crate::OperationKind::Sync,
+            review.labels[0].clone(),
+            review.labels[1].clone(),
+        );
         let work = move |job: super::JobContext| {
             for archive in review.archives.iter().flatten() {
                 check_archive(&archive.source)?;
             }
             let mut last = Instant::now() - Duration::from_secs(1);
+            let mut started = 0;
             let progress = |path: &Path| {
-                if last.elapsed() >= Duration::from_millis(150) {
+                started += 1;
+                if last.elapsed() >= Duration::from_millis(100) || started == total {
                     last = Instant::now();
-                    job.progress(format!("Synchronisiere {}", display_path(path)));
+                    job.entry_progress(
+                        display_path(path),
+                        started.saturating_sub(1),
+                        total,
+                        "Ausgewählte Aktionen ausführen …",
+                    );
                 }
             };
             let report = match (review.plan, &review.archives) {
@@ -900,6 +951,14 @@ impl App {
                 }
                 (plan, _) => plan.apply(review.rows, &job, review.copy_only, progress)?,
             };
+            if !report.cancelled {
+                job.entry_progress(
+                    String::new(),
+                    total,
+                    total,
+                    "Synchronisierung abgeschlossen",
+                );
+            }
             Ok(Outcome::Report(
                 if review.copy_only {
                     "FTP-Kopie".into()
@@ -910,9 +969,9 @@ impl App {
             ))
         };
         if copy_only {
-            self.enqueue_virtual_transfer("FTP-Kopie", true, work);
+            self.enqueue_virtual_operation("FTP-Kopie", true, description, work);
         } else {
-            self.start_job("Synchronisiere …", true, work);
+            self.start_operation_job("Synchronisieren", true, description, work);
         }
     }
 }

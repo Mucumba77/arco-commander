@@ -78,9 +78,15 @@ impl App {
         let ignore = self.ignore_list();
         let side = self.active;
         let request = self.panels[side].request;
-        self.start_job(
+        let description = crate::app::JobDescription::new(
+            crate::OperationKind::Search,
+            crate::display_path(&path),
+            String::new(),
+        );
+        self.start_operation_job(
             "Suche Duplikate nach Plugin-Feldern …",
             false,
+            description,
             move |job| {
                 let groups = find(&path, &criteria, mode, ignore.as_deref(), &job)?;
                 duplicate_result(side, request, path, groups, &job.cancel)

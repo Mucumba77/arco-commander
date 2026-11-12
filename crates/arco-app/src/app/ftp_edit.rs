@@ -23,11 +23,22 @@ pub(crate) struct Draft {
 }
 
 impl Draft {
+    #[cfg(test)]
     fn download(
         location: FtpLocation,
         entry: Entry,
         recovery: &Path,
         cancel: &AtomicBool,
+    ) -> io::Result<Self> {
+        Self::download_with_progress(location, entry, recovery, cancel, |_| {})
+    }
+
+    fn download_with_progress(
+        location: FtpLocation,
+        entry: Entry,
+        recovery: &Path,
+        cancel: &AtomicBool,
+        progress: impl FnMut(arco_windows::ftp::DownloadProgress),
     ) -> io::Result<Self> {
         if !matches!(entry.size, Some(size) if size <= MAX_EDIT_SIZE)
             || entry.directory != Some(false)
@@ -43,9 +54,13 @@ impl Draft {
             .tempdir_in(recovery)?;
         let path = directory.path().join(name);
         let file = File::create_new(&path)?;
-        location
-            .session
-            .fetch_sync(&location.directory, &entry, &file, cancel)?;
+        location.session.fetch_sync_with_progress(
+            &location.directory,
+            &entry,
+            &file,
+            cancel,
+            progress,
+        )?;
         file.sync_all()?;
         let baseline = checksum(&path, cancel)?;
         drop(file);
@@ -152,6 +167,13 @@ fn recovery_directory() -> PathBuf {
 }
 
 impl App {
+    pub(super) fn refresh_ftp_edit_status(&self) {
+        if let Some(Pending::FtpEditAction(path)) = &self.pending {
+            self.ui()
+                .set_ftp_edit_pending(self.ftp_upload_pending(path));
+        }
+    }
+
     pub(crate) fn edit_ftp_file(&mut self) {
         if self.panels[self.active].loading || self.job.is_some() {
             self.status("Warte, bis das FTP-Verzeichnis und der laufende Auftrag fertig sind.");
@@ -180,8 +202,18 @@ impl App {
             return;
         }
         let location = ftp.location.clone();
-        self.start_job("Lade FTP-Arbeitskopie …", false, move |job| {
-            let draft = Draft::download(location, entry, &recovery_directory(), &job.cancel)?;
+        let source = format!("{}{}", location.directory, entry.name);
+        let description =
+            super::JobDescription::new(crate::OperationKind::Ftp, source.clone(), String::new());
+        self.start_operation_job("FTP-Arbeitskopie laden", false, description, move |job| {
+            let size = entry.size;
+            let draft = Draft::download_with_progress(
+                location,
+                entry,
+                &recovery_directory(),
+                &job.cancel,
+                job.ftp_download_progress(source, size),
+            )?;
             Ok(Outcome::FtpEditReady(Box::new(draft)))
         });
     }
@@ -249,23 +281,16 @@ impl App {
             return;
         };
         let title = draft.entry.name.clone();
-        let description = format!(
-            "Speichere im Editor und wähle anschließend „Änderungen hochladen“.\n{}\nArbeitskopie: {}",
-            draft.location.directory,
-            display_path(path),
-        );
+        let remote = format!("{}{}", draft.location.directory, draft.entry.name);
+        self.ui()
+            .set_ftp_edit_pending(self.ftp_upload_pending(path));
         self.dialog(
-            "confirm",
+            "ftp-edit",
             Pending::FtpEditAction(path.to_owned()),
             Dialog {
                 title: &title,
-                description: &description,
-                options: &[
-                    "Änderungen hochladen",
-                    "Im Editor öffnen",
-                    "Bearbeitung beenden und Kopie behalten",
-                    "Lokale Arbeitskopie löschen …",
-                ],
+                value: &display_path(path),
+                second: &remote,
                 ..Dialog::default()
             },
         );
@@ -285,6 +310,7 @@ impl App {
                 let mut draft = draft.clone();
                 let label = format!("FTP-Änderungen hochladen · {}", draft.entry.name);
                 self.enqueue_ftp_upload(label, path.to_owned(), move |job| {
+                    job.phase("FTP-Änderungen prüfen und zurückübertragen …");
                     match draft.upload(&job.cancel) {
                         Ok(true) => Ok(Outcome::FtpEditUploaded(Box::new(draft), None)),
                         Ok(false) => Ok(Outcome::Report(

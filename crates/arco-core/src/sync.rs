@@ -304,7 +304,14 @@ impl LocalRoot {
         ignored: impl Fn(&Path, bool) -> bool,
         cancel: &AtomicBool,
     ) -> io::Result<Tree> {
-        scan(&self.path, options.recursive, scope, ignored, cancel)
+        scan(
+            &self.path,
+            options.recursive,
+            scope,
+            ignored,
+            cancel,
+            |_| {},
+        )
     }
 }
 
@@ -334,6 +341,18 @@ pub fn compare_ignoring(
     ignore: Option<&crate::ignore::IgnoreList>,
     cancel: &AtomicBool,
 ) -> io::Result<Plan> {
+    compare_ignoring_with_progress(roots, options, selected, ignore, cancel, |_, _| {})
+}
+
+pub fn compare_ignoring_with_progress(
+    roots: [&Path; 2],
+    options: &Options,
+    selected: &[PathBuf],
+    ignore: Option<&crate::ignore::IgnoreList>,
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(&Path, usize),
+) -> io::Result<Plan> {
+    let mut examined = 0;
     let roots = [fs::canonicalize(roots[0])?, fs::canonicalize(roots[1])?];
     let [left_key, right_key] = roots.each_ref().map(|root| key(root));
     if left_key.starts_with(&right_key) || right_key.starts_with(&left_key) {
@@ -346,7 +365,7 @@ pub fn compare_ignoring(
     let scope = Scope::new(options.selected_only, selected)?;
     // Exclude a matched relative path on both sides. Otherwise a rule for an
     // absolute path could make an existing file look like a mirror deletion.
-    let read = |side: usize| {
+    let mut read = |side: usize| {
         scan(
             &roots[side],
             options.recursive,
@@ -361,12 +380,18 @@ pub fn compare_ignoring(
                 })
             },
             cancel,
+            |path| {
+                examined += 1;
+                progress(path, examined);
+            },
         )
     };
     let [left, right] = [read(0)?, read(1)?];
     let rows = compare_trees([&left, &right], options, &scope, cancel, |a, b| {
         let left = roots[0].join(&a.path);
         let right = roots[1].join(&b.path);
+        progress(&left, examined);
+        files::check_cancel(cancel)?;
         let equal = tools::checksum(&left, Hash::Blake3, cancel)?
             == tools::checksum(&right, Hash::Blake3, cancel)?;
         files::ensure_unchanged(&left, a.meta.as_ref().expect("local metadata"))?;
@@ -524,6 +549,7 @@ fn scan(
     scope: &Scope,
     ignored: impl Fn(&Path, bool) -> bool,
     cancel: &AtomicBool,
+    mut progress: impl FnMut(&Path),
 ) -> io::Result<Tree> {
     let mut entries = Tree::default();
     let walker = WalkDir::new(root)
@@ -542,6 +568,8 @@ fn scan(
     }) {
         files::check_cancel(cancel)?;
         let item = item?;
+        progress(item.path());
+        files::check_cancel(cancel)?;
         let path = item
             .path()
             .strip_prefix(root)
@@ -895,6 +923,58 @@ fn apply_row(
 mod tests {
     use super::*;
     use filetime::{FileTime, set_file_mtime};
+
+    #[test]
+    fn comparison_progress_preserves_the_plan_and_observes_cancellation() {
+        use std::sync::atomic::Ordering;
+        let (_temp, roots, cancel) = setup();
+        file(&roots[0], "same.txt", b"left", 1000);
+        file(&roots[1], "same.txt", b"left", 1000);
+        file(&roots[0], "only-left.txt", b"copy", 1000);
+        let options = Options {
+            by_content: true,
+            ..Default::default()
+        };
+        let mut counts = Vec::new();
+        let plan = compare_ignoring_with_progress(
+            roots.each_ref().map(PathBuf::as_path),
+            &options,
+            &[],
+            None,
+            &cancel,
+            |path, examined| {
+                assert!(
+                    roots
+                        .iter()
+                        .any(|root| path.starts_with(fs::canonicalize(root).unwrap()))
+                );
+                counts.push(examined);
+            },
+        )
+        .unwrap();
+        assert_eq!(counts.last(), Some(&3));
+        assert!(counts.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert_eq!(plan.rows.len(), 2);
+        assert_eq!(
+            plan.rows
+                .iter()
+                .filter(|row| row.comparison == Comparison::Equal)
+                .count(),
+            1
+        );
+        let error = compare_ignoring_with_progress(
+            roots.each_ref().map(PathBuf::as_path),
+            &options,
+            &[],
+            None,
+            &cancel,
+            |_, _| cancel.store(true, Ordering::Relaxed),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(!roots[1].join("only-left.txt").exists());
+    }
 
     fn setup() -> (tempfile::TempDir, [PathBuf; 2], AtomicBool) {
         let temp = tempfile::tempdir().unwrap();

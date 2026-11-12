@@ -1,5 +1,5 @@
-import { Button, ComboBox, LineEdit, ScrollView, TextEdit } from "std-widgets.slint";
-import { Colors, ActionButton, NavButton } from "dialog-theme.slint";
+import { ComboBox, LineEdit, ListView, ScrollView, TextEdit } from "std-widgets.slint";
+import { Colors, Button, ActionButton, NavButton } from "dialog-theme.slint";
 
 export component DialogHeading {
     in property <image> icon;
@@ -45,16 +45,337 @@ component Note inherits Text {
     wrap: word-wrap;
 }
 
+export component FormSection inherits Rectangle {
+    in property <string> title;
+    in property <string> description;
+    background: Colors.background;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: Colors.edge;
+    VerticalLayout {
+        padding: 14px;
+        spacing: 9px;
+        alignment: start;
+        FieldLabel { text: root.title; font-size: 14px; overflow: elide; Tooltip { text: @markdown("\{root.title}"); } }
+        if root.description != "" : Note { text: root.description; }
+        @children
+    }
+}
+
+export enum OperationKind { task, copy, move, pack, extract, delete, search, rename, sync, ftp, plugin }
+
+export struct JobMetrics {
+    source: string,
+    target: string,
+    bytes: string,
+    speed: string,
+    elapsed: string,
+    remaining: string,
+    finish: string,
+    items: string,
+    processed: string,
+    pending: string,
+    matched: string,
+    errors: string,
+    recovering: bool,
+    phase: string,
+    file-fraction: float,
+}
+
+export component ProgressRail inherits Rectangle {
+    in property <float> progress;
+    in property <bool> indeterminate;
+    in property <bool> paused;
+    property <float> position;
+    height: 10px;
+    border-radius: self.height / 2;
+    background: Colors.edge;
+    clip: true;
+    Timer {
+        interval: 40ms;
+        running: root.indeterminate && !root.paused;
+        triggered => { root.position = Math.mod(root.position + 0.02, 1.0); }
+    }
+    Rectangle {
+        x: root.indeterminate ? root.position * (parent.width - self.width) : 0px;
+        width: root.indeterminate ? parent.width * 0.28 : parent.width * clamp(root.progress, 0, 1);
+        height: 100%;
+        border-radius: root.border-radius;
+        background: root.paused ? Colors.muted : @linear-gradient(90deg, Colors.accent, #64adf5);
+        animate width { duration: 180ms; easing: ease-out; }
+    }
+}
+
+component MetricTile inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    background: Colors.background;
+    border-radius: 9px;
+    min-height: 73px;
+    VerticalLayout {
+        padding: 12px;
+        spacing: 5px;
+        Text { text: root.label; color: Colors.muted; font-size: 11px; }
+        Text { text: root.value == "" ? "—" : root.value; color: Colors.text; font-size: 17px; font-weight: 600; overflow: elide; }
+    }
+}
+
+export component ProgressMeter inherits VerticalLayout {
+    in property <string> label: @tr("Gesamtfortschritt");
+    in property <float> progress: -1;
+    in property <bool> paused;
+    spacing: 10px;
+    HorizontalLayout {
+        spacing: 16px;
+        Text { text: root.label; color: Colors.muted; vertical-alignment: center; horizontal-stretch: 0; }
+        Rectangle { horizontal-stretch: 1; }
+        Text { text: root.progress < 0 ? "…" : "\{floor(clamp(root.progress, 0, 1) * 100)} %"; min-width: 110px; horizontal-stretch: 0; horizontal-alignment: right; color: Colors.text; font-size: 30px; font-weight: 600; }
+    }
+    ProgressRail { progress: root.progress; indeterminate: root.progress < 0; paused: root.paused; }
+}
+
+export component ProgressMetrics inherits HorizontalLayout {
+    in property <OperationKind> kind;
+    in property <JobMetrics> data;
+    property <bool> counted: root.kind == OperationKind.delete || root.kind == OperationKind.rename || root.kind == OperationKind.sync || ((root.kind == OperationKind.ftp || root.kind == OperationKind.plugin) && root.data.items != "" && root.data.bytes == "");
+    property <bool> activity: (root.kind == OperationKind.ftp || root.kind == OperationKind.plugin) && root.data.items == "" && root.data.bytes == "";
+    spacing: 9px;
+    if !root.activity : MetricTile { label: root.kind == OperationKind.search ? @tr("Geprüft") : root.kind == OperationKind.rename ? @tr("Schritte erledigt") : root.kind == OperationKind.sync ? (root.data.items == "" ? @tr("Erfasste Einträge") : @tr("Aktionen erledigt")) : root.counted ? @tr("Bearbeitet") : @tr("Durchsatz"); value: root.kind == OperationKind.search || root.counted ? root.data.processed : root.data.speed; }
+    if !root.activity : MetricTile { label: root.kind == OperationKind.search ? @tr("Treffer") : root.kind == OperationKind.rename ? @tr("Schritte offen") : root.kind == OperationKind.sync ? @tr("Aktionen offen") : root.counted ? @tr("Ausstehend") : @tr("Restzeit (geschätzt)"); value: root.kind == OperationKind.search ? root.data.matched : root.counted ? root.data.pending : root.data.remaining; }
+    MetricTile { label: @tr("Vergangen"); value: root.data.elapsed; }
+}
+
+export struct ReviewRow { primary: string, secondary: string, detail: string, kind: string }
+
+export component ReviewTable inherits Rectangle {
+    in property <[ReviewRow]> rows;
+    in property <string> primary-label;
+    in property <string> secondary-label;
+    property <int> selection;
+    property <length> secondary-width: 230px;
+    callback copy(string);
+    forward-focus: keys;
+    min-height: 140px;
+    border-radius: 9px;
+    border-color: keys.has-focus ? Colors.accent : Colors.edge;
+    border-width: 1px;
+    background: Colors.background;
+    public function copy-current() {
+        if (root.selection >= 0 && root.selection < root.rows.length) {
+            let row = root.rows[root.selection];
+            root.copy(row.primary + " · " + row.secondary + "\n" + row.detail);
+        }
+    }
+    function select(index: int) {
+        root.selection = clamp(index, 0, max(0, root.rows.length - 1));
+        if (root.selection * 58px < -list.viewport-y) { list.viewport-y = -root.selection * 58px; }
+        else if ((root.selection + 1) * 58px > -list.viewport-y + list.visible-height) { list.viewport-y = list.visible-height - (root.selection + 1) * 58px; }
+    }
+    changed rows => { root.selection = 0; list.viewport-y = 0px; }
+    VerticalLayout {
+        padding: 1px;
+        spacing: 1px;
+        Rectangle {
+            height: 32px;
+            background: Colors.surface;
+            HorizontalLayout {
+                padding-left: 34px; padding-right: 12px; spacing: 14px;
+                FieldLabel { text: root.primary-label; horizontal-stretch: 1; vertical-alignment: center; }
+                FieldLabel { text: root.secondary-label; width: root.secondary-width; vertical-alignment: center; }
+            }
+        }
+        list := ListView {
+            vertical-stretch: 1;
+            accessible-label: root.primary-label + " · " + root.secondary-label;
+            for row[i] in root.rows : Rectangle {
+                height: 58px;
+                background: i == root.selection ? Colors.cursor : Math.mod(i, 2) == 0 ? Colors.background : Colors.panel;
+                accessible-role: list-item;
+                accessible-label: row.primary + " · " + row.secondary + " · " + row.detail;
+                HorizontalLayout {
+                    padding: 10px; spacing: 9px;
+                    Image { source: row.kind == "error" ? @image-url("icons/close.svg") : row.kind == "folder" ? @image-url("icons/folder.svg") : row.kind == "rename" ? @image-url("icons/edit.svg") : row.kind == "plugin" ? @image-url("icons/settings.svg") : row.kind == "ftp" ? @image-url("icons/network.svg") : @image-url("icons/file.svg"); colorize: row.kind == "error" ? Colors.archive : Colors.accent; width: 16px; height: 16px; }
+                    VerticalLayout {
+                        horizontal-stretch: 1; spacing: 3px;
+                        HorizontalLayout {
+                            spacing: 14px;
+                            Text { text: row.primary; color: row.kind == "error" ? Colors.archive : Colors.text; overflow: elide; horizontal-stretch: 1; Tooltip { text: @markdown("\{row.primary}"); } }
+                            Text { text: row.secondary; color: Colors.text; overflow: elide; width: root.secondary-width; Tooltip { text: @markdown("\{row.secondary}"); } }
+                        }
+                        Text { text: row.detail; color: Colors.muted; font-size: 11px; overflow: elide; Tooltip { text: @markdown("\{row.detail}"); } }
+                    }
+                }
+                TouchArea { clicked => { root.select(i); keys.focus(); } }
+            }
+        }
+    }
+    keys := FocusScope {
+        width: 0px; height: 0px;
+        key-pressed(event) => {
+            if (event.text == Key.UpArrow) { root.select(root.selection - 1); return accept; }
+            if (event.text == Key.DownArrow) { root.select(root.selection + 1); return accept; }
+            if (event.text == Key.Home) { root.select(0); return accept; }
+            if (event.text == Key.End) { root.select(root.rows.length - 1); return accept; }
+            if (event.text == Key.PageUp) { root.select(root.selection - max(1, floor(list.visible-height / 58px))); return accept; }
+            if (event.text == Key.PageDown) { root.select(root.selection + max(1, floor(list.visible-height / 58px))); return accept; }
+            if (event.modifiers.control && (event.text == "c" || event.text == "C")) { root.copy-current(); return accept; }
+            return reject;
+        }
+    }
+}
+
+export component ReviewCard inherits Rectangle {
+    in property <int> focus-cycle;
+    changed focus-cycle => { if (root.focus-cycle > 0 && root.rows.length > 0) { table.focus(); } else if (confirm-button.enabled) { confirm-button.focus(); } else { close-button.focus(); } }
+    in property <OperationKind> kind;
+    in property <string> title;
+    in property <string> description;
+    in property <[ReviewRow]> rows;
+    in property <string> primary-label;
+    in property <string> secondary-label;
+    in property <[string]> options;
+    in property <string> confirm-label;
+    in property <bool> can-confirm: true;
+    in property <bool> can-edit;
+    property <int> choice;
+    changed options => { root.choice = 0; }
+    callback confirm(int);
+    callback edit();
+    callback close();
+    callback copy-all();
+    callback copy-row(string);
+    background: Colors.panel;
+    border-radius: 16px;
+    border-color: Colors.edge;
+    border-width: 1px;
+    VerticalLayout {
+        padding: 20px; spacing: 12px;
+        DialogHeading { icon: root.kind == OperationKind.search ? @image-url("icons/search.svg") : root.kind == OperationKind.ftp ? @image-url("icons/network.svg") : root.kind == OperationKind.plugin ? @image-url("icons/settings.svg") : @image-url("icons/edit.svg"); title: root.title; subtitle: root.description; }
+        table := ReviewTable { rows: root.rows; primary-label: root.primary-label; secondary-label: root.secondary-label; vertical-stretch: 1; copy(text) => { root.copy-row(text); } }
+        if root.rows.length == 0 : Note { text: @tr("Keine Einträge vorhanden."); }
+        if root.options.length > 0 : ComboBox { model: root.options; current-index <=> root.choice; accessible-label: @tr("Ergebnisaktion"); }
+        HorizontalLayout {
+            spacing: 7px;
+            Button { text: @tr("Zeile kopieren"); enabled: root.rows.length > 0; clicked => { table.copy-current(); } }
+            Button { text: @tr("Text kopieren"); clicked => { root.copy-all(); } }
+            Rectangle { horizontal-stretch: 1; }
+            if root.can-edit : Button { text: @tr("Bearbeiten"); clicked => { root.edit(); } }
+            close-button := Button { text: @tr("Schließen"); clicked => { root.close(); } }
+            confirm-button := Button { text: root.confirm-label; primary: true; enabled: root.can-confirm; clicked => { root.confirm(root.choice); } }
+        }
+    }
+    init => { if (root.rows.length > 0) { table.focus(); } else { close-button.focus(); } }
+}
+
+export component TransferProgressCard inherits Rectangle {
+    in property <OperationKind> kind;
+    in property <string> origin;
+    in property <string> target;
+    in property <string> title;
+    in property <string> detail;
+    in property <JobMetrics> data;
+    in property <float> progress: -1;
+    in property <bool> cancelling;
+    in property <bool> pausable;
+    in property <bool> paused;
+    property <bool> deleting: root.kind == OperationKind.delete;
+    property <bool> counted: root.deleting || root.kind == OperationKind.rename || root.kind == OperationKind.sync || ((root.kind == OperationKind.ftp || root.kind == OperationKind.plugin) && root.data.items != "" && root.data.bytes == "");
+    callback pause();
+    callback cancel();
+    callback hide-progress();
+    background: Colors.panel;
+    border-radius: 18px;
+    border-width: 1px;
+    border-color: Colors.edge;
+    FocusScope {
+        width: 0px; height: 0px;
+        changed has-focus => { if (self.has-focus) { background-button.focus(); } }
+    }
+    VerticalLayout {
+        padding: 24px;
+        spacing: 17px;
+        DialogHeading {
+            icon: root.deleting ? @image-url("icons/trash.svg")
+                : root.kind == OperationKind.ftp ? @image-url("icons/network.svg")
+                : root.kind == OperationKind.plugin ? @image-url("icons/settings.svg")
+                : root.kind == OperationKind.search ? @image-url("icons/search.svg")
+                : root.kind == OperationKind.rename ? @image-url("icons/edit.svg")
+                : root.kind == OperationKind.sync ? @image-url("icons/sync.svg")
+                : root.kind == OperationKind.move ? @image-url("icons/move.svg")
+                : root.kind == OperationKind.pack ? @image-url("icons/archive.svg")
+                : root.kind == OperationKind.extract ? @image-url("icons/archive-extract.svg")
+                : root.kind == OperationKind.copy ? @image-url("icons/copy.svg") : @image-url("icons/file.svg");
+            title: root.title;
+            subtitle: root.cancelling && !root.data.recovering ? @tr("Abbruch angefordert …") : root.data.phase;
+        }
+        if root.origin != "" || root.target != "" : Rectangle {
+            background: Colors.background;
+            border-radius: 9px;
+            VerticalLayout {
+                padding: 12px;
+                spacing: 5px;
+                if root.origin != "" : FieldLabel { text: root.kind == OperationKind.search ? @tr("Suchbereich") : root.kind == OperationKind.sync ? @tr("Links") : root.kind == OperationKind.extract ? @tr("Quellarchiv") : @tr("Quelle"); }
+                if root.origin != "" : Text { text: root.origin; color: Colors.muted; font-size: 12px; overflow: elide; Tooltip { text: @markdown("\{root.origin}"); } }
+                if root.target != "" : FieldLabel { text: root.kind == OperationKind.sync ? @tr("Rechts") : root.kind == OperationKind.pack ? @tr("Zielarchiv") : @tr("Ziel"); }
+                if root.target != "" : Text { text: root.target; color: Colors.text; font-size: 12px; overflow: elide; Tooltip { text: @markdown("\{root.target}"); } }
+            }
+        }
+        ProgressMeter { label: root.kind == OperationKind.search ? @tr("Suchfortschritt") : @tr("Gesamtfortschritt"); progress: root.progress; paused: root.paused || (root.cancelling && !root.data.recovering); }
+        ProgressMetrics { kind: root.kind; data: root.data; }
+        if !root.counted && root.kind != OperationKind.search : HorizontalLayout {
+            spacing: 8px;
+            Text { text: root.data.items; color: Colors.accent; font-size: 12px; horizontal-stretch: 1; }
+            Text { text: root.data.bytes; color: Colors.muted; font-size: 12px; }
+        }
+        if root.data.finish != "" : Text {
+            text: @tr("Voraussichtlich fertig:") + " " + root.data.finish;
+            color: Colors.muted; font-size: 12px; horizontal-alignment: right;
+        }
+        if root.data.source != "" : VerticalLayout {
+            spacing: 5px;
+            FieldLabel { text: root.kind == OperationKind.search ? @tr("Aktueller Pfad") : root.counted ? @tr("Aktueller Eintrag") : @tr("Aktuelle Datei"); }
+            Text { text: root.data.source; color: Colors.text; overflow: elide; font-size: 13px; Tooltip { text: @markdown("\{root.data.source}"); } }
+            if root.target == "" && root.data.target != "" : Text { text: "→ " + root.data.target; color: Colors.muted; overflow: elide; font-size: 12px; Tooltip { text: @markdown("\{root.data.target}"); } }
+            if root.data.file-fraction >= 0 : ProgressRail { height: 5px; progress: root.data.file-fraction; paused: root.paused; }
+        }
+        if root.data.source == "" && root.detail != "" : Text { text: root.detail; color: Colors.muted; wrap: word-wrap; overflow: elide; }
+        if root.deleting : Note {
+            text: @tr("Dateien und Ordner werden als einzelne Einträge gezählt. Bei Abbruch kann der aktuelle Eintrag noch abgeschlossen werden.");
+        }
+        if root.kind == OperationKind.search && root.data.errors != "" && root.data.errors != "0" : Note { text: @tr("Lesefehler") + ": " + root.data.errors; color: Colors.archive; }
+        if root.kind == OperationKind.rename : Note { text: @tr("Bei Abbruch versucht Arco, bereits ausgeführte Umbenennungen zurückzusetzen."); }
+        Rectangle { height: 1px; background: Colors.edge; }
+        HorizontalLayout {
+            spacing: 8px;
+            pause-button := Button { text: root.paused ? @tr("Fortsetzen") : @tr("Pausieren"); visible: root.pausable; enabled: !root.cancelling; clicked => { root.pause(); } }
+            Rectangle { horizontal-stretch: 1; }
+            cancel-button := Button { text: @tr("Abbrechen"); destructive: true; enabled: !root.cancelling && !root.data.recovering; clicked => { root.cancel(); } }
+            background-button := Button { text: @tr("Im Hintergrund"); primary: true; clicked => { root.hide-progress(); } }
+        }
+    }
+    FocusScope {
+        width: 0px; height: 0px;
+        changed has-focus => { if (self.has-focus) { if (root.pausable && !root.cancelling) { pause-button.focus(); } else if (!root.cancelling) { cancel-button.focus(); } else { background-button.focus(); } } }
+    }
+    init => { background-button.focus(); }
+}
+
 export component FileOperationCard inherits Rectangle {
+    in property <int> focus-cycle;
+    changed focus-cycle => { if (root.focus-cycle < 0) { start-button.focus(); } else { selection-toggle.focus(); } }
     in property <string> title;
     in property <string> selection-count;
     in property <string> selected-paths;
     in property <string> initial-value;
-    in property <string> archive-target;
-    in property <bool> pack;
+    in-out property <string> target-folder;
+    in property <OperationKind> kind;
+    property <bool> pack: root.kind == OperationKind.pack;
+    property <bool> extract: root.kind == OperationKind.extract;
     in property <bool> multiple;
-    in property <bool> move-files;
+    in property <bool> password-enabled;
+    in property <string> note;
     in property <[string]> choices;
+    in property <string> choices-label;
     in property <[string]> filters;
     in property <string> confirm-label;
     in-out property <int> filter-index;
@@ -62,8 +383,12 @@ export component FileOperationCard inherits Rectangle {
         + layout.padding * 2 + layout.spacing * 3 + divider.height;
     property <bool> selection-open: true;
     property <bool> advanced;
+    property <bool> password-available: root.password-enabled && (!root.pack || choice.current-index == 0 || choice.current-index == 1 || choice.current-index == 4 || choice.current-index == 6 || choice.current-index == 9 || choice.current-index == 10 || choice.current-index == 14);
+    property <bool> password-required: root.password-enabled && root.pack && choice.current-index == 14;
+    property <bool> can-submit: (root.multiple || main-input.text != "") && (!root.pack || root.target-folder != "") && (!root.password-required || secondary.text != "");
     callback start(string, string, int);
     callback dismiss();
+    callback browse-target() -> string;
 
     background: Colors.panel;
     border-radius: 14px;
@@ -71,14 +396,23 @@ export component FileOperationCard inherits Rectangle {
     border-color: Colors.edge;
 
     function submit() {
-        root.start(root.multiple ? "" : main-input.text, secondary.text, choice.current-index);
+        if (root.can-submit) {
+            root.start(root.multiple ? "" : main-input.text, root.pack && !root.password-available ? "" : secondary.text, choice.current-index);
+        }
+    }
+
+    function choose-target() {
+        let selected = root.browse-target();
+        if (selected != "") {
+            if (root.pack) { root.target-folder = selected; } else { main-input.text = selected; }
+        }
     }
 
     layout := VerticalLayout {
         padding: 18px;
         spacing: 12px;
         heading := DialogHeading {
-            icon: root.pack ? @image-url("icons/archive.svg") : root.move-files ? @image-url("icons/move.svg") : @image-url("icons/copy.svg");
+            icon: root.pack ? @image-url("icons/archive.svg") : root.extract ? @image-url("icons/archive-extract.svg") : root.kind == OperationKind.move ? @image-url("icons/move.svg") : @image-url("icons/copy.svg");
             title: root.title;
             subtitle: root.selection-count;
         }
@@ -94,7 +428,7 @@ export component FileOperationCard inherits Rectangle {
                     spacing: 8px;
                     FieldLabel { text: @tr("Quelle"); vertical-alignment: center; }
                     Rectangle { horizontal-stretch: 1; }
-                    Button {
+                    selection-toggle := Button {
                         text: root.selection-open ? @tr("Auswahl ausblenden") : @tr("Auswahl anzeigen");
                         clicked => { root.selection-open = !root.selection-open; }
                     }
@@ -108,7 +442,11 @@ export component FileOperationCard inherits Rectangle {
                 }
                 Rectangle { height: 1px; background: Colors.edge; }
                 FieldLabel { text: @tr("Zielordner"); }
-                if root.pack : Note { text: root.archive-target; }
+                if root.pack : HorizontalLayout {
+                    spacing: 7px;
+                    LineEdit { text <=> root.target-folder; accessible-label: @tr("Zielordner"); accepted => { root.submit(); } }
+                    NavButton { icon: @image-url("icons/folder.svg"); label: @tr("Zielordner auswählen"); clicked => { root.choose-target(); } }
+                }
                 if root.multiple : TextEdit {
                     height: 80px;
                     read-only: true;
@@ -117,19 +455,24 @@ export component FileOperationCard inherits Rectangle {
                     accessible-label: @tr("Markierte Zielordner");
                 }
                 if root.pack : FieldLabel { text: @tr("Archivname"); }
-                main-input := LineEdit {
+                HorizontalLayout {
                     visible: !root.multiple;
-                    text: root.initial-value;
-                    accessible-label: root.pack ? @tr("Archivname") : @tr("Zielordner");
-                    accepted => { root.submit(); }
+                    spacing: 7px;
+                    main-input := LineEdit {
+                        text: root.initial-value;
+                        accessible-label: root.pack ? @tr("Archivname") : @tr("Zielordner");
+                        accepted => { root.submit(); }
+                    }
+                    if !root.pack : NavButton { icon: @image-url("icons/folder.svg"); label: @tr("Zielordner auswählen"); clicked => { root.choose-target(); } }
                 }
-                FieldLabel { text: root.pack ? @tr("Archivformat") : @tr("Bei Namenskonflikten"); }
+                if root.choices.length > 0 : FieldLabel { text: root.choices-label != "" ? root.choices-label : root.pack ? @tr("Archivformat") : @tr("Bei Namenskonflikten"); }
                 choice := ComboBox {
+                    visible: root.choices.length > 0;
                     model: root.choices;
                     current-index: 0;
-                    accessible-label: root.pack ? @tr("Archivformat") : @tr("Bei Namenskonflikten");
+                    accessible-label: root.choices-label != "" ? root.choices-label : root.pack ? @tr("Archivformat") : @tr("Bei Namenskonflikten");
                 }
-                if !root.pack && (!root.multiple || root.filters.length > 0) : HorizontalLayout {
+                if !root.pack && !root.extract && (!root.multiple || root.filters.length > 0) : HorizontalLayout {
                     Rectangle { horizontal-stretch: 1; }
                     ActionButton {
                         icon: @image-url("icons/settings.svg");
@@ -139,14 +482,14 @@ export component FileOperationCard inherits Rectangle {
                         clicked => { root.advanced = !root.advanced; }
                     }
                 }
-                if root.pack || (root.advanced && !root.multiple) : FieldLabel {
-                    text: root.pack ? @tr("ZIP-/7z-Passwort (optional)") : @tr("Zielmaske (optional)");
+                if root.password-available || (root.advanced && !root.multiple) : FieldLabel {
+                    text: root.password-required ? @tr("Archivpasswort (erforderlich)") : root.password-available ? @tr("Archivpasswort (optional)") : @tr("Zielmaske (optional)");
                 }
                 secondary := LineEdit {
-                    visible: root.pack || (root.advanced && !root.multiple);
-                    placeholder-text: root.pack ? @tr("ZIP-/7z-Passwort (optional)") : "*.bak";
-                    accessible-label: root.pack ? @tr("ZIP-/7z-Passwort (optional)") : @tr("Zielmaske (optional)");
-                    input-type: root.pack ? password : text;
+                    visible: root.password-available || (root.advanced && !root.multiple);
+                    placeholder-text: root.password-required ? @tr("Archivpasswort (erforderlich)") : root.password-available ? @tr("Archivpasswort (optional)") : "*.bak";
+                    accessible-label: root.password-required ? @tr("Archivpasswort (erforderlich)") : root.password-available ? @tr("Archivpasswort (optional)") : @tr("Zielmaske (optional)");
+                    input-type: root.password-available ? password : text;
                     accepted => { root.submit(); }
                 }
                 if root.advanced && !root.pack && root.filters.length > 0 : FieldLabel { text: @tr("Gespeicherter Suchfilter"); }
@@ -155,6 +498,7 @@ export component FileOperationCard inherits Rectangle {
                     current-index <=> root.filter-index;
                     accessible-label: @tr("Gespeicherter Suchfilter");
                 }
+                if root.note != "" : Note { text: root.note; }
             }
         }
         divider := Rectangle { height: 1px; background: Colors.edge; }
@@ -162,7 +506,7 @@ export component FileOperationCard inherits Rectangle {
             spacing: 8px;
             Rectangle { horizontal-stretch: 1; }
             Button { text: @tr("Abbrechen"); clicked => { root.dismiss(); } }
-            start-button := Button { text: root.confirm-label; primary: true; clicked => { root.submit(); } }
+            start-button := Button { text: root.confirm-label; primary: true; enabled: root.can-submit; clicked => { root.submit(); } }
         }
     }
 
@@ -173,6 +517,8 @@ export component FileOperationCard inherits Rectangle {
 }
 
 export component ReaderPane inherits FocusScope {
+    in property <int> focus-cycle;
+    changed focus-cycle => { if (root.focus-cycle > 0) { search.focus(); } }
     in property <bool> busy;
     in property <bool> hex;
     in property <bool> can-back;
@@ -309,6 +655,8 @@ export struct TransferManagerData {
 }
 
 export component TransferManagerCard inherits Rectangle {
+    in property <int> focus-cycle;
+    changed focus-cycle => { if (root.focus-cycle < 0) { close-button.focus(); } else if (root.cancelling || (root.data.active == "" && root.data.waiting.length == 0)) { descriptions-button.focus(); } }
     in property <TransferManagerData> data;
     in property <bool> cancelling;
     callback choose(int);
@@ -341,11 +689,15 @@ export component TransferManagerCard inherits Rectangle {
                     if root.data.paused : FieldLabel { text: @tr("Pausiert"); vertical-alignment: center; }
                     Rectangle { horizontal-stretch: 1; }
                     Button {
+                        property <int> cycle: root.focus-cycle;
+                        changed cycle => { if (self.cycle > 0 && self.enabled) { self.focus(); } }
                         text: root.data.paused ? @tr("Fortsetzen") : @tr("Pausieren");
                         enabled: root.data.pausable && !root.cancelling;
                         clicked => { root.choose(0); }
                     }
                     Button {
+                        property <int> cycle: root.focus-cycle;
+                        changed cycle => { if (self.cycle > 0 && !root.data.pausable && self.enabled) { self.focus(); } }
                         text: @tr("Transfer abbrechen");
                         enabled: !root.cancelling;
                         clicked => { root.choose(1); }
@@ -362,6 +714,8 @@ export component TransferManagerCard inherits Rectangle {
                 width: parent.visible-width;
                 spacing: 4px;
                 for entry[i] in root.data.waiting : Button {
+                    property <int> cycle: root.focus-cycle;
+                    changed cycle => { if (self.cycle > 0 && i == 0 && root.data.active == "") { self.focus(); } }
                     text: "\{i + 1}.  \{entry}";
                     clicked => { root.choose(6 + i); }
                 }
@@ -371,7 +725,7 @@ export component TransferManagerCard inherits Rectangle {
         Rectangle { height: 1px; background: Colors.edge; }
         HorizontalLayout {
             spacing: 6px;
-            Button {
+            descriptions-button := Button {
                 text: @tr("Dateikommentare mitführen");
                 checkable: true;
                 checked: root.data.descriptions;
@@ -399,6 +753,7 @@ export component TransferManagerCard inherits Rectangle {
 }
 
 export component CompactDialogCard inherits Rectangle {
+    in property <int> focus-cycle;
     in property <bool> input;
     in property <int> revision;
     in property <string> title;
@@ -441,7 +796,9 @@ export component CompactDialogCard inherits Rectangle {
         if root.input : VerticalLayout {
             spacing: 4px;
             if root.label != "" : FieldLabel { text: root.label; }
-            LineEdit {
+            prompt-input := LineEdit {
+                property <int> cycle: root.focus-cycle;
+                changed cycle => { if (self.cycle > 0) { self.focus(); } }
                 text <=> root.first;
                 input-type: root.secret ? password : text;
                 accessible-label: root.label;
@@ -463,6 +820,8 @@ export component CompactDialogCard inherits Rectangle {
             spacing: 4px;
             FieldLabel { text: root.options-label == "" ? @tr("Auswahl") : root.options-label; }
             ComboBox {
+                property <int> cycle: root.focus-cycle;
+                changed cycle => { if (self.cycle > 0 && !root.input) { self.focus(); } }
                 model: root.options;
                 current-index <=> root.choice;
                 accessible-label: root.options-label == "" ? @tr("Auswahl") : root.options-label;
@@ -474,11 +833,15 @@ export component CompactDialogCard inherits Rectangle {
             spacing: 8px;
             Rectangle { horizontal-stretch: 1; }
             Button {
+                property <int> cycle: root.focus-cycle;
+                changed cycle => { if (self.cycle > 0 && !root.input && root.options.length == 0) { self.focus(); } }
                 text: @tr("Abbrechen");
                 clicked => { root.dismiss(); }
                 init => { if (!root.input && root.options.length == 0) { self.focus(); } }
             }
             Button {
+                property <int> cycle: root.focus-cycle;
+                changed cycle => { if (self.cycle < 0) { self.focus(); } }
                 text: root.confirm-label != "" ? root.confirm-label
                     : root.options.length > 0 ? @tr("Auswahl bestätigen") : @tr("Bestätigen");
                 primary: true;

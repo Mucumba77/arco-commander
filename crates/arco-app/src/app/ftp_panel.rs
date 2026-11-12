@@ -13,7 +13,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
 
 pub(crate) enum FtpEdit {
     Create,
@@ -170,18 +169,23 @@ impl App {
             self.status("Die FTP-Vorschau unterstützt bis zu 64 MiB pro Datei.");
             return;
         }
-        self.start_job("Lese FTP-Vorschau …", false, move |job| {
+        let source = format!("{}{}", location.directory, entry.name);
+        let description =
+            super::JobDescription::new(crate::OperationKind::Ftp, source.clone(), String::new());
+        self.start_operation_job("FTP-Vorschau laden", false, description, move |job| {
             let storage = Arc::new(tempfile::tempdir()?);
             let path = storage
                 .path()
                 .join(files::leaf_name(OsStr::new(&entry.name))?);
-            location.session.download_bounded(
+            location.session.download_bounded_with_progress(
                 &location.directory,
                 &entry.name,
                 &path,
                 MAX_PREVIEW,
                 &job.cancel,
+                job.ftp_download_progress(source, entry.size),
             )?;
+            job.phase("Vorschau vorbereiten …");
             let content = preview::read(&path)?;
             let title = format!("{}{}", location.directory, entry.name);
             Ok(Outcome::StagedPreview(
@@ -305,9 +309,21 @@ impl App {
                     ));
                 }
                 let permissions = u16::from_str_radix(mode, 8).map_err(io::Error::other)?;
-                self.start_job("Setze FTP-Dateirechte …", true, move |job| {
+                let description = super::JobDescription::new(
+                    crate::OperationKind::Ftp,
+                    location.directory.to_string(),
+                    String::new(),
+                );
+                self.start_operation_job("FTP-Dateirechte setzen", true, description, move |job| {
                     let mut report = TransferReport::default();
-                    for entry in entries {
+                    let total = entries.len();
+                    for (index, entry) in entries.into_iter().enumerate() {
+                        job.entry_progress(
+                            entry.name.clone(),
+                            index,
+                            total,
+                            "FTP-Dateirechte setzen …",
+                        );
                         match location.session.set_unix_permissions(
                             &location.directory,
                             &entry,
@@ -326,10 +342,20 @@ impl App {
                 });
             }
             FtpEdit::Delete(entries) => {
-                self.start_job("Lösche FTP-Auswahl …", true, move |job| {
-                    let report = delete_selection(location, &entries, &job.cancel, |path| {
-                        job.progress(format!("Lösche {}", display_path(path)));
-                    })?;
+                let detail = format!(
+                    "{} · {}",
+                    crate::locale::tr("Ausgewählte Einträge"),
+                    entries.len()
+                );
+                self.start_delete_job("Lösche FTP-Auswahl …", detail, move |job| {
+                    let report = delete_selection(
+                        location,
+                        &entries,
+                        &job.cancel,
+                        |path, processed, total| {
+                            job.deletion_progress(display_path(path), processed, total);
+                        },
+                    )?;
                     Ok(Outcome::Report("FTP-Löschen".into(), report))
                 });
             }
@@ -338,25 +364,36 @@ impl App {
                     .to_str()
                     .expect("Unicode name")
                     .to_owned();
-                self.start_job("Bearbeite FTP-Verzeichnis …", true, move |job| {
-                    match edit {
-                        FtpEdit::Create => location.session.create_sync_directory(
-                            &location.directory,
-                            &name,
-                            &job.cancel,
-                        )?,
-                        FtpEdit::Rename(entry) => location.session.rename_sync_entry(
-                            &location.directory,
-                            &entry,
-                            &name,
-                            &job.cancel,
-                        )?,
-                        FtpEdit::Delete(_) | FtpEdit::Permissions(_) => unreachable!(),
-                    }
-                    Ok(Outcome::Notice(format!(
-                        "FTP-Eintrag aktualisiert · {name}"
-                    )))
-                });
+                let description = super::JobDescription::new(
+                    crate::OperationKind::Ftp,
+                    location.directory.to_string(),
+                    String::new(),
+                );
+                self.start_operation_job(
+                    "FTP-Verzeichnis bearbeiten",
+                    true,
+                    description,
+                    move |job| {
+                        job.entry_progress(name.clone(), 0, 1, "FTP-Verzeichnis bearbeiten …");
+                        match edit {
+                            FtpEdit::Create => location.session.create_sync_directory(
+                                &location.directory,
+                                &name,
+                                &job.cancel,
+                            )?,
+                            FtpEdit::Rename(entry) => location.session.rename_sync_entry(
+                                &location.directory,
+                                &entry,
+                                &name,
+                                &job.cancel,
+                            )?,
+                            FtpEdit::Delete(_) | FtpEdit::Permissions(_) => unreachable!(),
+                        }
+                        Ok(Outcome::Notice(format!(
+                            "FTP-Eintrag aktualisiert · {name}"
+                        )))
+                    },
+                );
             }
         }
         Ok(())
@@ -367,7 +404,7 @@ fn delete_selection(
     location: FtpLocation,
     selected: &[ftp::Entry],
     cancel: &AtomicBool,
-    mut progress: impl FnMut(&Path),
+    mut progress: impl FnMut(&Path, usize, usize),
 ) -> io::Result<TransferReport> {
     let paths = selected
         .iter()
@@ -385,16 +422,12 @@ fn delete_selection(
         }
     }
     let mut report = TransferReport::default();
-    let mut last = Instant::now() - Duration::from_secs(1);
-    for (path, entry) in entries.iter().rev() {
+    for (index, (path, entry)) in entries.iter().rev().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             report.cancelled = true;
             break;
         }
-        if last.elapsed() >= Duration::from_millis(150) {
-            last = Instant::now();
-            progress(path);
-        }
+        progress(path, index, entries.len());
         let result = endpoint
             .0
             .relative_directory(&endpoint.1, path.parent().expect("remote relative path"))
@@ -407,6 +440,7 @@ fn delete_selection(
             }
             Err(error) => report.errors.push(format!("{}: {error}", path.display())),
         }
+        progress(path, index + 1, entries.len());
     }
     Ok(report)
 }
@@ -463,15 +497,18 @@ mod tests {
             .unwrap();
         let fresh = read_panel(&panel, &cancel).unwrap();
         let selected = &fresh.ftp.as_ref().unwrap().listing.entries[0];
+        let mut progress = Vec::new();
         let report = delete_selection(
             panel.clone(),
             std::slice::from_ref(selected),
             &cancel,
-            |_| {},
+            |_, processed, total| progress.push((processed, total)),
         )
         .unwrap();
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(report.completed, 2);
+        assert_eq!(progress.first(), Some(&(0, 2)));
+        assert_eq!(progress.last(), Some(&(2, 2)));
         assert!(
             read_panel(&panel, &cancel)
                 .unwrap()

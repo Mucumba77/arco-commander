@@ -152,7 +152,17 @@ impl App {
         query: tools::Search,
         password: Option<String>,
     ) {
-        self.start_job("Suche im Archiv …", false, move |job| {
+        let description = super::JobDescription::new(
+            crate::OperationKind::Search,
+            format!(
+                "{}::{}",
+                display_path(&archive.file),
+                display_path(&archive.folder)
+            ),
+            String::new(),
+        );
+        self.start_operation_job("Suche im Archiv …", false, description, move |job| {
+            job.phase("Archiv durchsuchen …");
             let entries = archive.catalog.search(
                 &archive.folder,
                 &query,
@@ -190,7 +200,12 @@ impl App {
         selection: Selection,
         password: Option<String>,
     ) {
-        self.enqueue_virtual_transfer("Archivauswahl entpacken", true, move |job| {
+        let presentation = super::JobDescription::new(
+            crate::OperationKind::Extract,
+            display_path(&archive.file),
+            display_path(&target),
+        );
+        self.enqueue_virtual_operation("Archivauswahl entpacken", true, presentation, move |job| {
             check_archive(&archive)?;
             let target = std::fs::canonicalize(target)?;
             let staging = tempfile::tempdir_in(&target)?;
@@ -200,9 +215,9 @@ impl App {
                 &selection,
                 password.as_deref().or(archive.password()),
                 &job.cancel,
-                job.archive_progress(),
+                job.archive_progress_phase("Entpacken · Schritt 1 von 2"),
             )?;
-            job.progress(format!("→ {}", display_path(&target)));
+            job.phase("Dateien am Ziel bereitstellen · Schritt 2 von 2");
             check_archive(&archive)?;
             let mut paths = std::fs::read_dir(staging.path())?
                 .map(|entry| entry.map(|entry| entry.path()))
@@ -292,7 +307,12 @@ impl App {
         target_password: Option<String>,
         source_password: Option<String>,
     ) {
-        self.enqueue_virtual_transfer("In Archiv kopieren", true, move |job| {
+        let presentation = super::JobDescription::new(
+            crate::OperationKind::Pack,
+            String::new(),
+            display_path(&target.file),
+        );
+        self.enqueue_virtual_operation("In Archiv kopieren", true, presentation, move |job| {
             let storage;
             let (base, paths) = match input {
                 ArchiveInput::Local { base, paths } => (base, paths),
@@ -421,10 +441,14 @@ impl App {
         password: &str,
     ) {
         let password = (!password.is_empty()).then(|| zeroize::Zeroizing::new(password.to_owned()));
-        self.start_progress_job(
+        self.start_operation_job(
             "Bearbeite Archiv …",
             true,
-            display_path(&archive.file),
+            super::JobDescription::new(
+                crate::OperationKind::Pack,
+                display_path(&archive.file),
+                display_path(&archive.file),
+            ),
             move |job| {
                 check_archive(&archive)?;
                 let secret = password

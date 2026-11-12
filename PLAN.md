@@ -1,5 +1,9 @@
 # Entwicklungsplan für Arco Commander
 
+## Aktuelle Fortsetzung · 12. November 2026
+
+Der gesicherte Stand ist **1.1.0**. Der nächste Arbeitsblock steht in [WEITERARBEIT.md](docs/WEITERARBEIT.md): Rückmeldungen aus den Fenstertests zuerst beheben, danach die übrigen Werkzeug- und Konfigurationsdialoge vereinheitlichen. Die Anwendung weiterhin nicht selbst starten; die Fenstertests übernimmt der Projektinhaber. Der weitere Ausbau der Funktionsmatrix folgt nach dieser Oberflächenrunde.
+
 Arco Commander ist ein Windows-Dateimanager in Rust mit zwei unabhängig bedienbaren Dateifenstern und dem Tastaturablauf von Total Commander. [Version 1.0.0](https://github.com/Mucumba77/arco-commander/releases/tag/v1.0.0) ist die erste reguläre Veröffentlichung. Das Ziel der weiteren Entwicklung sind alle dokumentierten Benutzerfunktionen von **Total Commander 11.58.1 für Windows**. Die [Funktionsmatrix](FUNKTIONSMATRIX.md) führt die verfügbaren und offenen Varianten samt Prüffällen auf.
 
 Referenzstand ist der 7. November 2026. Ghisler veröffentlichte 11.58.1 am 29. Oktober 2026. Das signierte x64-Referenzpaket enthält **594 benannte `cm_`-Einträge** in `TOTALCMD.INC`. Das ist ein Ausgangspunkt für die Befehlsprüfung. Parametrisierte Befehlsfamilien, Dialoge, Tastenkürzel, Kommandozeilenoptionen und INI-Einstellungen brauchen zusätzliche Prüffälle. [Herstellerstartseite](https://www.ghisler.com/deutsch.htm), [Versionshistorie](https://www.ghisler.com/whatsnew.htm), [Download des Referenzpakets](https://www.ghisler.com/ddownload.htm).
