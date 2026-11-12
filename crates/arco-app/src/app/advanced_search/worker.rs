@@ -20,6 +20,8 @@ const REPLY_LIMIT: u64 = 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct Request {
+    #[serde(default)]
+    progress: bool,
     options: Options,
     roots: Vec<OsString>,
     show_hidden: bool,
@@ -49,6 +51,7 @@ impl Drop for Request {
 
 #[derive(Serialize, Deserialize)]
 enum Reply {
+    Progress(super::Update),
     Entry {
         path: OsString,
         name: OsString,
@@ -91,6 +94,7 @@ impl Request {
                 .collect()
         });
         Self {
+            progress: true,
             options: task.options.clone(),
             roots: task
                 .roots
@@ -111,7 +115,11 @@ impl Request {
         }
     }
 
-    fn search(&self, cancel: &AtomicBool) -> io::Result<Found> {
+    fn search(
+        &self,
+        cancel: &AtomicBool,
+        progress: impl FnMut(super::Update),
+    ) -> io::Result<Found> {
         let password = |value: Option<&String>| -> Option<ArchivePassword> {
             value.map(|value| Arc::new(Zeroizing::new(value.clone())))
         };
@@ -158,7 +166,7 @@ impl Request {
             password: password(self.password.as_ref()),
             wdx,
         }
-        .run(cancel)
+        .run_with_progress(cancel, progress)
     }
 }
 
@@ -175,7 +183,50 @@ pub(crate) fn run() -> io::Result<()> {
             let _ = io::stdin().read(&mut [0u8]);
             signal.store(true, Ordering::Relaxed);
         })?;
-    let result = request.search(&cancel);
+    let latest = Arc::new(std::sync::Mutex::new(None::<super::Update>));
+    let finished = Arc::new(AtomicBool::new(false));
+    let reporter = request.progress.then(|| {
+        let latest = latest.clone();
+        let finished = finished.clone();
+        let cancel = cancel.clone();
+        std::thread::spawn(move || -> io::Result<()> {
+            let result = (|| {
+                loop {
+                    let done = finished.load(Ordering::Acquire);
+                    let update = latest
+                        .lock()
+                        .map_err(|_| io::Error::other("Suchfortschritt nicht verfügbar."))?
+                        .take();
+                    if let Some(update) = update {
+                        let mut output = BufWriter::new(io::stdout().lock());
+                        write_frame(&mut output, &Reply::Progress(update))?;
+                        output.flush()?;
+                    }
+                    if done {
+                        return Ok(());
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            })();
+            if result.is_err() {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            result
+        })
+    });
+    let result = request.search(&cancel, |update| {
+        if request.progress {
+            if let Ok(mut latest) = latest.lock() {
+                *latest = Some(update);
+            }
+        }
+    });
+    finished.store(true, Ordering::Release);
+    if let Some(reporter) = reporter {
+        reporter
+            .join()
+            .map_err(|_| io::Error::other("Suchfortschritt fehlgeschlagen."))??;
+    }
     drop(request);
     let mut output = BufWriter::new(io::stdout().lock());
     match result {
@@ -225,10 +276,11 @@ pub(crate) fn run() -> io::Result<()> {
     output.flush()
 }
 
-pub(super) fn spawn(
+pub(super) fn spawn_with_progress(
     request: Request,
     archive: Option<&ArchiveTab>,
     cancel: &AtomicBool,
+    mut progress: impl FnMut(super::Update),
 ) -> io::Result<Found> {
     if let Some(archive) = archive {
         archive.catalog.check_unchanged()?;
@@ -266,14 +318,22 @@ pub(super) fn spawn(
     }
     let output = child.stdout.take().expect("piped stdout");
     let result = std::thread::scope(|scope| {
+        enum Message {
+            Progress(super::Update),
+            Done(io::Result<Found>),
+        }
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let read = scope.spawn(move || {
-            let _ = sender.send(read_reply(output));
+            let result = read_reply(output, |update| {
+                let _ = sender.send(Message::Progress(update));
+            });
+            let _ = sender.send(Message::Done(result));
         });
         let mut interrupted = None;
         loop {
             match receiver.recv_timeout(Duration::from_millis(30)) {
-                Ok(result) => {
+                Ok(Message::Progress(update)) => progress(update),
+                Ok(Message::Done(result)) => {
                     input.take();
                     if result.is_err() {
                         let _ = child.kill();
@@ -336,7 +396,7 @@ fn read_frame(input: &mut impl BufRead, frame: &mut Vec<u8>, max: u64) -> io::Re
     Ok(())
 }
 
-fn read_reply(output: impl Read) -> io::Result<Found> {
+fn read_reply(output: impl Read, mut progress: impl FnMut(super::Update)) -> io::Result<Found> {
     let mut input = BufReader::new(output);
     let mut frame = Vec::new();
     let mut entries = Vec::new();
@@ -344,6 +404,7 @@ fn read_reply(output: impl Read) -> io::Result<Found> {
     loop {
         read_frame(&mut input, &mut frame, REPLY_LIMIT)?;
         match serde_json::from_slice(&frame).map_err(io::Error::other)? {
+            Reply::Progress(update) => progress(update),
             Reply::Entry {
                 path,
                 name,

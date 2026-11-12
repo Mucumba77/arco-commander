@@ -24,6 +24,21 @@ pub struct Plan {
     skipped_capture: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Phase {
+    Staging,
+    Publishing,
+    Recovering,
+}
+
+pub struct Progress<'a> {
+    pub source: &'a Path,
+    pub target: &'a Path,
+    pub completed: usize,
+    pub total: usize,
+    pub phase: Phase,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SearchOptions {
@@ -627,6 +642,16 @@ impl Plan {
     }
 
     pub fn apply(&self, rename: impl Fn(&Path, &Path) -> io::Result<()>) -> io::Result<()> {
+        self.apply_with_progress(&AtomicBool::new(false), rename, |_| {})
+    }
+
+    pub fn apply_with_progress(
+        &self,
+        cancel: &AtomicBool,
+        rename: impl Fn(&Path, &Path) -> io::Result<()>,
+        mut progress: impl FnMut(Progress<'_>),
+    ) -> io::Result<()> {
+        files::check_cancel(cancel)?;
         self.validate()?;
         let Some((first, _)) = self.entries.first() else {
             return Ok(());
@@ -637,26 +662,72 @@ impl Plan {
         let stage = |index: usize| staging.path().join(index.to_string());
         let mut staged = 0;
         let mut published = 0;
+        let total = self.entries.len().saturating_mul(2);
         let operation = (|| {
-            for (index, (source, _)) in self.entries.iter().enumerate() {
+            for (index, (source, target)) in self.entries.iter().enumerate() {
+                progress(Progress {
+                    source,
+                    target,
+                    completed: staged,
+                    total,
+                    phase: Phase::Staging,
+                });
+                files::check_cancel(cancel)?;
                 files::ensure_unchanged(source, &self.before[index])?;
                 rename(source, &stage(index))?;
                 staged += 1;
+                progress(Progress {
+                    source,
+                    target,
+                    completed: staged,
+                    total,
+                    phase: Phase::Staging,
+                });
             }
-            for (index, (_, target)) in self.entries.iter().enumerate() {
+            for (index, (source, target)) in self.entries.iter().enumerate() {
+                progress(Progress {
+                    source,
+                    target,
+                    completed: staged + published,
+                    total,
+                    phase: Phase::Publishing,
+                });
+                files::check_cancel(cancel)?;
                 rename(&stage(index), target)?;
                 published += 1;
+                progress(Progress {
+                    source,
+                    target,
+                    completed: staged + published,
+                    total,
+                    phase: Phase::Publishing,
+                });
             }
+            files::check_cancel(cancel)?;
             Ok(())
         })();
         if let Err(error) = operation {
             let mut recovery = Vec::new();
             for index in (0..published).rev() {
+                progress(Progress {
+                    source: &self.entries[index].1,
+                    target: &self.entries[index].0,
+                    completed: 0,
+                    total,
+                    phase: Phase::Recovering,
+                });
                 if let Err(error) = rename(&self.entries[index].1, &stage(index)) {
                     recovery.push(error.to_string());
                 }
             }
             for index in (0..staged).rev() {
+                progress(Progress {
+                    source: &self.entries[index].1,
+                    target: &self.entries[index].0,
+                    completed: 0,
+                    total,
+                    phase: Phase::Recovering,
+                });
                 if let Err(error) = rename(&stage(index), &self.entries[index].0) {
                     recovery.push(error.to_string());
                 }
@@ -899,6 +970,71 @@ pub fn wdx_fields(mask: &str) -> io::Result<Vec<&str>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cancellation_in_each_rename_phase_restores_cyclic_originals() {
+        use super::*;
+        use std::sync::atomic::Ordering;
+        for stop in 1..=4 {
+            let fixture = tempfile::tempdir().unwrap();
+            let paths = [fixture.path().join("a.txt"), fixture.path().join("b.txt")];
+            fs::write(&paths[0], b"first").unwrap();
+            fs::write(&paths[1], b"second").unwrap();
+            let plan = Plan::from_names(&paths, &["b.txt", "a.txt"]).unwrap();
+            let cancel = AtomicBool::new(false);
+            let mut recovery = false;
+            let error = plan
+                .apply_with_progress(
+                    &cancel,
+                    |from, to| fs::rename(from, to),
+                    |update| {
+                        assert_eq!(update.total, 4);
+                        if update.phase == Phase::Recovering {
+                            recovery = true;
+                        } else if update.completed == stop {
+                            cancel.store(true, Ordering::Relaxed);
+                        }
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+            assert!(recovery);
+            assert_eq!(fs::read(&paths[0]).unwrap(), b"first");
+            assert_eq!(fs::read(&paths[1]).unwrap(), b"second");
+            assert_eq!(fs::read_dir(fixture.path()).unwrap().count(), 2);
+        }
+    }
+
+    #[test]
+    fn successful_rename_progress_counts_both_safe_phases() {
+        use super::*;
+        let fixture = tempfile::tempdir().unwrap();
+        let source = fixture.path().join("before.txt");
+        fs::write(&source, b"contents").unwrap();
+        let plan = Plan::single(&source, OsStr::new("after.txt")).unwrap();
+        let mut updates = Vec::new();
+        plan.apply_with_progress(
+            &AtomicBool::new(false),
+            |from, to| fs::rename(from, to),
+            |update| {
+                updates.push((update.phase, update.completed, update.total));
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            updates,
+            [
+                (Phase::Staging, 0, 2),
+                (Phase::Staging, 1, 2),
+                (Phase::Publishing, 1, 2),
+                (Phase::Publishing, 2, 2)
+            ]
+        );
+        assert_eq!(
+            fs::read(fixture.path().join("after.txt")).unwrap(),
+            b"contents"
+        );
+    }
+
     #[test]
     fn tc_name_ranges_work_with_unicode_and_reverse_positions() {
         use super::{mask_parts, name_range};

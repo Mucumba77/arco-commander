@@ -1,6 +1,6 @@
-use super::{App, Event, JobContext, Outcome};
+use super::{App, Event, JobContext, JobDescription, Outcome};
 use crate::commands::{Dialog, Pending, TransferDestination};
-use crate::{FileConflictData, display_path, human_size};
+use crate::{FileConflictData, OperationKind, display_path};
 use arco_core::advanced_search::Query;
 use arco_core::files::{self, Conflict, ConflictDecision, FileConflict, Transfer, TransferReport};
 use arco_core::ignore::IgnoreList;
@@ -72,6 +72,13 @@ impl TransferTask {
             }
             Ok(decision)
         };
+        let wait_before_move = |_: &Path| {
+            while paused.load(Ordering::Relaxed) {
+                files::check_cancel(&job.cancel)?;
+                std::thread::sleep(Duration::from_millis(40));
+            }
+            files::check_cancel(&job.cancel)
+        };
         let policy = files::TransferPolicy {
             conflict: self.conflict,
             resolve_conflict: self
@@ -86,12 +93,33 @@ impl TransferTask {
             .then_some(super::metadata_actions::apply_description_attributes),
             ignore: self.ignore.as_deref(),
             filter: self.filter.as_deref(),
+            before_entry: (self.operation == Transfer::Move).then_some(&wait_before_move),
         };
         let mut last = Instant::now() - Duration::from_secs(1);
         let mut previous_bytes = 0;
+        job.phase("Dateiumfang wird ermittelt …");
+        let usage =
+            files::measure_ignoring(&self.paths, &job.cancel, self.ignore.as_deref(), |_| {})?;
+        let targets = match &self.destination {
+            TransferDestination::Marked(targets) => targets.len(),
+            _ => 1,
+        };
+        let totals_known = usage.errors.is_empty() && usage.links == 0 && self.filter.is_none();
+        let total_bytes = totals_known.then(|| usage.bytes.saturating_mul(targets as u64));
+        let total_files = totals_known.then(|| usage.files.saturating_mul(targets));
+        let mut current = None;
+        let mut transferred = 0u64;
+        let mut file_index = 0usize;
         let mut progress = |target: &Path, progress: files::Progress<'_>| {
+            let key = (target.to_path_buf(), progress.path.to_path_buf());
+            if current.as_ref() != Some(&key) {
+                current = Some(key);
+                previous_bytes = 0;
+                file_index += 1;
+            }
             let delta = progress.copied.saturating_sub(previous_bytes);
             previous_bytes = progress.copied;
+            transferred = transferred.saturating_add(delta);
             let mut delay = if rate_kib == 0 {
                 Duration::ZERO
             } else {
@@ -109,22 +137,30 @@ impl TransferTask {
                     delay -= step;
                 }
             }
-            if last.elapsed() >= Duration::from_millis(100) {
+            if last.elapsed() >= Duration::from_millis(100) || progress.copied == progress.total {
                 last = Instant::now();
-                job.progress_bytes(
-                    format!(
-                        "{} · {}\n→ {}\n{} / {}",
-                        crate::locale::tr("Aktuelle Datei"),
-                        display_path(progress.path),
-                        display_path(target),
-                        human_size(progress.copied),
-                        human_size(progress.total)
-                    ),
-                    progress.copied,
-                    progress.total,
+                job.measured_progress(
+                    String::new(),
+                    super::job_progress::Sample {
+                        completed: transferred,
+                        total: total_bytes,
+                        source: display_path(progress.path),
+                        target: display_path(target),
+                        items: Some((file_index, total_files)),
+                        file_fraction: (progress.total > 0).then(|| {
+                            (progress.copied.min(progress.total) as f64 / progress.total as f64)
+                                as f32
+                        }),
+                        ..Default::default()
+                    },
                 );
             }
         };
+        job.phase(if self.operation == Transfer::Move {
+            "Dateien werden verschoben …"
+        } else {
+            "Dateien werden kopiert …"
+        });
         match &self.destination {
             TransferDestination::Folder(target) if !self.mask.is_empty() => files::transfer_masked(
                 &self.paths,
@@ -164,6 +200,7 @@ enum QueuedTransfer {
     Local(TransferTask),
     Virtual {
         label: String,
+        presentation: JobDescription,
         refresh: bool,
         ftp_draft: Option<PathBuf>,
         work: TransferWork,
@@ -405,10 +442,16 @@ mod tests {
             sender,
         };
         let worker = std::thread::spawn(move || task.run(&job, &AtomicBool::new(false), 0));
-        let Event::TransferConflict(ticket) =
-            receiver.recv_timeout(Duration::from_secs(4)).unwrap()
-        else {
-            panic!("expected a transfer conflict");
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let ticket = loop {
+            match receiver
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap()
+            {
+                Event::TransferConflict(ticket) => break ticket,
+                Event::Progress { .. } => (),
+                _ => panic!("expected progress or a transfer conflict"),
+            }
         };
         assert_eq!(ticket.source_preview, "new contents");
         assert_eq!(ticket.target_preview, "old contents");
@@ -477,6 +520,62 @@ mod tests {
         assert_eq!(report.completed, 1);
         assert_eq!(fs::read(target.join("data.bin")).unwrap(), data);
     }
+
+    #[test]
+    fn native_move_honors_pause_before_renaming_a_selected_entry() {
+        let fixture = tempfile::tempdir().unwrap();
+        let source = fixture.path().join("data.txt");
+        let target = fixture.path().join("target");
+        fs::write(&source, b"original contents").unwrap();
+        fs::create_dir(&target).unwrap();
+        let task = TransferTask {
+            paths: vec![source.clone()],
+            destination: TransferDestination::Folder(target.clone()),
+            operation: Transfer::Move,
+            mask: String::new(),
+            conflict: Conflict::Fail,
+            ask_conflicts: false,
+            ntfs: Default::default(),
+            descriptions: false,
+            filter: None,
+            ignore: None,
+        };
+        let paused = Arc::new(AtomicBool::new(true));
+        let worker_pause = paused.clone();
+        let (sender, receiver) = mpsc::channel();
+        let job = JobContext {
+            cancel: Arc::new(AtomicBool::new(false)),
+            sender,
+        };
+        let worker = std::thread::spawn(move || task.run(&job, &worker_pause, 0));
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let observed = loop {
+            match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(Event::Progress {
+                    sample: Some(sample),
+                    ..
+                }) if sample.phase == "Dateien werden verschoben …" => break true,
+                Ok(_) => (),
+                Err(_) => break false,
+            }
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        let waiting =
+            !worker.is_finished() && source.is_file() && !target.join("data.txt").exists();
+        paused.store(false, Ordering::Relaxed);
+        let report = worker.join().unwrap().unwrap();
+        assert!(
+            observed && waiting,
+            "native move must wait at the pause boundary"
+        );
+        assert_eq!(report.completed, 1);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(!source.exists());
+        assert_eq!(
+            fs::read(target.join("data.txt")).unwrap(),
+            b"original contents"
+        );
+    }
 }
 
 #[derive(Default)]
@@ -488,7 +587,35 @@ pub(super) struct Queue {
     next_id: u64,
 }
 
+impl Queue {
+    pub(super) fn paused(&self) -> bool {
+        self.current
+            .as_ref()
+            .and_then(|running| running.local.as_ref())
+            .is_some_and(|(_, paused)| paused.load(Ordering::Relaxed))
+    }
+
+    pub(super) fn pausable(&self) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(|running| running.local.is_some())
+    }
+}
+
 impl App {
+    pub(super) fn toggle_transfer_pause(&mut self) {
+        if let Some((_, paused)) = self
+            .transfers
+            .current
+            .as_ref()
+            .and_then(|running| running.local.as_ref())
+        {
+            paused.fetch_xor(true, Ordering::Relaxed);
+            self.ui().set_job_paused(self.transfers.paused());
+            self.publish_transfer_manager();
+        }
+    }
+
     pub(super) fn open_next_transfer_conflict(&mut self) {
         if matches!(&self.pending, Some(Pending::TransferConflict(ticket)) if ticket.cancelled()) {
             self.close_dialog();
@@ -541,8 +668,19 @@ impl App {
         refresh: bool,
         work: impl FnOnce(JobContext) -> io::Result<Outcome> + Send + 'static,
     ) {
+        self.enqueue_virtual_operation(label, refresh, JobDescription::default(), work);
+    }
+
+    pub(crate) fn enqueue_virtual_operation(
+        &mut self,
+        label: &str,
+        refresh: bool,
+        presentation: JobDescription,
+        work: impl FnOnce(JobContext) -> io::Result<Outcome> + Send + 'static,
+    ) {
         if let Err(error) = self.enqueue_work(QueuedTransfer::Virtual {
             label: label.into(),
+            presentation,
             refresh,
             ftp_draft: None,
             work: Box::new(work),
@@ -559,6 +697,11 @@ impl App {
     ) -> io::Result<()> {
         self.enqueue_work(QueuedTransfer::Virtual {
             label,
+            presentation: JobDescription::files(
+                OperationKind::Copy,
+                std::slice::from_ref(&path),
+                Path::new(""),
+            ),
             refresh: false,
             ftp_draft: Some(path),
             work: Box::new(work),
@@ -622,6 +765,7 @@ impl App {
         let task = match task {
             QueuedTransfer::Virtual {
                 label,
+                presentation,
                 refresh,
                 ftp_draft,
                 work,
@@ -632,7 +776,7 @@ impl App {
                     ftp_draft,
                 });
                 let description = label.clone();
-                self.start_progress_job(&label, refresh, String::new(), move |job| {
+                self.start_operation_job(&label, refresh, presentation, move |job| {
                     let mut outcome = match work(job) {
                         Ok(outcome) => outcome,
                         Err(error) if error.kind() == io::ErrorKind::Interrupted => {
@@ -684,7 +828,22 @@ impl App {
             ftp_draft: None,
         });
         let rate = self.profile.transfer_rate_kib;
-        self.start_progress_job(task.label(), true, task.describe(), move |job| {
+        let kind = if task.operation == Transfer::Move {
+            OperationKind::Move
+        } else {
+            OperationKind::Copy
+        };
+        let target = match &task.destination {
+            TransferDestination::Folder(path) => display_path(path),
+            TransferDestination::Marked(paths) => paths
+                .iter()
+                .map(|path| display_path(path))
+                .collect::<Vec<_>>()
+                .join(" · "),
+        };
+        let mut presentation = JobDescription::files(kind, &task.paths, Path::new(""));
+        presentation.target = target;
+        self.start_operation_job(task.label(), true, presentation, move |job| {
             let mut report = match task.run(&job, &paused, rate) {
                 Ok(report) => report,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => TransferReport {
@@ -770,19 +929,15 @@ impl App {
     pub(crate) fn transfer_manager_action(&mut self, action: usize) -> io::Result<()> {
         match action {
             0 => {
-                let (_, paused) = self
-                    .transfers
-                    .current
-                    .as_ref()
-                    .and_then(|running| running.local.as_ref())
-                    .ok_or_else(|| io::Error::other("Der aktuelle Auftrag bietet keine Pause."))?;
-                let paused = !paused.fetch_xor(true, Ordering::Relaxed);
-                self.status(if paused {
+                if !self.transfers.pausable() {
+                    return Err(io::Error::other("Der aktuelle Auftrag bietet keine Pause."));
+                }
+                self.toggle_transfer_pause();
+                self.status(if self.transfers.paused() {
                     "Pause am nächsten Kopierblock."
                 } else {
                     "Transfer fortgesetzt."
                 });
-                self.open_transfer_manager();
             }
             1 => {
                 if self.transfers.current.is_none() {

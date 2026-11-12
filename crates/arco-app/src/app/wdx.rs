@@ -380,9 +380,20 @@ impl App {
             .collect::<io::Result<Vec<_>>>()?;
         let mask = mask.to_owned();
         let extension = extension.map(str::to_owned);
-        self.start_job(
-            "Lese WDX-Werte für die Umbenennung …",
+        let description = super::JobDescription::new(
+            crate::OperationKind::Rename,
+            format!(
+                "{} · {}",
+                crate::locale::tr("Ausgewählte Einträge"),
+                paths.len()
+            ),
+            String::new(),
+        );
+        self.close_dialog();
+        self.start_operation_job(
+            "WDX-Umbenennvorschau vorbereiten",
             false,
+            description,
             move |job| {
                 let metadata = paths
                     .iter()

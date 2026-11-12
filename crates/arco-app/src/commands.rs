@@ -1,7 +1,7 @@
 use crate::app::{
-    App, ArchiveInput, FtpEdit, FtpEndpoint, FtpView, Navigation, Outcome, PluginFileAction,
-    PromptTicket, SyncReview, SyncSetup, Viewer, ViewerRequest, WdxSearchTarget, ftp_modified,
-    strings,
+    App, ArchiveInput, FtpEdit, FtpEndpoint, FtpView, JobDescription, Navigation, Outcome,
+    PluginFileAction, PromptTicket, SyncReview, SyncSetup, Viewer, ViewerRequest, WdxSearchTarget,
+    ftp_modified, strings,
 };
 use crate::panel::{ArchiveTab, FtpLocation, Location, Tab, WfxLocation};
 use crate::preview;
@@ -25,6 +25,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use zeroize::Zeroizing;
+
+#[derive(Clone)]
+pub(crate) struct RenameDraft {
+    paths: Vec<PathBuf>,
+    times: rename::Times,
+    mask: String,
+    extension: String,
+    search: crate::RenameSearch,
+    separate: bool,
+}
 
 pub enum Pending {
     ShellTransfer(Vec<PathBuf>, arco_windows::ShellAction, bool),
@@ -250,6 +260,24 @@ const VIRTUAL_SHELL_FOLDERS: &[(&str, &str)] = &[
 fn asks_target_password(archive: &ArchiveTab) -> bool {
     is_zip(&archive.file)
         || (archive.catalog.contains_encrypted_entries() && archive.password().is_none())
+}
+
+fn extraction_target(value: &str, base: &Path) -> io::Result<PathBuf> {
+    let value = value.trim().trim_matches('"').trim();
+    if value.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            crate::locale::tr("Gib einen Zielordner ein.").to_owned(),
+        ));
+    }
+    let target = base.join(value);
+    if !target.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            crate::locale::tr("Der Zielordner muss eindeutig angegeben werden.").to_owned(),
+        ));
+    }
+    Ok(target)
 }
 
 pub const COMMANDS: &[(&str, &str)] = &[
@@ -787,6 +815,7 @@ impl App {
                     | "help"
                     | "cancel-job"
                     | "copy-result"
+                    | "rename-back"
                     | "copy-names"
                     | "copy-details"
                     | "copy-source-path"
@@ -1179,7 +1208,13 @@ impl App {
             }
             "help" => self.text("Arco Commander · Tastatur", &self.keyboard_help()),
             "cancel-job" => self.cancel(),
-            "close-dialog" => self.close_dialog(),
+            "rename-back" => self.restore_rename_draft(""),
+            "close-dialog" => {
+                if matches!(self.pending, Some(Pending::Rename(..) | Pending::ApplyRename(_))) {
+                    self.rename_draft = None;
+                }
+                self.close_dialog();
+            }
             _ => (),
         }
         self.publish(self.active);
@@ -1236,6 +1271,22 @@ impl App {
         ui.set_dialog_revision(ui.get_dialog_revision().wrapping_add(1));
     }
 
+    pub(crate) fn management_review(
+        &mut self,
+        kind: crate::OperationKind,
+        rows: Vec<crate::ReviewRow>,
+        labels: [&str; 2],
+        confirm: &str,
+    ) {
+        let ui = self.ui();
+        ui.set_review_kind(kind);
+        ui.set_review_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+        ui.set_review_primary_label(crate::locale::tr(labels[0]).into());
+        ui.set_review_secondary_label(crate::locale::tr(labels[1]).into());
+        ui.set_review_confirm_label(crate::locale::tr(confirm).into());
+        ui.set_review_can_edit(false);
+    }
+
     pub(crate) fn close_dialog(&mut self) {
         if let Some(Pending::SyncReview(review)) = self.pending.take() {
             review.close();
@@ -1247,6 +1298,9 @@ impl App {
         ui.set_dialog_kind("".into());
         ui.set_dialog_value("".into());
         ui.set_dialog_second("".into());
+        ui.set_review_rows(Default::default());
+        ui.set_review_can_confirm(false);
+        ui.set_review_can_edit(false);
         ui.set_viewer_image(slint::Image::default());
         ui.set_viewer_notice("".into());
         ui.set_file_conflict(Default::default());
@@ -1260,8 +1314,16 @@ impl App {
             return;
         };
         let filter = self.ui().get_dialog_transfer_filter().max(0) as usize;
+        let target_folder = self.ui().get_dialog_operation_target();
         self.close_dialog();
-        if let Err(error) = self.execute(pending, value, second, option.max(0) as usize, filter) {
+        if let Err(error) = self.execute(
+            pending,
+            value,
+            second,
+            option.max(0) as usize,
+            filter,
+            &target_folder,
+        ) {
             self.text("Aktion konnte nicht ausgeführt werden", &error.to_string());
         }
         self.publish(self.active);
@@ -1274,6 +1336,7 @@ impl App {
         second: &str,
         option: usize,
         transfer_filter: usize,
+        target_folder: &str,
     ) -> io::Result<()> {
         match pending {
             Pending::TabFileFilter(side, request) => {
@@ -1363,15 +1426,25 @@ impl App {
                 let ignore = self.ignore_list();
                 let side = self.active;
                 let request = self.panels[side].request;
-                self.start_job("Suche nach Duplikaten …", false, move |job| {
-                    let groups = tools::duplicates(
-                        std::slice::from_ref(&path),
-                        mode,
-                        ignore.as_deref(),
-                        &job.cancel,
-                    )?;
-                    crate::app::duplicate_result(side, request, path, groups, &job.cancel)
-                });
+                let description = JobDescription::new(
+                    crate::OperationKind::Search,
+                    display_path(&path),
+                    String::new(),
+                );
+                self.start_operation_job(
+                    "Suche nach Duplikaten …",
+                    false,
+                    description,
+                    move |job| {
+                        let groups = tools::duplicates(
+                            std::slice::from_ref(&path),
+                            mode,
+                            ignore.as_deref(),
+                            &job.cancel,
+                        )?;
+                        crate::app::duplicate_result(side, request, path, groups, &job.cancel)
+                    },
+                );
             }
             Pending::DuplicateFields(path) => self.find_duplicate_fields(path, value, option)?,
             Pending::Buttonbar => self.buttonbar_list(option),
@@ -1421,6 +1494,7 @@ impl App {
                 }
             }
             Pending::ExternalPack(paths, base, directory, names) => {
+                let directory = extraction_target(target_folder, &directory)?;
                 let name = names
                     .get(option)
                     .ok_or_else(|| io::Error::other("Wähle ein Packerprofil."))?;
@@ -1546,8 +1620,33 @@ impl App {
             }
             Pending::RenameSetup(setup) => self.submit_rename_setup(setup, value, option)?,
             Pending::ApplyRename(plan) => {
-                self.start_job("Benenne Dateien um …", true, move |_| {
-                    plan.apply(arco_windows::rename_noreplace)?;
+                self.rename_draft = None;
+                let description = JobDescription::new(
+                    crate::OperationKind::Rename,
+                    format!(
+                        "{} · {}",
+                        crate::locale::tr("Ausgewählte Einträge"),
+                        plan.entries().len()
+                    ),
+                    String::new(),
+                );
+                self.start_operation_job("Dateien umbenennen", true, description, move |job| {
+                    let mut last = std::time::Instant::now() - std::time::Duration::from_secs(1);
+                    let mut previous_phase = None;
+                    plan.apply_with_progress(
+                        &job.cancel,
+                        arco_windows::rename_noreplace,
+                        |update| {
+                            if last.elapsed() >= std::time::Duration::from_millis(100)
+                                || previous_phase != Some(update.phase)
+                                || update.completed == update.total
+                            {
+                                last = std::time::Instant::now();
+                                previous_phase = Some(update.phase);
+                                job.rename_progress(update);
+                            }
+                        },
+                    )?;
                     Ok(Outcome::Renamed(plan))
                 })
             }
@@ -1605,13 +1704,25 @@ impl App {
             Pending::ShellElevation => self.choose_shell_elevation(option)?,
             Pending::Delete(paths, permanent) => {
                 self.current_mut().remember_selection();
-                self.start_job("Löschen …", true, move |job| {
+                let label = if permanent {
+                    "Endgültig löschen"
+                } else {
+                    "In den Papierkorb"
+                };
+                let detail = format!(
+                    "{} · {}",
+                    crate::locale::tr("Ausgewählte Einträge"),
+                    paths.len()
+                );
+                self.start_delete_job(label, detail, move |job| {
                     let mut report = TransferReport::default();
-                    for path in paths {
+                    let total = paths.len();
+                    for (index, path) in paths.into_iter().enumerate() {
                         if job.cancel.load(Ordering::Relaxed) {
                             report.cancelled = true;
                             break;
                         }
+                        job.deletion_progress(display_path(&path), index, total);
                         let result = if permanent {
                             delete_path(&path)
                         } else {
@@ -1623,6 +1734,7 @@ impl App {
                                 .errors
                                 .push(format!("{}: {error}", display_path(&path))),
                         }
+                        job.deletion_progress(display_path(&path), index + 1, total);
                     }
                     Ok(Outcome::Report("Löschen".into(), report))
                 });
@@ -1654,7 +1766,12 @@ impl App {
                         self.search_archive(side, request, archive, query, None);
                     }
                 } else if let Location::Local(path) = location {
-                    self.start_job("Suche läuft …", false, move |job| {
+                    let description = JobDescription::new(
+                        crate::OperationKind::Search,
+                        display_path(&path),
+                        String::new(),
+                    );
+                    self.start_operation_job("Suche läuft …", false, description, move |job| {
                         let entries =
                             tools::search(std::slice::from_ref(&path), &query, &job.cancel)?;
                         Ok(Outcome::Entries {
@@ -1853,6 +1970,7 @@ impl App {
                 });
             }
             Pending::ZipPack(paths, base, destination) => {
+                let destination = extraction_target(target_folder, &destination)?;
                 let volumes = match option {
                     8 => Some((
                         VolumePacking::Sas,
@@ -1943,10 +2061,10 @@ impl App {
                 if option == 6 && second.encode_utf16().count() > archives::ZIP_SFX_PASSWORD_LIMIT {
                     return Err(io::Error::other("Das Passwort ist für ZIP-SFX zu lang."));
                 }
-                self.start_progress_job(
+                self.start_operation_job(
                     "Erstelle Archiv …",
                     true,
-                    display_path(&destination),
+                    JobDescription::files(crate::OperationKind::Pack, &paths, &destination),
                     move |job| {
                         let password = password.as_ref().map(|password| password.as_str());
                         if option == 6 {
@@ -1957,13 +2075,14 @@ impl App {
                                     "arco-zip-sfx.exe fehlt neben Arco Commander.",
                                 ));
                             }
-                            archives::create_zip_sfx(
+                            archives::create_zip_sfx_with_progress(
                                 &paths,
                                 &base,
                                 &destination,
                                 &stub,
                                 password,
                                 &job.cancel,
+                                job.archive_progress(),
                             )?;
                         } else if let Some(password) = password.filter(|_| option == 4) {
                             archive_view::pack_encrypted_7z_sfx(
@@ -2006,12 +2125,13 @@ impl App {
                         } else if option == 14 {
                             let password = password
                                 .ok_or_else(|| io::Error::other("ZipCrypto-Passwort fehlt."))?;
-                            archives::create_zip_zipcrypto(
+                            archives::create_zip_zipcrypto_with_progress(
                                 &paths,
                                 &base,
                                 &destination,
                                 password,
                                 &job.cancel,
+                                job.archive_progress(),
                             )?;
                         } else {
                             archives::create_zip_with_progress(
@@ -2051,10 +2171,10 @@ impl App {
                             "Gib eine Teilgröße von 1 bis 4095 MiB ein."
                         })
                     })?;
-                self.start_progress_job(
+                self.start_operation_job(
                     "Erstelle Mehrteiler …",
                     true,
-                    display_path(&destination),
+                    JobDescription::files(crate::OperationKind::Pack, &paths, &destination),
                     move |job| {
                         let count = match format {
                             VolumePacking::Sas => arco_core::legacy_archives::pack_uc2_sas(
@@ -2087,11 +2207,12 @@ impl App {
                 );
             }
             Pending::ArchiveExtract(archive, target, selection) => {
+                let target = extraction_target(value, &target)?;
                 self.extract_archive_selection(
                     archive,
                     target,
                     selection,
-                    (!value.is_empty()).then(|| value.to_owned()),
+                    (!second.is_empty()).then(|| second.to_owned()),
                 );
             }
             Pending::ArchiveUnlock(side, target, navigation) => {
@@ -2135,15 +2256,34 @@ impl App {
                 }
             }
             Pending::ZipRead(path, target, test) => {
-                let password = (!value.is_empty()).then(|| Zeroizing::new(value.to_owned()));
-                self.start_progress_job(
+                let target = if test {
+                    target
+                } else {
+                    extraction_target(value, &target)?
+                };
+                let secret = if test { value } else { second };
+                let password = (!secret.is_empty()).then(|| Zeroizing::new(secret.to_owned()));
+                let kind = if test {
+                    crate::OperationKind::Task
+                } else {
+                    crate::OperationKind::Extract
+                };
+                self.start_operation_job(
                     if test {
                         "Prüfe Archiv …"
                     } else {
                         "Entpacke Archiv …"
                     },
                     !test,
-                    display_path(&path),
+                    JobDescription::new(
+                        kind,
+                        display_path(&path),
+                        if test {
+                            String::new()
+                        } else {
+                            display_path(&target)
+                        },
+                    ),
                     move |job| {
                         let password = password.as_ref().map(|password| password.as_str());
                         let count = if test {
@@ -2226,11 +2366,28 @@ impl App {
                     second
                 })?);
                 let name = value.to_string();
-                self.enqueue_virtual_transfer("FTP-Download", true, move |job| {
+                let source = format!("{directory}{name}");
+                let description = JobDescription::new(
+                    crate::OperationKind::Ftp,
+                    source.clone(),
+                    display_path(&target),
+                );
+                self.enqueue_virtual_operation("FTP-Download", true, description, move |job| {
+                    job.phase(if option == 1 {
+                        "FTP-Download fortsetzen …"
+                    } else {
+                        "FTP-Datei herunterladen …"
+                    });
                     if option == 1 {
                         session.download_resuming(&directory, &name, &target, &job.cancel)?;
                     } else {
-                        session.download(&directory, &name, &target, &job.cancel)?;
+                        session.download_with_progress(
+                            &directory,
+                            &name,
+                            &target,
+                            &job.cancel,
+                            job.ftp_download_progress(source, None),
+                        )?;
                     }
                     Ok(Outcome::Report(
                         format!("FTP-Download · {}", display_path(&target)),
@@ -2249,7 +2406,13 @@ impl App {
                             && ftp.location.directory == directory
                     })
                 });
-                self.enqueue_virtual_transfer("FTP-Upload", in_panel, move |job| {
+                let description = JobDescription::new(
+                    crate::OperationKind::Ftp,
+                    display_path(&source),
+                    format!("{directory}{name}"),
+                );
+                self.enqueue_virtual_operation("FTP-Upload", in_panel, description, move |job| {
+                    job.phase("FTP-Datei hochladen …");
                     session.upload(&directory, &source, &name, option == 1, &job.cancel)?;
                     if in_panel {
                         return Ok(Outcome::Report(
@@ -2645,7 +2808,7 @@ impl App {
         }
     }
 
-    fn prepare_operation_dialog(
+    pub(crate) fn prepare_operation_dialog(
         &self,
         paths: &[PathBuf],
         target: &str,
@@ -2657,6 +2820,7 @@ impl App {
         ui.set_dialog_operation_target(target.into());
         ui.set_dialog_operation_multiple(multiple);
         ui.set_dialog_operation_move(moving);
+        ui.set_dialog_operation_note(Default::default());
     }
 
     fn delete_dialog(&mut self, permanent: bool) {
@@ -2708,6 +2872,10 @@ impl App {
         multi: bool,
         template: Option<profile::RenameTemplate>,
     ) {
+        if self.job.is_some() && self.ui().get_job_kind() == crate::OperationKind::Rename {
+            self.status("Ein Auftrag läuft bereits.");
+            return;
+        }
         let paths = if multi {
             self.current().paths()
         } else {
@@ -2721,6 +2889,15 @@ impl App {
             self.status("Wähle Dateien oder Ordner.");
             return;
         }
+        self.rename_draft = None;
+        self.ui().set_rename_selection(
+            format!(
+                "{} · {}",
+                crate::locale::tr("Ausgewählte Einträge"),
+                paths.len()
+            )
+            .into(),
+        );
         let old = paths[0]
             .file_name()
             .unwrap_or_default()
@@ -2733,11 +2910,7 @@ impl App {
         let data = if multi {
             Dialog {
                 title: "Mehrfach umbenennen",
-                description: if separate {
-                    "[N] Name, [E] Erweiterung, [A] ganzer Name, [B] Elternordner, [C10+5:3] Zähler, [YMD] Datum, [hms] Uhrzeit, [U]/[L]/[F]/[n] Schreibweise, [X] Zwischenablage, [=Plugin.Feld] WDX-Wert."
-                } else {
-                    "Vorlage mit gemeinsamer Maske. [N] Name, [E] Erweiterung, [F] ganzer Name."
-                },
+                description: "",
                 value: template.as_ref().map_or("[N]", |item| item.mask.as_str()),
                 placeholder: "Namensmaske",
                 ..Default::default()
@@ -2803,12 +2976,25 @@ impl App {
         extension: &str,
         search: crate::RenameSearch,
     ) {
+        if self.job.is_some() {
+            self.ui()
+                .set_dialog_description(crate::locale::tr("Ein Auftrag läuft bereits.").into());
+            return;
+        }
         if !matches!(self.pending, Some(Pending::Rename(_, true, _))) {
             return;
         }
         let Some(Pending::Rename(paths, true, times)) = self.pending.take() else {
             return;
         };
+        self.rename_draft = Some(RenameDraft {
+            paths: paths.clone(),
+            times,
+            mask: mask.into(),
+            extension: extension.into(),
+            search: search.clone(),
+            separate: self.ui().get_rename_separate(),
+        });
         let extension = self.ui().get_rename_separate().then_some(extension);
         let search = rename::SearchOptions {
             find: search.find.to_string(),
@@ -2850,11 +3036,10 @@ impl App {
         times: rename::Times,
     ) -> io::Result<()> {
         let mut needs_clipboard = false;
-        let mut needs_capture = false;
         let mut fields = Vec::new();
         for expression in std::iter::once(mask).chain(extension) {
             needs_clipboard |= rename::uses_clipboard(expression)?;
-            needs_capture |= rename::uses_capture_time(expression)?;
+            rename::uses_capture_time(expression)?;
             for field in rename::wdx_fields(expression)? {
                 if !fields.contains(&field) {
                     fields.push(field);
@@ -2874,45 +3059,70 @@ impl App {
             self.plan_wdx_rename(paths, mask, extension, &fields, search, times, clipboard)?;
             return Ok(());
         }
-        if needs_capture {
-            let mask = mask.to_owned();
-            let extension = extension.map(str::to_owned);
-            self.start_job(
-                "Lese Aufnahmedaten für die Umbenennung …",
-                false,
-                move |job| {
-                    let plan = rename::Plan::new_with_search_at(
-                        &paths,
-                        &mask,
-                        extension.as_deref(),
-                        search.as_ref(),
-                        rename::PreviewContext {
-                            times,
-                            cancel: Some(&job.cancel),
-                        },
-                        clipboard.as_deref(),
-                        |_, _| None,
-                    )?;
-                    files::check_cancel(&job.cancel)?;
-                    Ok(Outcome::RenamePreview(plan))
-                },
-            );
-            return Ok(());
-        }
-        let plan = rename::Plan::new_with_search_at(
-            &paths,
-            mask,
-            extension,
-            search.as_ref(),
-            rename::PreviewContext {
-                times,
-                cancel: None,
+        let mask = mask.to_owned();
+        let extension = extension.map(str::to_owned);
+        let description = JobDescription::new(
+            crate::OperationKind::Rename,
+            format!(
+                "{} · {}",
+                crate::locale::tr("Ausgewählte Einträge"),
+                paths.len()
+            ),
+            String::new(),
+        );
+        self.close_dialog();
+        self.start_operation_job(
+            "Umbenennvorschau vorbereiten",
+            false,
+            description,
+            move |job| {
+                job.phase("Namensmasken auswerten …");
+                let plan = rename::Plan::new_with_search_at(
+                    &paths,
+                    &mask,
+                    extension.as_deref(),
+                    search.as_ref(),
+                    rename::PreviewContext {
+                        times,
+                        cancel: Some(&job.cancel),
+                    },
+                    clipboard.as_deref(),
+                    |_, _| None,
+                )?;
+                files::check_cancel(&job.cancel)?;
+                Ok(Outcome::RenamePreview(plan))
             },
-            clipboard.as_deref(),
-            |_, _| None,
-        )?;
-        self.rename_review(plan);
+        );
         Ok(())
+    }
+
+    pub(crate) fn restore_rename_draft(&mut self, notice: &str) {
+        let Some(draft) = self.rename_draft.clone() else {
+            return;
+        };
+        let ui = self.ui();
+        ui.set_rename_separate(draft.separate);
+        ui.set_rename_extension(draft.extension.into());
+        ui.set_rename_search(draft.search);
+        ui.set_rename_selection(
+            format!(
+                "{} · {}",
+                crate::locale::tr("Ausgewählte Einträge"),
+                draft.paths.len()
+            )
+            .into(),
+        );
+        self.dialog(
+            "multi-rename",
+            Pending::Rename(draft.paths, true, draft.times),
+            Dialog {
+                title: "Mehrfach umbenennen",
+                description: notice,
+                value: &draft.mask,
+                placeholder: "Namensmaske",
+                ..Default::default()
+            },
+        );
     }
 
     pub(crate) fn rename_review(&mut self, plan: rename::Plan) {
@@ -2930,14 +3140,43 @@ impl App {
             } else {
                 self.status(format!("Keine Namensänderungen. {description}"));
             }
+            if self.rename_draft.is_some() {
+                self.restore_rename_draft("Keine Namensänderungen.");
+            }
             return;
         }
+        let rows = plan
+            .entries()
+            .iter()
+            .map(|(from, to)| crate::ReviewRow {
+                primary: from
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .as_ref()
+                    .into(),
+                secondary: to
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .as_ref()
+                    .into(),
+                detail: display_path(from.parent().unwrap_or(from)).into(),
+                kind: "rename".into(),
+            })
+            .collect::<Vec<_>>();
+        self.ui()
+            .set_review_rows(slint::ModelRc::from(std::rc::Rc::new(
+                slint::VecModel::from(rows),
+            )));
+        self.ui().set_review_can_confirm(true);
+        self.ui().set_review_can_edit(self.rename_draft.is_some());
         let mut body = String::new();
         for (from, to) in plan.entries() {
             writeln!(body, "{}  →  {}", display_path(from), display_path(to)).unwrap();
         }
         self.dialog(
-            "review",
+            "rename-review",
             Pending::ApplyRename(plan),
             Dialog {
                 title: "Umbenennung prüfen",
@@ -3081,6 +3320,27 @@ impl App {
             self.status("Wähle ein unterstütztes Archiv.");
             return;
         }
+        if !test {
+            let target = self.target().to_path_buf();
+            let value = display_path(&target);
+            self.prepare_operation_dialog(std::slice::from_ref(&path), "", false, false);
+            self.ui().set_dialog_operation_note(
+                crate::locale::tr("Vorhandene Dateien werden nicht überschrieben.").into(),
+            );
+            self.dialog(
+                "archive-extract",
+                Pending::ZipRead(path, target, false),
+                Dialog {
+                    title: "Archiv entpacken",
+                    description: "Gesamtes Archiv",
+                    value: &value,
+                    second_secret: password,
+                    confirm_label: "Entpacken",
+                    ..Default::default()
+                },
+            );
+            return;
+        }
         self.dialog(if password { "input" } else { "confirm" }, Pending::ZipRead(path, self.target().to_path_buf(), test), Dialog {
             title: if test { "Archiv prüfen" } else { "Archiv entpacken" },
             description: if password { "Verschlüsselte Einträge benötigen das Archivpasswort. Vorhandene Dateien im Ziel bleiben erhalten." }
@@ -3099,6 +3359,7 @@ impl App {
         };
         let paths = tab.selected_paths();
         let count = paths.len();
+        let selected = selection_preview(&paths);
         let selection = match Selection::new(archive.folder.clone(), paths) {
             Ok(selection) => selection,
             Err(error) => {
@@ -3111,18 +3372,23 @@ impl App {
             && archive.catalog.contains_encrypted_entries()
             && archive.password().is_none();
         let target = self.target().to_path_buf();
-        let description = format!(
-            "{count} Archiveinträge → {}\nVorhandene Dateien bleiben erhalten.",
-            display_path(&target)
+        let description = format!("{} · {count}", crate::locale::tr("Ausgewählte Einträge"));
+        let value = display_path(&target);
+        self.prepare_operation_dialog(&[], "", false, false);
+        self.ui()
+            .set_dialog_operation_selection(format!("{}\n{selected}", display_path(&file)).into());
+        self.ui().set_dialog_operation_note(
+            crate::locale::tr("Bei vorhandenen Dateien erscheint der Konfliktdialog.").into(),
         );
         self.dialog(
-            if password { "input" } else { "confirm" },
+            "archive-extract",
             Pending::ArchiveExtract(archive.clone(), target, selection),
             Dialog {
                 title: "Archivauswahl entpacken",
                 description: &description,
-                placeholder: "Archivpasswort (bei verschlüsselten Einträgen)",
-                secret: true,
+                value: &value,
+                second_secret: password,
+                confirm_label: "Entpacken",
                 ..Default::default()
             },
         );
@@ -3687,7 +3953,14 @@ impl App {
     }
 
     fn load_ftp(&mut self, session: Arc<ftp::Session>, directory: ftp::Url) {
-        self.start_job("FTP-Verzeichnis wird geladen …", false, move |job| {
+        self.close_dialog();
+        let description = JobDescription::new(
+            crate::OperationKind::Ftp,
+            directory.to_string(),
+            String::new(),
+        );
+        self.start_operation_job("FTP-Verzeichnis laden", false, description, move |job| {
+            job.phase("FTP-Verzeichnis anfordern …");
             let listing = session.list(&directory, &job.cancel)?;
             Ok(Outcome::Ftp(FtpView {
                 session,
@@ -4002,5 +4275,35 @@ pub(crate) fn compatibility_command(name: &str) -> Option<&'static str> {
         "cm_toggleseparatetree1" | "3204" => Some("separate-tree-toggle-one"),
         "cm_toggleseparatetree2" | "3205" => Some("separate-tree-toggle-two"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod operation_dialog_tests {
+    use super::extraction_target;
+
+    #[test]
+    fn extraction_target_resolves_against_the_shown_folder_and_accepts_quoted_paths() {
+        let fixture = tempfile::tempdir().unwrap();
+        let base = fixture.path();
+        assert_eq!(
+            extraction_target("Unterordner", base).unwrap(),
+            base.join("Unterordner")
+        );
+        let other = base.join("Anderer Ordner");
+        assert_eq!(
+            extraction_target(&format!("\"{}\"", other.display()), base).unwrap(),
+            other
+        );
+    }
+
+    #[test]
+    fn extraction_target_rejects_empty_or_ambiguous_destinations() {
+        let fixture = tempfile::tempdir().unwrap();
+        for value in ["", "  ", "\"\""] {
+            assert!(extraction_target(value, fixture.path()).is_err());
+        }
+        #[cfg(windows)]
+        assert!(extraction_target("D:relativ", fixture.path()).is_err());
     }
 }

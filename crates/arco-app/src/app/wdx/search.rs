@@ -380,39 +380,50 @@ impl App {
             show_hidden: self.profile.show_hidden,
             ignore: self.ignore_list(),
         };
-        self.start_job("Suche nach WDX-Feldern …", false, move |job| {
-            let mut directory =
-                tools::search(std::slice::from_ref(&target.path), &query, &job.cancel)?;
-            let count = target.conditions.len();
-            apply_conditions(
-                &mut directory.entries,
-                target.conditions,
-                target.all,
-                |condition, paths| {
-                    let mut hits = HashSet::new();
-                    scan_paths(
-                        &condition.plugin,
-                        &condition.field,
-                        paths,
-                        &job,
-                        |path, value| {
-                            if condition.matcher.matches(&value) {
-                                hits.insert(path.to_path_buf());
-                            }
-                        },
-                    )?;
-                    Ok(hits)
-                },
-            )?;
-            Ok(Outcome::Entries {
-                side: target.side,
-                location: Location::Local(target.path),
-                request: target.request,
-                entries: directory,
-                label: format!("WDX-Suchtreffer · {count} Bedingungen"),
-                scope: arco_core::view_settings::Scope::Search,
-            })
-        });
+        let description = crate::app::JobDescription::new(
+            crate::OperationKind::Search,
+            crate::display_path(&target.path),
+            String::new(),
+        );
+        self.start_operation_job(
+            "Suche nach WDX-Feldern …",
+            false,
+            description,
+            move |job| {
+                let mut directory =
+                    tools::search(std::slice::from_ref(&target.path), &query, &job.cancel)?;
+                job.phase("WDX-Bedingungen prüfen …");
+                let count = target.conditions.len();
+                apply_conditions(
+                    &mut directory.entries,
+                    target.conditions,
+                    target.all,
+                    |condition, paths| {
+                        let mut hits = HashSet::new();
+                        scan_paths(
+                            &condition.plugin,
+                            &condition.field,
+                            paths,
+                            &job,
+                            |path, value| {
+                                if condition.matcher.matches(&value) {
+                                    hits.insert(path.to_path_buf());
+                                }
+                            },
+                        )?;
+                        Ok(hits)
+                    },
+                )?;
+                Ok(Outcome::Entries {
+                    side: target.side,
+                    location: Location::Local(target.path),
+                    request: target.request,
+                    entries: directory,
+                    label: format!("WDX-Suchtreffer · {count} Bedingungen"),
+                    scope: arco_core::view_settings::Scope::Search,
+                })
+            },
+        );
         Ok(())
     }
 

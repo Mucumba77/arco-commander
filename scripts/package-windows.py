@@ -26,6 +26,7 @@ DOCS = (
     "LICENSE", "README.md", "CONTRIBUTING.md", "SECURITY.md",
     "CHANGELOG.md", "FUNKTIONSMATRIX.md", "PLAN.md",
     "TOTAL-COMMANDER-REFERENZ.md", "docs/RELEASE.md",
+    "docs/UI-PRUEFUNG.md", "docs/WEITERARBEIT.md",
     "docs/branding/arco-commander.svg",
     "docs/screenshots/hauptfenster.jpg", "docs/screenshots/kopierfortschritt.jpg",
     "docs/screenshots/lister.jpg",

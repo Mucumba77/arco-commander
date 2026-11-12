@@ -62,6 +62,7 @@ pub(super) struct Tree {
     visible: Vec<(usize, usize)>,
     model: Rc<VecModel<TreeRow>>,
     focused: bool,
+    clicks: super::pointer::Clicks<usize>,
 }
 
 pub(super) struct Loaded {
@@ -97,6 +98,7 @@ impl Tree {
             visible: Vec::new(),
             model: Rc::new(VecModel::default()),
             focused: !shell,
+            clicks: super::pointer::Clicks::default(),
         };
         tree.rebuild();
         tree
@@ -349,6 +351,23 @@ impl App {
         };
         let Some(&(index, _)) = tree.visible.get(row) else {
             return;
+        };
+        let operation = if operation == 0 {
+            if arco_windows::cursor_screen().is_some_and(|point| {
+                tree.clicks.click(
+                    index,
+                    point,
+                    std::time::Instant::now(),
+                    arco_windows::is_double_click,
+                )
+            }) {
+                2
+            } else {
+                0
+            }
+        } else {
+            tree.clicks.clear();
+            operation
         };
         tree.selected = index;
         tree.focused = true;

@@ -10,7 +10,7 @@ use windows::{
             IFileOpenDialog, SIGDN_FILESYSPATH,
         },
     },
-    core::{HRESULT, w},
+    core::{HRESULT, PCWSTR, w},
 };
 use windows_sys::Win32::{
     Foundation::{ERROR_CANCELLED, NO_ERROR},
@@ -24,6 +24,10 @@ use windows_sys::Win32::{
 use zeroize::Zeroizing;
 
 pub fn destination() -> io::Result<Option<PathBuf>> {
+    folder("Zielordner für das ZIP-Archiv wählen")
+}
+
+pub fn folder(title: &str) -> io::Result<Option<PathBuf>> {
     struct Com;
     impl Drop for Com {
         fn drop(&mut self) {
@@ -39,8 +43,11 @@ pub fn destination() -> io::Result<Option<PathBuf>> {
             dialog.SetOptions(
                 dialog.GetOptions()? | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST,
             )?;
-            dialog.SetTitle(w!("Zielordner für das ZIP-Archiv wählen"))?;
-            if let Err(error) = dialog.Show(None) {
+            let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+            dialog.SetTitle(PCWSTR(title.as_ptr()))?;
+            let owner = windows_sys::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow();
+            let owner = (!owner.is_null()).then_some(windows::Win32::Foundation::HWND(owner));
+            if let Err(error) = dialog.Show(owner) {
                 if error.code() == HRESULT::from_win32(1223) {
                     return Ok(None);
                 }

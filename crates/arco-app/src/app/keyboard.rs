@@ -134,6 +134,8 @@ impl App {
         self.sync_editor(true);
         let ui = self.ui();
         ui.set_settings_error("".into());
+        ui.set_settings_error_page(-1);
+        ui.set_settings_status("".into());
         ui.set_settings_page(page as i32);
         ui.set_settings_languages(super::strings(
             crate::locale::LANGUAGES.map(crate::locale::label),
@@ -200,6 +202,8 @@ impl App {
         let Some(editor) = &self.shortcut_editor else {
             return;
         };
+        self.ui()
+            .set_shortcut_dirty(editor.overrides != self.profile.shortcuts);
         let bindings = shortcuts::effective(&editor.overrides);
         let ui = self.ui();
         if rebuild_list {

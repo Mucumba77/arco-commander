@@ -133,15 +133,27 @@ impl App {
             return;
         }
         let options: Vec<_> = names.iter().map(String::as_str).collect();
+        let target = self.target().to_path_buf();
+        let description = format!(
+            "{} · {}",
+            crate::locale::tr("Ausgewählte Einträge"),
+            paths.len()
+        );
+        self.prepare_operation_dialog(&paths, &display_path(&target), false, false);
+        self.ui().set_dialog_operation_note(
+            crate::locale::tr("Die Dateiendung ergibt sich aus dem gewählten Packerprofil.").into(),
+        );
         self.dialog(
-            "input",
-            Pending::ExternalPack(paths, self.current().path.clone(), self.target().to_path_buf(), names.clone()),
+            "archive-pack-profile",
+            Pending::ExternalPack(paths, self.current().path.clone(), target, names.clone()),
             Dialog {
                 title: "Mit Packerprofil packen",
-                description: "Das geprüfte Archiv wird im anderen Fenster gespeichert. Die Endung ergibt sich aus dem Profil.",
+                description: &description,
                 placeholder: "Archivname",
                 value: "archiv",
                 options: &options,
+                options_label: "Packerprofil",
+                confirm_label: "Packen",
                 ..Dialog::default()
             },
         );
@@ -169,10 +181,10 @@ impl App {
         } else {
             directory.join(tools::output_name(&format!("{value}{suffix}"))?)
         };
-        self.start_progress_job(
+        self.start_operation_job(
             "Packe mit externem Profil …",
             true,
-            crate::display_path(&target),
+            super::JobDescription::files(crate::OperationKind::Pack, &paths, &target),
             move |job| {
                 profile.pack(&paths, &base, &target, &job.cancel)?;
                 Ok(Outcome::Notice(format!(

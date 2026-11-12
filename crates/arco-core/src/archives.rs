@@ -195,6 +195,17 @@ pub fn create_zip_zipcrypto(
     password: &str,
     cancel: &AtomicBool,
 ) -> io::Result<()> {
+    create_zip_zipcrypto_with_progress(paths, base, target, password, cancel, |_| {})
+}
+
+pub fn create_zip_zipcrypto_with_progress(
+    paths: &[PathBuf],
+    base: &Path,
+    target: &Path,
+    password: &str,
+    cancel: &AtomicBool,
+    progress: impl FnMut(files::Progress<'_>),
+) -> io::Result<()> {
     if password.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -207,7 +218,7 @@ pub fn create_zip_zipcrypto(
         target,
         Some(ZipEncryption::ZipCrypto(password)),
         cancel,
-        |_| {},
+        progress,
     )
 }
 
@@ -217,7 +228,7 @@ fn create_zip_with_encryption(
     target: &Path,
     encryption: Option<ZipEncryption<'_>>,
     cancel: &AtomicBool,
-    progress: impl FnMut(files::Progress<'_>),
+    mut progress: impl FnMut(files::Progress<'_>),
 ) -> io::Result<()> {
     let plan = plan_sources(paths, base, Path::new(""), cancel)?;
     let parent = target
@@ -225,7 +236,15 @@ fn create_zip_with_encryption(
         .ok_or_else(|| io::Error::other("missing target directory"))?;
     let mut staging = NamedTempFile::new_in(parent)?;
     let mut archive = ZipWriter::new(staging.as_file_mut());
-    write_plan(&mut archive, plan, encryption, cancel, progress)?;
+    let total = write_plan(&mut archive, plan, encryption, cancel, &mut progress)?;
+    progress(files::Progress {
+        path: target,
+        copied: total,
+        total,
+        items: None,
+        current: None,
+        phase: files::ProgressPhase::Finalizing,
+    });
     archive.finish()?.sync_all()?;
     if let Some(ZipEncryption::ZipCrypto(password)) = encryption {
         test_zip(staging.path(), Some(password), cancel)?;
@@ -244,6 +263,18 @@ pub fn create_zip_sfx(
     stub: &Path,
     password: Option<&str>,
     cancel: &AtomicBool,
+) -> io::Result<()> {
+    create_zip_sfx_with_progress(paths, base, target, stub, password, cancel, |_| {})
+}
+
+pub fn create_zip_sfx_with_progress(
+    paths: &[PathBuf],
+    base: &Path,
+    target: &Path,
+    stub: &Path,
+    password: Option<&str>,
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(files::Progress<'_>),
 ) -> io::Result<()> {
     if password.is_some_and(|password| {
         password.is_empty()
@@ -280,13 +311,21 @@ pub fn create_zip_sfx(
     files::ensure_unchanged(stub, &metadata)?;
     let mut archive = ZipWriter::new(staging.as_file_mut());
     archive.set_comment(SFX_COMMENT)?;
-    write_plan(
+    let total = write_plan(
         &mut archive,
         plan,
         password.map(ZipEncryption::Aes),
         cancel,
-        |_| {},
+        &mut progress,
     )?;
+    progress(files::Progress {
+        path: target,
+        copied: total,
+        total,
+        items: None,
+        current: None,
+        phase: files::ProgressPhase::Finalizing,
+    });
     archive.finish()?.sync_all()?;
     test_zip(staging.path(), password, cancel)?;
     files::check_cancel(cancel)?;
@@ -780,12 +819,14 @@ fn write_plan(
     encryption: Option<ZipEncryption<'_>>,
     cancel: &AtomicBool,
     mut progress: impl FnMut(files::Progress<'_>),
-) -> io::Result<()> {
+) -> io::Result<u64> {
     let total = plan
         .iter()
         .filter(|(_, _, meta)| meta.is_file())
         .fold(0u64, |bytes, (_, _, meta)| bytes.saturating_add(meta.len()));
     let mut completed = 0u64;
+    let total_files = plan.iter().filter(|(_, _, meta)| meta.is_file()).count();
+    let mut file_index = 0;
     for (path, name, meta) in plan {
         files::check_cancel(cancel)?;
         files::ensure_unchanged(&path, &meta)?;
@@ -796,6 +837,7 @@ fn write_plan(
         if meta.is_dir() {
             archive.add_directory(name, options)?;
         } else {
+            file_index += 1;
             let options = options
                 .compression_method(CompressionMethod::Deflated)
                 .large_file(
@@ -821,6 +863,9 @@ fn write_plan(
                         path: &path,
                         copied: completed.saturating_add(copied),
                         total,
+                        items: Some((file_index, total_files)),
+                        current: Some((copied, meta.len())),
+                        phase: files::ProgressPhase::Data,
                     });
                 },
             )?;
@@ -831,7 +876,7 @@ fn write_plan(
             completed = completed.saturating_add(actual);
         }
     }
-    Ok(())
+    Ok(total)
 }
 
 pub fn extract_zip(
@@ -887,6 +932,10 @@ pub(crate) fn extract_zip_selection_with_progress(
         .fold(0u64, |bytes, (member, _)| bytes.saturating_add(member.size));
     let mut completed = 0u64;
     let mut count = 0;
+    let total_files = entries
+        .iter()
+        .filter(|(member, _)| !member.directory)
+        .count();
     for (member, relative) in entries {
         files::check_cancel(cancel)?;
         let target = base.join(&relative);
@@ -915,6 +964,9 @@ pub(crate) fn extract_zip_selection_with_progress(
                     path: &member.path,
                     copied: completed.saturating_add(copied),
                     total,
+                    items: Some((count + 1, total_files)),
+                    current: Some((copied, member.size)),
+                    phase: files::ProgressPhase::Data,
                 });
             },
         )?;
@@ -1098,10 +1150,19 @@ mod tests {
         let zip = fixture.path().join("archive.zip");
         let cancel = AtomicBool::new(false);
         let mut pack = Vec::new();
+        let mut finalized = false;
         create_zip_with_progress(&[first, second], &source, &zip, None, &cancel, |p| {
-            pack.push((p.copied, p.total));
+            if p.phase == files::ProgressPhase::Finalizing {
+                finalized = true;
+                assert_eq!(p.copied, p.total);
+            } else {
+                let (copied, total) = p.current.expect("current file progress");
+                assert!(copied <= total);
+                pack.push((p.copied, p.total));
+            }
         })
         .unwrap();
+        assert!(finalized);
         let mut extract = Vec::new();
         extract_zip_selection_with_progress(&zip, &destination, None, None, &cancel, |p| {
             extract.push((p.copied, p.total));
@@ -1125,6 +1186,98 @@ mod tests {
     }
     use crate::archive_view::{self, Catalog, Selection};
     use std::io::Write;
+
+    #[test]
+    fn sfx_and_zipcrypto_report_bytes_and_a_separate_finalization_phase() {
+        for sfx in [false, true] {
+            let fixture = tempfile::tempdir().unwrap();
+            let source = fixture.path().join("input.txt");
+            fs::write(&source, vec![b'A'; 65536]).unwrap();
+            let target = fixture
+                .path()
+                .join(if sfx { "output.exe" } else { "output.zip" });
+            let stub = fixture.path().join("stub.exe");
+            fs::write(&stub, b"MZ example self-extractor prefix").unwrap();
+            let cancel = AtomicBool::new(false);
+            let mut events = Vec::new();
+            let progress = |p: files::Progress<'_>| {
+                events.push((p.phase, p.copied, p.total, p.current));
+            };
+            if sfx {
+                create_zip_sfx_with_progress(
+                    &[source],
+                    fixture.path(),
+                    &target,
+                    &stub,
+                    None,
+                    &cancel,
+                    progress,
+                )
+                .unwrap();
+            } else {
+                create_zip_zipcrypto_with_progress(
+                    &[source],
+                    fixture.path(),
+                    &target,
+                    "test-only",
+                    &cancel,
+                    progress,
+                )
+                .unwrap();
+            }
+            assert!(events.iter().any(|&(phase, _, _, current)| phase
+                == files::ProgressPhase::Data
+                && current == Some((65536, 65536))));
+            assert_eq!(
+                events.last(),
+                Some(&(files::ProgressPhase::Finalizing, 65536, 65536, None))
+            );
+            assert_eq!(
+                test_zip(&target, (!sfx).then_some("test-only"), &cancel).unwrap(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn cancelling_finalization_does_not_publish_sfx_or_zipcrypto_output() {
+        for sfx in [false, true] {
+            let fixture = tempfile::tempdir().unwrap();
+            let source = fixture.path().join("input.txt");
+            fs::write(&source, b"sample data").unwrap();
+            let target = fixture.path().join("output");
+            let stub = fixture.path().join("stub.exe");
+            fs::write(&stub, b"MZ example self-extractor prefix").unwrap();
+            let cancel = AtomicBool::new(false);
+            let progress = |p: files::Progress<'_>| {
+                if p.phase == files::ProgressPhase::Finalizing {
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            };
+            let result = if sfx {
+                create_zip_sfx_with_progress(
+                    &[source],
+                    fixture.path(),
+                    &target,
+                    &stub,
+                    None,
+                    &cancel,
+                    progress,
+                )
+            } else {
+                create_zip_zipcrypto_with_progress(
+                    &[source],
+                    fixture.path(),
+                    &target,
+                    "test-only",
+                    &cancel,
+                    progress,
+                )
+            };
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted);
+            assert!(!target.exists());
+        }
+    }
 
     #[test]
     fn zipcrypto_edits_keep_encryption_and_reject_wrong_password() {

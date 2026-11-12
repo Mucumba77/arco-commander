@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 
 impl App {
     pub(crate) fn show_plugin_manager(&mut self, selection: Option<usize>) {
-        let entries = self
-            .profile
-            .plugins
+        let indices = self.visible_plugin_indices();
+        let entries = indices
             .iter()
+            .map(|&index| &self.profile.plugins[index])
             .map(|item| PluginRowData {
                 name: item.name.as_str().into(),
                 kind: item.interface.label().into(),
@@ -26,15 +26,50 @@ impl App {
             .collect::<Vec<_>>();
         let ui = self.ui();
         let selected = selection
-            .filter(|&index| index < entries.len())
-            .map_or_else(
-                || if entries.is_empty() { -1 } else { 0 },
-                |index| index as i32,
-            );
+            .and_then(|index| indices.iter().position(|&candidate| candidate == index))
+            .map_or(if entries.is_empty() { -1 } else { 0 }, |index| {
+                index as i32
+            });
+        ui.set_plugin_query(self.plugin_filter.as_str().into());
+        ui.set_plugin_total(self.profile.plugins.len() as i32);
+        ui.set_plugin_notice("".into());
         ui.set_plugin_entries(ModelRc::new(VecModel::from(entries)));
         ui.set_plugin_selection(selected);
         ui.set_dialog_kind("plugins".into());
         self.pending = None;
+    }
+
+    fn visible_plugin_indices(&self) -> Vec<usize> {
+        self.profile
+            .plugins
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                let path = display_path(&entry.path);
+                plugin_matches(
+                    &self.plugin_filter,
+                    &[
+                        &entry.name,
+                        entry.interface.label(),
+                        entry.architecture.label(),
+                        &entry.masks,
+                        &path,
+                    ],
+                )
+                .then_some(index)
+            })
+            .collect()
+    }
+
+    pub(super) fn filter_plugins(&mut self, query: &str) {
+        if self.ui().get_dialog_kind() != "plugins" {
+            return;
+        }
+        let selected = usize::try_from(self.ui().get_plugin_selection())
+            .ok()
+            .and_then(|index| self.visible_plugin_indices().get(index).copied());
+        self.plugin_filter = query.into();
+        self.show_plugin_manager(selected);
     }
 
     pub(super) fn operate_plugin(&mut self, action: &str, index: i32) {
@@ -48,11 +83,11 @@ impl App {
             }
             _ => usize::try_from(index)
                 .ok()
-                .filter(|&index| index < self.profile.plugins.len())
+                .and_then(|index| self.visible_plugin_indices().get(index).copied())
                 .map_or(Ok(()), |index| self.plugin_action(action, index)),
         };
         if let Err(error) = result {
-            self.text("Plugin-Verwaltung", &error.to_string());
+            self.ui().set_plugin_notice(error.to_string().into());
         }
     }
 
@@ -141,7 +176,9 @@ impl App {
             }
             "probe" => {
                 self.close_dialog();
-                self.start_job("Prüfe Plugin im Host …", false, move |job| {
+                let description = super::JobDescription::new(crate::OperationKind::Plugin, display_path(&entry.path), String::new());
+                self.start_operation_job("Plugin prüfen", false, description, move |job| {
+                    job.phase("Plugin-Schnittstellen prüfen …");
                     let rows = plugin::probe(entry.interface, &entry.path, &job.cancel)
                         .map_err(|error| plugin_error(&entry.name, error))?;
                     Ok(Outcome::Text(format!("{} · {} · {}", entry.name, entry.interface.label(), entry.architecture.label()), describe(rows)))
@@ -204,16 +241,24 @@ impl App {
         });
         self.commit_plugins(plugins)?;
         if let Some(package) = last_package {
-            match plugin::remove_package(package, &self.plugin_root()) {
-                Ok(()) => (),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => (),
-                Err(error) => {
-                    return Err(io::Error::other(format!(
-                        "Registrierung entfernt. Paketdateien unter {} konnten nicht entfernt werden: {error}",
-                        display_path(package)
-                    )));
-                }
-            }
+            let package = package.clone();
+            let root = self.plugin_root();
+            let description = super::JobDescription::new(
+                crate::OperationKind::Plugin,
+                display_path(&package),
+                String::new(),
+            );
+            self.start_operation_job("Plugin-Paket entfernen", false, description, move |job| {
+                job.phase("Paketdateien entfernen …");
+                let result = arco_core::files::check_cancel(&job.cancel).and_then(|()| plugin::remove_package(&package, &root));
+                let notice = match result {
+                    Ok(()) => None,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                    Err(error) => Some(format!("Registrierung entfernt. Paketdateien unter {} konnten nicht vollständig entfernt werden: {error}", display_path(&package))),
+                };
+                Ok(Outcome::PluginsUpdated(index.saturating_sub(1), notice))
+            });
+            return Ok(());
         }
         self.show_plugin_manager(Some(index.saturating_sub(1)));
         Ok(())
@@ -249,9 +294,39 @@ impl App {
             ));
         }
         let root = self.plugin_root();
-        self.start_job("Prüfe ZIP-Plugin-Paket …", false, move |job| {
-            Package::read(&path, &root, &job.cancel)
-                .map(|package| Outcome::PluginPackage(Box::new(package)))
+        let description = super::JobDescription::new(
+            crate::OperationKind::Plugin,
+            display_path(&path),
+            display_path(&root),
+        );
+        self.start_operation_job("Plugin-Paket vorbereiten", false, description, move |job| {
+            let mut last = std::time::Instant::now() - std::time::Duration::from_secs(1);
+            let mut previous = None;
+            Package::read_with_progress(&path, &root, &job.cancel, |p| {
+                if last.elapsed() >= std::time::Duration::from_millis(100)
+                    || previous != Some(p.phase)
+                    || p.total == Some(p.completed)
+                {
+                    last = std::time::Instant::now();
+                    previous = Some(p.phase);
+                    job.measured_progress(
+                        String::new(),
+                        super::job_progress::Sample {
+                            source: display_path(p.path),
+                            completed: p.completed,
+                            total: p.total,
+                            phase: match p.phase {
+                                plugin::PackagePhase::Reading => "Plugin-Paket lesen …",
+                                plugin::PackagePhase::Extracting => "Plugin-Paket entpacken …",
+                                plugin::PackagePhase::Checking => "Plugin-Registrierungen prüfen …",
+                            }
+                            .into(),
+                            ..Default::default()
+                        },
+                    );
+                }
+            })
+            .map(|package| Outcome::PluginPackage(Box::new(package)))
         });
         Ok(())
     }
@@ -271,7 +346,16 @@ impl App {
                 display_path(&entry.path)
             );
         }
-        self.dialog("review", Pending::ApplyPluginPackage(Box::new(package)), Dialog {
+        let rows = package.registrations.iter().map(registration_row).collect();
+        self.management_review(
+            crate::OperationKind::Plugin,
+            rows,
+            ["Plugin", "Typ / Architektur"],
+            "Installieren",
+        );
+        self.ui()
+            .set_review_can_confirm(!package.registrations.is_empty());
+        self.dialog("management-review", Pending::ApplyPluginPackage(Box::new(package)), Dialog {
             title: "Plugin-Paket prüfen",
             description: "Die DLLs werden deaktiviert installiert. Beim späteren Laden läuft Plugin-Code mit deinen Windows-Rechten.",
             value: &body,
@@ -301,15 +385,30 @@ impl App {
                 "Gib absolute Pfade zur wincmd.ini und gegebenenfalls zum Programmordner ein.",
             ));
         }
-        self.start_job("Lese Total-Commander-Plugins …", false, move |_| {
-            plugin::read_tc_plugins(&path, root.as_deref()).map(Outcome::PluginImport)
-        });
+        let description = super::JobDescription::new(
+            crate::OperationKind::Plugin,
+            display_path(&path),
+            String::new(),
+        );
+        self.start_operation_job(
+            "Plugin-Registrierungen importieren",
+            false,
+            description,
+            move |job| {
+                job.phase("Total-Commander-Registrierungen auswerten …");
+                arco_core::files::check_cancel(&job.cancel)?;
+                let imported = plugin::read_tc_plugins(&path, root.as_deref())?;
+                arco_core::files::check_cancel(&job.cancel)?;
+                Ok(Outcome::PluginImport(imported))
+            },
+        );
         Ok(())
     }
 
     pub(super) fn review_plugin_import(&mut self, import: TcRegistrations) {
         let mut body = String::new();
         let mut candidates = Vec::new();
+        let mut rows = Vec::new();
         let _ = writeln!(
             body,
             "{} Registrierungen mit fehlenden oder nicht unterstützten Angaben übersprungen.\n",
@@ -337,20 +436,37 @@ impl App {
             if entry.tc_detection.is_some() {
                 let _ = writeln!(body, "  TC-Erkennungsregel als Referenz übernommen.");
             }
+            let mut row = registration_row(&entry);
+            if duplicate {
+                row.secondary = crate::locale::tr("Bereits registriert").into();
+            }
+            rows.push(row);
             if !duplicate {
                 candidates.push(entry);
             }
         }
-        if candidates.is_empty() {
-            self.text("Keine neuen Plugins gefunden", &body);
-        } else {
-            self.dialog("review", Pending::ApplyPluginImport(candidates), Dialog {
+        self.management_review(
+            crate::OperationKind::Plugin,
+            rows,
+            ["Plugin", "Typ / Architektur"],
+            "Importieren",
+        );
+        self.ui().set_review_can_confirm(!candidates.is_empty());
+        self.dialog(
+            "management-review",
+            Pending::ApplyPluginImport(candidates),
+            Dialog {
                 title: "Plugin-Import prüfen",
-                description: "Die Plugins werden deaktiviert registriert. Einfache TC-Erweiterungsregeln werden zu Dateimasken. Weitere Regeln bleiben als Hinweis sichtbar.",
+                description: &format!(
+                    "{} · {} {}",
+                    crate::locale::tr("Neue Plugins werden deaktiviert registriert."),
+                    import.skipped,
+                    crate::locale::tr("Einträge übersprungen.")
+                ),
                 value: &body,
                 ..Dialog::default()
-            });
-        }
+            },
+        );
     }
 
     pub(crate) fn apply_plugin_import(&mut self, import: Vec<Registration>) -> io::Result<()> {
@@ -478,7 +594,13 @@ impl App {
         file: PathBuf,
         name: String,
     ) {
-        self.start_job("Plugin-Host wird gestartet …", false, move |job| {
+        let description = super::JobDescription::new(
+            crate::OperationKind::Plugin,
+            display_path(&path),
+            display_path(&file),
+        );
+        self.start_operation_job("Plugin ausführen", false, description, move |job| {
+            job.phase("Plugin-Host starten …");
             if interface == Interface::Wlx {
                 let host = plugin::view(&path, &file, &job.cancel)
                     .map_err(|error| plugin_error(&name, error))?;
@@ -538,4 +660,49 @@ fn describe(rows: Vec<plugin::Row>) -> String {
         let _ = writeln!(body, "{}    {}", row.name, row.value);
     }
     body
+}
+
+fn plugin_matches(query: &str, values: &[&str]) -> bool {
+    let haystacks = values
+        .iter()
+        .map(|value| value.to_lowercase())
+        .collect::<Vec<_>>();
+    query.split_whitespace().all(|word| {
+        let word = word.to_lowercase();
+        haystacks.iter().any(|value| value.contains(&word))
+    })
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::plugin_matches;
+    #[test]
+    fn filters_across_fields_with_unicode_and_multiple_terms() {
+        let row = [
+            "Größenanzeige",
+            "WDX",
+            "x64",
+            "*.txt;*.md",
+            "C:/Plugins/metadata.wdx64",
+        ];
+        assert!(plugin_matches("GRÖßEN wdx x64", &row));
+        assert!(plugin_matches("  *.MD  metadata  ", &row));
+        assert!(plugin_matches("", &row));
+        assert!(!plugin_matches("wfx x64", &row));
+        assert!(!plugin_matches("wdx x86", &row));
+    }
+}
+
+fn registration_row(entry: &Registration) -> crate::ReviewRow {
+    crate::ReviewRow {
+        primary: entry.name.as_str().into(),
+        secondary: format!(
+            "{} · {}",
+            entry.interface.label(),
+            entry.architecture.label()
+        )
+        .into(),
+        detail: display_path(&entry.path).into(),
+        kind: "plugin".into(),
+    }
 }

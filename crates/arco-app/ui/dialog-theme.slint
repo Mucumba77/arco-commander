@@ -1,5 +1,3 @@
-import { Button } from "std-widgets.slint";
-
 export global Colors {
     in property <bool> light;
     in property <bool> custom-selection;
@@ -8,11 +6,13 @@ export global Colors {
     in property <color> selection-dark;
     in property <color> cursor-light;
     in property <color> cursor-dark;
-    out property <color> background: light ? #e8eff0 : #10181e;
-    out property <color> panel: light ? #f9fcfc : #18232b;
-    out property <color> surface: light ? #f1f6f7 : #212e38;
-    out property <color> edge: light ? #c2d1d5 : #334852;
-    out property <color> accent: light ? #046d5c : #72e3c6;
+    out property <color> background: light ? #edf2f7 : #0d1421;
+    out property <color> panel: light ? #ffffff : #151f30;
+    out property <color> surface: light ? #f3f6fb : #1d2a40;
+    out property <color> edge: light ? #d9e2ee : #2b3a53;
+    out property <color> accent: light ? #08796c : #62dfc0;
+    out property <color> accent-ink: light ? #ffffff : #092b26;
+    out property <color> hover: light ? #e4edf7 : #283b55;
     out property <color> text: light ? #1b2f3a : #eff6f7;
     out property <color> muted: light ? #49616d : #a8bdc7;
     out property <color> selection: custom-selection ? (light ? selection-light : selection-dark) : (light ? #cfece4 : #264b48);
@@ -20,6 +20,145 @@ export global Colors {
     out property <color> folder: light ? #8c5105 : #efbc78;
     out property <color> media: light ? #604395 : #c6aefa;
     out property <color> archive: light ? #8e3a55 : #f1a2b7;
+}
+
+export component Button inherits Rectangle {
+    in property <string> text;
+    in property <image> icon;
+    in property <length> icon-size: 18px;
+    in property <bool> primary;
+    in property <bool> destructive;
+    in property <bool> compact;
+    in property <bool> enabled: true;
+    in property <bool> checkable;
+    in property <bool> colorize-icon: true;
+    in-out property <bool> checked;
+    out property <bool> has-focus: keys.has-focus;
+    out property <bool> pressed: pointer.pressed;
+    property <bool> emphasized: root.primary || root.checked;
+    property <color> ink: !root.enabled ? Colors.muted.with-alpha(0.5)
+        : root.emphasized ? Colors.accent-ink : root.destructive ? Colors.archive : Colors.text;
+    callback clicked();
+    forward-focus: keys;
+    min-width: max(34px, content.min-width);
+    min-height: max(root.compact ? 24px : 34px, content.min-height);
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    background: !root.enabled ? Colors.surface.with-alpha(0.4)
+        : root.emphasized ? (pointer.pressed ? Colors.accent.darker(0.12) : Colors.accent)
+        : pointer.pressed ? Colors.cursor : pointer.has-hover ? Colors.hover : Colors.surface;
+    border-radius: 8px;
+    border-width: root.has-focus ? 2px : 1px;
+    border-color: root.has-focus ? (root.emphasized ? Colors.text : Colors.accent) : root.emphasized ? Colors.accent : Colors.edge;
+    animate background, border-color { duration: 120ms; }
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-checkable: root.checkable;
+    accessible-checked: root.checked;
+    accessible-action-default => { root.activate(); }
+    function activate() {
+        if (!root.enabled) { return; }
+        if (root.checkable) { root.checked = !root.checked; }
+        root.clicked();
+    }
+    content := HorizontalLayout {
+        padding-left: root.compact ? 5px : root.text == "" ? 8px : 12px;
+        padding-right: root.compact ? 5px : root.text == "" ? 8px : 12px;
+        padding-top: root.compact ? 3px : 7px;
+        padding-bottom: root.compact ? 3px : 7px;
+        spacing: 7px;
+        alignment: center;
+        if root.icon.width > 0 : Image {
+            source: root.icon;
+            width: root.icon-size;
+            height: root.icon-size;
+            colorize: root.colorize-icon ? root.ink : transparent;
+        }
+        if root.text != "" : Text {
+            text: root.text;
+            color: root.ink;
+            font-size: 13px;
+            font-weight: root.emphasized ? 600 : 400;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+    }
+    pointer := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { keys.focus(); root.activate(); }
+    }
+    keys := FocusScope {
+        width: 0px; height: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == " " || event.text == Key.Return) { root.activate(); return accept; }
+            return reject;
+        }
+    }
+}
+
+export component CheckBox inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <length> font-size: 13px;
+    in property <int> font-weight: 400;
+    in-out property <bool> checked;
+    out property <bool> has-focus: keys.has-focus;
+    callback toggled();
+    forward-focus: keys;
+    min-height: 32px;
+    min-width: content.min-width;
+    border-radius: 6px;
+    border-width: root.has-focus ? 2px : 0px;
+    border-color: Colors.accent;
+    accessible-role: checkbox;
+    accessible-checkable: true;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-checked: root.checked;
+    accessible-action-default => { root.toggle(); }
+    function toggle() {
+        if (!root.enabled) { return; }
+        root.checked = !root.checked;
+        root.toggled();
+    }
+    content := HorizontalLayout {
+        padding: 5px;
+        spacing: 9px;
+        alignment: start;
+        Rectangle {
+            width: 19px; height: 19px;
+            border-radius: 5px;
+            background: root.checked ? Colors.accent : Colors.surface;
+            border-color: root.checked ? Colors.accent : Colors.muted;
+            border-width: 1px;
+            opacity: root.enabled ? 1 : 0.4;
+            if root.checked : Image {
+                x: 3px; y: 3px; width: 13px; height: 13px;
+                source: @image-url("icons/check.svg"); colorize: Colors.accent-ink;
+            }
+        }
+        Text {
+            text: root.text;
+            color: root.enabled ? Colors.text : Colors.muted.with-alpha(0.5);
+            font-size: root.font-size;
+            font-weight: root.font-weight;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            wrap: word-wrap;
+        }
+    }
+    TouchArea { enabled: root.enabled; mouse-cursor: MouseCursor.pointer; clicked => { keys.focus(); root.toggle(); } }
+    keys := FocusScope {
+        width: 0px; height: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == " " || event.text == Key.Return) { root.toggle(); return accept; }
+            return reject;
+        }
+    }
 }
 
 export component NavButton inherits Button {
@@ -41,4 +180,12 @@ export component DetailCell inherits Text {
     font-size: 12px;
     vertical-alignment: center;
     overflow: elide;
+}
+
+export component FocusBoundary inherits FocusScope {
+    callback reached();
+    width: 0px;
+    height: 0px;
+    focus-on-click: false;
+    changed has-focus => { if (self.has-focus) { root.reached(); } }
 }

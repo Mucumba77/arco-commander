@@ -9,9 +9,9 @@ Arco Commander ist ein Zwei-Fenster-Dateimanager für Windows, geschrieben in Ru
 
 ## Download
 
-[**Arco Commander 1.0.0 für Windows x64 herunterladen**](https://github.com/Mucumba77/arco-commander/releases/download/v1.0.0/arco-commander-v1.0.0-windows-x64.zip)
+[**Arco Commander 1.1.0 für Windows x64 herunterladen**](https://github.com/Mucumba77/arco-commander/releases/download/v1.1.0/arco-commander-v1.1.0-windows-x64.zip)
 
-Das portable ZIP ist für Windows 10 22H2 und Windows 11 vorgesehen. Entpacke es vollständig und starte `arco-commander.exe`. Das Paket enthält beide Plugin-Hosts, das ZIP-SFX-Modul, die Kurzanleitung und Drittanbieterhinweise. Es ist unsigniert. [Release-Hinweise und SHA-256-Prüfsumme](https://github.com/Mucumba77/arco-commander/releases/tag/v1.0.0)
+Das portable ZIP ist für Windows 10 22H2 und Windows 11 vorgesehen. Entpacke es vollständig und starte `arco-commander.exe`. Das Paket enthält beide Plugin-Hosts, das ZIP-SFX-Modul, die Kurzanleitung und Drittanbieterhinweise. Es ist unsigniert. [Release-Hinweise und SHA-256-Prüfsumme](https://github.com/Mucumba77/arco-commander/releases/tag/v1.1.0)
 
 Für ein Update entpacke die neue Version in einen eigenen Ordner. Arco verwendet das bisherige Standardprofil weiter. Bei Verwendung von `--portable` übernimm zusätzlich die Profildatei `arco-commander.json` aus dem bisherigen Programmordner.
 
@@ -25,6 +25,8 @@ Für ein Update entpacke die neue Version in einen eigenen Ordner. Arco verwende
 4. Mit `F3` zeigst du die fokussierte Datei an. Mit `Strg+K` öffnest du die Befehlspalette und findest weitere Aktionen samt Tastenkürzel.
 
 ## Einblicke
+
+Die Beispielbilder zeigen Version 1.0.0. Für die überarbeiteten Dialoge enthält die [UI-Prüfliste](docs/UI-PRUEFUNG.md) die erwarteten Arbeitsabläufe. [Nächster Arbeitsblock](docs/WEITERARBEIT.md).
 
 ### Kopierfortschritt
 
@@ -42,9 +44,13 @@ Mit **Eigenes Fenster** öffnest du die Dateivorschau im separaten Lister. Dort 
 
 Die Menüleiste gruppiert Hauptaktionen und verwandte Befehle in Untermenüs. Symbole und aktuell belegte Tastenkürzel stehen direkt am Befehl. Die **Befehlspalette** in der Werkzeugleiste und unter **Werkzeuge** öffnet sich standardmäßig mit `Strg+K`. Sie filtert nach Befehlsnamen, Tastenkürzeln und unterstützten `cm_`-Aliasen. Mit Pfeiltasten und Enter führst du einen Treffer aus.
 
-Kopieren, Verschieben und Archivaufträge öffnen eine Fortschrittskarte. Lokale Dateikopien zeigen den Stand der aktuellen Datei. Beim regulären ZIP-Pack- und Entpackvorgang zeigt der Balken den Stand der unkomprimierten Daten. Aufträge ohne messbare Gesamtmenge zeigen einen animierten Balken. **Im Hintergrund** blendet die Karte aus. Über **Fortschritt** in der Statusleiste oder `Strg+J` öffnest du sie wieder. Konflikt- und Anmeldedialoge erscheinen vor der Karte.
+Kopieren, Verschieben, Packen, Entpacken und Löschen verwenden dieselbe Fortschrittskarte mit passenden Symbolen und Statusmeldungen. Quelle und Ziel bleiben auch bei einem Wechsel des Arbeitsschritts sichtbar. Lokale Dateikopien zeigen Gesamtfortschritt, aktuelle Datei, Datenmenge, Eintragszähler, Durchsatz, Laufzeit sowie geschätzte Rest- und Fertigstellungszeit. Lokale Transfers lassen sich direkt pausieren und fortsetzen; beim direkten Verschieben greift eine Pause vor dem nächsten Eintrag. ZIP, ZIP-SFX und ZipCrypto zeigen beim Packen Gesamt- und Dateifortschritt. Beim ZIP-Pack- und Entpackvorgang beziehen sich Datenmenge und Durchsatz auf die unkomprimierten Daten. Die anschließende Fertigstellung und gegebenenfalls die Archivprüfung erscheinen als eigener Arbeitsschritt. Beim Entpacken einer Archivauswahl sind Entpacken und Bereitstellen am Ziel getrennt erkennbar. Die Restzeit wird aus den jüngsten Messwerten geschätzt; unbekannte Werte bleiben als „—“ sichtbar. Externe Archivprogramme und Aufträge ohne messbare Gesamtmenge zeigen einen animierten Balken. **Im Hintergrund** blendet die Karte aus. Über **Fortschritt** in der Statusleiste oder `Strg+J` öffnest du sie wieder. Konflikt- und Anmeldedialoge erscheinen vor der Karte.
 
-Die Masken für Kopieren, Verschieben und Packen zeigen Quelle und Ziel vor dem Start. Zielmasken und gespeicherte Suchfilter stehen bei Transfers unter **Erweiterte Optionen**. Im Transfermanager sind der aktuelle und die wartenden Aufträge getrennt. Wähle einen wartenden Eintrag aus, um seine Reihenfolge zu ändern oder ihn zu entfernen.
+In Dialogen wechselst du mit `Tab` und `Umschalt+Tab` zwischen den Bedienelementen. Der Fokus bleibt im geöffneten Dialog und ist durch einen Rahmen sichtbar. `Leertaste` oder `Enter` betätigen fokussierte Schaltflächen und Kontrollkästchen, etwa die Freigabe von Löschungen bei der Synchronisierung. `Esc` schließt den Dialog. Alle Schaltflächen und Kontrollkästchen lassen sich auch direkt mit der Maus bedienen.
+
+Nach der Löschbestätigung öffnen Papierkorb, endgültiges Löschen und FTP-Löschen ebenfalls ein Fortschrittsfenster. Es zeigt bearbeitete und ausstehende Einträge, den aktuellen Pfad und die Laufzeit. Lokale Löschungen zählen die ausgewählten Dateien und Ordner; ein ausgewählter Ordner wird samt Inhalt als ein Eintrag verarbeitet. FTP-Löschungen zählen die beim rekursiven Einlesen ermittelten Einträge. **Abbrechen** stoppt weitere Einträge; ein bereits laufender Lösch- oder Papierkorb-Aufruf kann noch abgeschlossen werden. **Im Hintergrund** erlaubt das Weiterarbeiten. Das Ergebnis erscheint in der Statusleiste, Fehler werden gesondert angezeigt.
+
+Die Masken für Kopieren, Verschieben, Packen und Entpacken zeigen Quelle und Ziel vor dem Start. Die Ordnerschaltfläche neben dem Ziel öffnet die Windows-Ordnerauswahl. Zielordner sind auch beim Packen und Entpacken direkt bearbeitbar. Beim Packen erscheint das Passwortfeld nur für unterstützte Formate; ZipCrypto verlangt ein Passwort. Zielmasken und gespeicherte Suchfilter stehen bei Transfers unter **Erweiterte Optionen**. Beim Entpacken des gesamten Archivs bleiben vorhandene Dateien erhalten. Beim Entpacken einer Archivauswahl erscheint bei vorhandenen Zieldateien der Konfliktdialog. Im Transfermanager sind der aktuelle und die wartenden Aufträge getrennt. Wähle einen wartenden Eintrag aus, um seine Reihenfolge zu ändern oder ihn zu entfernen.
 
 Die interne Vorschau und der separate Lister verwenden dieselbe Werkzeugleiste für Text und Hex. Die Lupe setzt die Suche fort. Kodierung, Zeilenumbruch und Byte-Offset stehen unter **Anzeigeoptionen**. Bilder lassen sich einpassen oder in Originalgröße betrachten.
 
@@ -145,6 +151,14 @@ Unter **Dateien → Dateiauftrag mit Windows-Rechteabfrage** kannst du einen ein
 `Alt+F7` öffnet die erweiterte lokale Suche. Sie unterstützt mehrere Suchorte, eine markierte Auswahl, Masken und Ausschlüsse, reguläre Ausdrücke, Text mit Kodierungswahl, Hexdaten, Größe, Datum, Attribute und Ordnertiefe. Benannte Profile stehen auch als lokale Transferfilter zur Verfügung. Die Suchergebnisse lassen sich als Dateiliste übernehmen. Unter **Konfigurieren → Everything-Suche** kann der absolute Pfad zur optionalen `es.exe` hinterlegt werden. `ev:` fragt den globalen Index ab und `ed:` beschränkt die Abfrage auf die Suchorte. Einfache Suchmuster können bei fehlendem Index mit der internen Suche laufen. [Total-Commander-Suche](https://ghisler.ch/wiki/index.php?title=Search), [Everything CLI](https://www.voidtools.com/support/everything/command_line_interface/)
 
 `Alt+Umschalt+F7` öffnet dieselbe Suche in einem eigenen Fenster. Der Suchlauf arbeitet in einem separaten Prozess und kann unabhängig von Dateioperationen abgebrochen werden. Beide Dateifenster bleiben bedienbar. Die Treffer lassen sich ins ursprüngliche Dateifenster übernehmen, solange dessen Ansicht gleich geblieben ist.
+
+Suche, Mehrfachumbenennen und Synchronisieren verwenden gegliederte Formulare und eine gemeinsame Fortschrittsdarstellung. Die Suche meldet den aktuellen Pfad, geprüfte Einträge, Treffer und Laufzeit. Ergebnislisten und Umbenennvorschauen haben getrennte Spalten, lassen sich mit Pfeiltasten durchgehen und zeilenweise kopieren. **Bearbeiten** öffnet die Umbenennmasken erneut mit den eingegebenen Werten. Die Ausführung zählt ihre Vorbereitung und Namensübernahme als Schritte; bei Abbruch bleibt auch das Zurücksetzen sichtbar. Beim Synchronisieren zeigt die Ausführung bearbeitete und ausstehende Aktionen. Ohne bekannte Gesamtmenge erscheint eine laufende Aktivitätsanzeige.
+
+FTP-Profile gliedern Serverdaten, Anmeldung und Übertragungsoptionen. **Speichern & verbinden** übernimmt Änderungen vor der Anmeldung. Das Dateifenster wechselt erst nach erfolgreichem Laden der ersten Verzeichnisliste zur FTP-Verbindung. Downloads und Arbeitskopien melden übertragene Bytes; während der anschließenden Prüfung wechselt die Anzeige zur Prüfphase. Die Dateibearbeitung bietet direkte Aktionen für Editor, Hochladen, Behalten und Löschen der lokalen Kopie. Uploads und fortgesetzte Transfers verwenden eine Aktivitätsanzeige, wenn keine laufenden Bytewerte vorliegen.
+
+Die **Plugin-Verwaltung** trennt Liste, Details und Aktionen. Der Filter durchsucht Namen, Typ, Architektur, Masken und Pfade; mehrere Suchwörter werden kombiniert. Pfeile, Pos1/Ende und Bild auf/ab navigieren in der Liste. Zum Ändern der Priorität den Filter leeren. Plugin- und FTP-Importe zeigen strukturierte Vorschauen. Paketprüfung, Entpacken und Entfernen laufen mit einem Fortschrittsfenster.
+
+Die **Einstellungen** zeigen ungespeicherte Änderungen an. **Anwenden** speichert den Entwurf; bei einem Eingabefehler öffnet sich die betroffene Kategorie. `Strg+Bild auf/ab` wechselt zwischen den Kategorien. Alle Kategorien lassen sich mit Maus und Tabulator erreichen.
 
 Ein Suchprofil lässt sich im lokalen Ordner und in einem geöffneten Archiv laden. **WDX-Feldbedingungen** verknüpft ein zuvor gespeichertes WDX-Suchprofil mit den übrigen Bedingungen. Wenn Arco einzelne Einträge aus dem Archiv entpacken kann, stellt es Kandidaten für die Inhalts- und WDX-Prüfung bis 64 MiB temporär bereit. Suchorte im Archiv sind relativ zum geöffneten Archivordner. Ein eingegebenes Archivpasswort gilt für den Suchlauf. Der Index von Everything und die lokalen Transferfilter verwenden ihre eigenen unterstützten Kriterien.
 

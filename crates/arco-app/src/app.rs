@@ -2,7 +2,7 @@ use crate::commands::{Dialog, Pending};
 use crate::panel::{ArchiveTab, FtpTab, Location, Panel, ShellLocation, Tab};
 use crate::preview;
 use crate::shortcuts;
-use crate::{Colors, MainWindow, SettingsData, display_path, human_size};
+use crate::{Colors, MainWindow, SettingsData, display_path};
 use arco_core::archive_view::{self, Catalog};
 use arco_core::files::{self, Directory, Kind, Transfer, TransferReport};
 use arco_core::profile::{self, ListFont, Profile, TabLock, TcImport};
@@ -37,7 +37,10 @@ mod ftp_panel;
 mod ftp_profiles;
 mod ftp_sync;
 mod ignore;
+mod job_progress;
+pub(crate) use job_progress::Description as JobDescription;
 mod keyboard;
+mod pointer;
 mod settings;
 pub(crate) use settings::SettingsPage;
 mod lister;
@@ -129,6 +132,14 @@ pub enum Outcome {
         skipped: usize,
     },
     Ftp(FtpView),
+    FtpMounted {
+        side: usize,
+        request: u64,
+        location: Location,
+        navigation: Navigation,
+        directory: Box<LoadedDirectory>,
+    },
+    PluginsUpdated(usize, Option<String>),
     FtpEditReady(Box<FtpDraft>),
     FtpEditUploaded(Box<FtpDraft>, Option<String>),
     Imported(TcImport),
@@ -182,7 +193,9 @@ enum Event {
     Progress {
         detail: String,
         fraction: f32,
+        sample: Option<job_progress::Sample>,
     },
+    ProgressFeed(std::sync::Arc<std::sync::Mutex<Option<job_progress::Sample>>>),
     PluginPrompt(PromptTicket),
     TransferConflict(ConflictTicket),
     WdxValues(wdx::Values),
@@ -207,7 +220,7 @@ struct DirectoryRequest {
     hidden: bool,
 }
 
-struct LoadedDirectory {
+pub(crate) struct LoadedDirectory {
     directory: Directory,
     space: Option<DiskSpace>,
     archive: Option<ArchiveTab>,
@@ -300,38 +313,185 @@ pub struct JobContext {
 }
 
 impl JobContext {
+    fn progress_feed(&self) -> std::sync::Arc<std::sync::Mutex<Option<job_progress::Sample>>> {
+        let feed = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let _ = self.sender.send(Event::ProgressFeed(feed.clone()));
+        feed
+    }
     pub fn progress(&self, value: String) {
         self.progress_fraction(value, -1.0);
     }
 
-    pub fn progress_bytes(&self, detail: String, completed: u64, total: u64) {
-        let fraction = if total == 0 {
-            -1.0
-        } else {
-            (completed.min(total) as f64 / total as f64) as f32
-        };
-        self.progress_fraction(detail, fraction);
+    pub fn phase(&self, phase: &str) {
+        self.measured_progress(
+            String::new(),
+            job_progress::Sample {
+                phase: phase.into(),
+                ..Default::default()
+            },
+        );
     }
 
     fn progress_fraction(&self, detail: String, fraction: f32) {
-        let _ = self.sender.send(Event::Progress { detail, fraction });
+        let _ = self.sender.send(Event::Progress {
+            detail,
+            fraction,
+            sample: None,
+        });
+    }
+
+    fn measured_progress(&self, detail: String, sample: job_progress::Sample) {
+        let fraction = sample
+            .total
+            .filter(|&total| total > 0)
+            .map_or(-1.0, |total| {
+                (sample.completed.min(total) as f64 / total as f64) as f32
+            });
+        let _ = self.sender.send(Event::Progress {
+            detail,
+            fraction,
+            sample: Some(sample),
+        });
+    }
+
+    pub fn step_progress(&self, source: String, index: usize, total: usize) {
+        let _ = self.sender.send(Event::Progress {
+            detail: String::new(),
+            fraction: if total == 0 {
+                -1.0
+            } else {
+                index.saturating_sub(1).min(total) as f32 / total as f32
+            },
+            sample: Some(job_progress::Sample {
+                source,
+                items: Some((index, Some(total))),
+                ..Default::default()
+            }),
+        });
+    }
+
+    pub fn deletion_progress(&self, source: String, processed: usize, total: usize) {
+        self.entry_progress(source, processed, total, "");
+    }
+
+    pub fn entry_progress(&self, source: String, processed: usize, total: usize, phase: &str) {
+        self.entry_progress_to(source, String::new(), processed, total, phase);
+    }
+
+    fn entry_progress_to(
+        &self,
+        source: String,
+        target: String,
+        processed: usize,
+        total: usize,
+        phase: &str,
+    ) {
+        let _ = self.sender.send(Event::Progress {
+            detail: String::new(),
+            fraction: if total == 0 {
+                -1.0
+            } else {
+                processed.min(total) as f32 / total as f32
+            },
+            sample: Some(job_progress::Sample {
+                phase: phase.into(),
+                source,
+                target,
+                items: Some((processed.saturating_add(1).min(total), Some(total))),
+                processed_items: Some(processed.min(total)),
+                ..Default::default()
+            }),
+        });
+    }
+
+    pub fn rename_progress(&self, update: rename::Progress<'_>) {
+        let phase = match update.phase {
+            rename::Phase::Staging => "Umbenennung vorbereiten …",
+            rename::Phase::Publishing => "Neue Namen übernehmen …",
+            rename::Phase::Recovering => "Vorherige Namen wiederherstellen …",
+        };
+        if update.phase == rename::Phase::Recovering {
+            self.measured_progress(
+                String::new(),
+                job_progress::Sample {
+                    phase: phase.into(),
+                    source: display_path(update.source),
+                    target: display_path(update.target),
+                    recovering: true,
+                    ..Default::default()
+                },
+            );
+        } else {
+            self.entry_progress_to(
+                display_path(update.source),
+                display_path(update.target),
+                update.completed,
+                update.total,
+                phase,
+            );
+        }
+    }
+
+    pub fn ftp_download_progress(
+        &self,
+        source: String,
+        expected: Option<u64>,
+    ) -> impl FnMut(ftp::DownloadProgress) + '_ {
+        let mut last = Instant::now() - Duration::from_secs(1);
+        move |p| {
+            if p.phase == ftp::DownloadPhase::Verifying {
+                self.measured_progress(
+                    String::new(),
+                    job_progress::Sample {
+                        source: source.clone(),
+                        phase: "FTP-Download prüfen …".into(),
+                        ..Default::default()
+                    },
+                );
+            } else if last.elapsed() >= Duration::from_millis(100) || p.total == Some(p.received) {
+                last = Instant::now();
+                self.measured_progress(
+                    String::new(),
+                    job_progress::Sample {
+                        phase: "FTP-Datei herunterladen …".into(),
+                        source: source.clone(),
+                        completed: p.received,
+                        total: p.total.or(expected).filter(|&total| total >= p.received),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
     }
 
     pub fn archive_progress(&self) -> impl FnMut(files::Progress<'_>) + '_ {
+        self.archive_progress_phase("")
+    }
+
+    pub fn archive_progress_phase(&self, phase: &str) -> impl FnMut(files::Progress<'_>) + '_ {
+        let phase = phase.to_owned();
         let interval = std::time::Duration::from_millis(100);
         let mut last = std::time::Instant::now() - interval;
         move |progress| {
+            if progress.phase == files::ProgressPhase::Finalizing {
+                self.phase("Archiv wird abgeschlossen …");
+                return;
+            }
             if last.elapsed() >= interval || progress.copied == progress.total {
                 last = std::time::Instant::now();
-                self.progress_bytes(
-                    format!(
-                        "{}\n{} / {}",
-                        display_path(progress.path),
-                        human_size(progress.copied),
-                        human_size(progress.total)
-                    ),
-                    progress.copied,
-                    progress.total,
+                self.measured_progress(
+                    String::new(),
+                    job_progress::Sample {
+                        phase: phase.clone(),
+                        completed: progress.copied,
+                        total: Some(progress.total),
+                        source: display_path(progress.path),
+                        items: progress.items.map(|(index, total)| (index, Some(total))),
+                        file_fraction: progress.current.filter(|&(_, total)| total > 0).map(
+                            |(copied, total)| (copied.min(total) as f64 / total as f64) as f32,
+                        ),
+                        ..Default::default()
+                    },
                 );
             }
         }
@@ -379,6 +539,8 @@ pub struct App {
     trees: [Option<directory_tree::Tree>; 2],
     tree_loading: [bool; 2],
     pub undo: Option<rename::Plan>,
+    pub(crate) plugin_filter: String,
+    pub(crate) rename_draft: Option<crate::commands::RenameDraft>,
     pub viewer: Option<Viewer>,
     pub staged_preview: Option<StagedPreview>,
     listers: Vec<crate::ListerWindow>,
@@ -401,12 +563,15 @@ pub struct App {
     sender: Sender<Event>,
     receiver: Receiver<Event>,
     pub job: Option<Arc<AtomicBool>>,
+    job_progress: job_progress::Tracker,
+    progress_feed: Option<std::sync::Arc<std::sync::Mutex<Option<job_progress::Sample>>>>,
     transfers: transfer_queue::Queue,
     next_request: u64,
     loader_cancel: [Option<Arc<AtomicBool>>; 2],
     waiting_loads: [Option<DirectoryRequest>; 2],
     drops: Option<(usize, arco_windows::FileDropAction, Vec<PathBuf>)>,
-    last_pointer_open: Option<(Instant, (i32, i32))>,
+    pointer_clicks: pointer::Clicks<(usize, Location, usize)>,
+    ftp_clicks: pointer::Clicks<(ftp::Url, i32)>,
     context_menu_open: bool,
     bindings: shortcuts::Bindings,
     shortcut_editor: Option<keyboard::Editor>,
@@ -461,6 +626,8 @@ pub fn run(
         trees: [None, None],
         tree_loading: [false; 2],
         undo: None,
+        plugin_filter: String::new(),
+        rename_draft: None,
         viewer: None,
         staged_preview: None,
         listers: Vec::new(),
@@ -483,12 +650,15 @@ pub fn run(
         sender,
         receiver,
         job: None,
+        job_progress: job_progress::Tracker::default(),
+        progress_feed: None,
         transfers: Default::default(),
         next_request: 0,
         loader_cancel: [None, None],
         waiting_loads: [None, None],
         drops: None,
-        last_pointer_open: None,
+        pointer_clicks: pointer::Clicks::default(),
+        ftp_clicks: pointer::Clicks::default(),
         context_menu_open: false,
         bindings,
         shortcut_editor: None,
@@ -572,17 +742,18 @@ pub fn run(
             {
                 return;
             }
-            if open && app.is_repeated_pointer_open() {
-                return;
-            }
+            let open = if open {
+                app.pointer_clicks.clear();
+                true
+            } else {
+                app.is_pointer_double_click(side, row, toggle || range)
+            };
             app.set_active(side);
             app.leave_tree_focus(side);
             app.current_mut().select_row(row, toggle, range);
-            app.publish(side);
+            app.publish_cursor(side, true);
             if open {
                 app.open_row(row);
-            } else {
-                app.last_pointer_open = None;
             }
         }
     });
@@ -590,6 +761,12 @@ pub fn run(
     window.on_apply_settings(move |value, close| {
         if let Some(app) = weak.upgrade() {
             app.borrow_mut().apply_settings(value, close);
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_job_pause(move || {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut().toggle_transfer_pause();
         }
     });
     let weak = Rc::downgrade(&app);
@@ -695,6 +872,20 @@ pub fn run(
     });
     keyboard::connect_editor(window, &app);
     let weak = Rc::downgrade(&app);
+    window.on_browse_operation_target(move || -> SharedString {
+        #[cfg(windows)]
+        match arco_windows::sfx::folder(crate::locale::tr("Zielordner auswählen")) {
+            Ok(Some(path)) => return display_path(&path).into(),
+            Ok(None) => (),
+            Err(error) => {
+                if let Some(app) = weak.upgrade() {
+                    app.borrow().status(error.to_string());
+                }
+            }
+        }
+        String::new().into()
+    });
+    let weak = Rc::downgrade(&app);
     window.on_search_configure(move |data, name, operation| {
         if let Some(app) = weak.upgrade() {
             app.borrow_mut()
@@ -757,6 +948,13 @@ pub fn run(
         if let Some(app) = weak.upgrade() {
             app.borrow_mut()
                 .submit(value.as_str(), second.as_str(), option);
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_copy_review_text(move |text| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut()
+                .report(arco_windows::copy_text(text.as_str()));
         }
     });
     let weak = Rc::downgrade(&app);
@@ -823,6 +1021,12 @@ pub fn run(
         }
     });
     let weak = Rc::downgrade(&app);
+    window.on_plugin_filter(move |query| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut().filter_plugins(query.as_str());
+        }
+    });
+    let weak = Rc::downgrade(&app);
     window.on_plugin_operate(move |operation, index| {
         if let Some(app) = weak.upgrade() {
             app.borrow_mut().operate_plugin(&operation, index);
@@ -831,7 +1035,28 @@ pub fn run(
     let weak = Rc::downgrade(&app);
     window.on_ftp_browse(move |operation, index| {
         if let Some(app) = weak.upgrade() {
-            app.borrow_mut().browse_ftp(operation.as_str(), index);
+            let mut app = app.borrow_mut();
+            let operation = if operation == "click" {
+                let Some(directory) = app.ftp.as_ref().map(|view| view.directory.clone()) else {
+                    return;
+                };
+                let Some(point) = arco_windows::cursor_screen() else {
+                    return;
+                };
+                if !app.ftp_clicks.click(
+                    (directory, index),
+                    point,
+                    Instant::now(),
+                    arco_windows::is_double_click,
+                ) {
+                    return;
+                }
+                "open"
+            } else {
+                app.ftp_clicks.clear();
+                operation.as_str()
+            };
+            app.browse_ftp(operation, index);
         }
     });
     let weak = Rc::downgrade(&app);
@@ -982,7 +1207,7 @@ fn queue_context_menu(
             return;
         }
         app.context_menu_open = true;
-        app.last_pointer_open = None;
+        app.pointer_clicks.clear();
         app.set_active(side);
         app.publish(side);
         paths
@@ -1125,18 +1350,20 @@ impl App {
         true
     }
 
-    fn is_repeated_pointer_open(&mut self) -> bool {
+    fn is_pointer_double_click(&mut self, side: usize, row: usize, modified: bool) -> bool {
+        if modified {
+            self.pointer_clicks.clear();
+            return false;
+        }
         let Some(point) = arco_windows::cursor_screen() else {
             return false;
         };
-        let now = Instant::now();
-        if self.last_pointer_open.is_some_and(|(last, previous)| {
-            arco_windows::is_double_click(previous, point, now.duration_since(last))
-        }) {
-            return true;
-        }
-        self.last_pointer_open = Some((now, point));
-        false
+        self.pointer_clicks.click(
+            (side, self.panels[side].current().location(), row),
+            point,
+            Instant::now(),
+            arco_windows::is_double_click,
+        )
     }
 
     pub fn ui(&self) -> MainWindow {
@@ -1528,21 +1755,39 @@ impl App {
         self.start_job_with_detail(label, refresh, None, work);
     }
 
-    pub fn start_progress_job(
+    pub(crate) fn start_operation_job(
         &mut self,
         label: &str,
         refresh: bool,
+        description: JobDescription,
+        work: impl FnOnce(JobContext) -> io::Result<Outcome> + Send + 'static,
+    ) {
+        self.start_job_with_detail(label, refresh, Some(description), work);
+    }
+
+    pub(crate) fn start_delete_job(
+        &mut self,
+        label: &str,
         detail: String,
         work: impl FnOnce(JobContext) -> io::Result<Outcome> + Send + 'static,
     ) {
-        self.start_job_with_detail(label, refresh, Some(detail), work);
+        self.start_operation_job(
+            label,
+            true,
+            JobDescription {
+                kind: crate::OperationKind::Delete,
+                detail,
+                ..Default::default()
+            },
+            work,
+        );
     }
 
     fn start_job_with_detail(
         &mut self,
         label: &str,
         refresh: bool,
-        detail: Option<String>,
+        description: Option<JobDescription>,
         work: impl FnOnce(JobContext) -> io::Result<Outcome> + Send + 'static,
     ) {
         if self.job.is_some() {
@@ -1552,13 +1797,23 @@ impl App {
         let cancel = Arc::new(AtomicBool::new(false));
         let sender = self.sender.clone();
         self.job = Some(cancel.clone());
+        self.job_progress = job_progress::Tracker::default();
+        self.progress_feed = None;
         let ui = self.ui();
+        let expanded = description.is_some();
+        let description = description.unwrap_or_default();
         ui.set_job_title(crate::locale::tr(label).into());
-        ui.set_job_status(detail.as_deref().unwrap_or_default().into());
+        ui.set_job_status(description.detail.into());
+        ui.set_job_origin(description.origin.into());
+        ui.set_job_target(description.target.into());
+        ui.set_job_metrics(Default::default());
         ui.set_job_progress(-1.0);
         ui.set_job_cancelling(false);
-        ui.set_job_expanded(detail.is_some());
+        ui.set_job_expanded(expanded);
         ui.set_job_active(true);
+        ui.set_job_kind(description.kind);
+        ui.set_job_pausable(self.transfers.pausable());
+        ui.set_job_paused(false);
         std::thread::spawn(move || {
             let context = JobContext {
                 cancel,
@@ -1606,11 +1861,25 @@ impl App {
                         self.spawn_loader(side, request);
                     }
                 }
-                Event::Progress { detail, fraction } => {
+                Event::ProgressFeed(feed) => {
+                    if self.job.is_some() {
+                        self.progress_feed = Some(feed);
+                    }
+                }
+                Event::Progress {
+                    detail,
+                    fraction,
+                    sample,
+                } => {
                     let ui = self.ui();
                     if !ui.get_job_cancelling() {
                         ui.set_job_status(detail.into());
                         ui.set_job_progress(fraction);
+                        if let Some(sample) = sample {
+                            self.job_progress.update(sample);
+                        } else {
+                            self.job_progress.unmeasured();
+                        }
                     }
                 }
                 Event::PluginPrompt(ticket) => self.plugin_prompts.push_back(ticket),
@@ -1635,6 +1904,7 @@ impl App {
                     }
                 }
                 Event::Finished { outcome, refresh } => {
+                    self.progress_feed = None;
                     self.job = None;
                     self.finish_virtual_transfer();
                     let ui = self.ui();
@@ -1652,6 +1922,21 @@ impl App {
                         Err(error) if ui.get_dialog_kind() == "viewer" => {
                             ui.set_viewer_notice(crate::locale::tr(&error).into());
                         }
+                        Err(error)
+                            if ui.get_job_kind() == crate::OperationKind::Rename
+                                && self.rename_draft.is_some() =>
+                        {
+                            self.restore_rename_draft(&error)
+                        }
+                        Err(error)
+                            if matches!(
+                                ui.get_job_kind(),
+                                crate::OperationKind::Ftp | crate::OperationKind::Plugin
+                            ) && ui.get_dialog_kind().is_empty()
+                                && !ui.get_job_cancelling() =>
+                        {
+                            self.text("Auftrag fehlgeschlagen", &error)
+                        }
                         Err(error) => self.status(error),
                     }
                     self.finish_wdx_sort_attempt();
@@ -1664,6 +1949,28 @@ impl App {
         self.open_next_plugin_prompt();
         self.open_next_transfer_conflict();
         self.advance_transfers();
+        self.refresh_ftp_edit_status();
+        if self.job.is_some() {
+            let ui = self.ui();
+            if let Some(feed) = &self.progress_feed {
+                if let Ok(mut latest) = feed.lock() {
+                    if let Some(sample) = latest.take() {
+                        ui.set_job_progress(-1.0);
+                        self.job_progress.update(sample);
+                    }
+                }
+            }
+            let paused = self.transfers.paused();
+            let waiting = matches!(
+                &self.pending,
+                Some(Pending::TransferConflict(_) | Pending::WfxPrompt(_))
+            );
+            ui.set_job_paused(paused);
+            if let Some(metrics) = self.job_progress.render(paused, waiting, ui.get_job_kind()) {
+                ui.set_job_metrics(metrics);
+            }
+        }
+        self.update_separate_search_progress();
         self.update_wdx_columns();
         self.update_thumbnails();
         self.update_trees();
@@ -2126,6 +2433,38 @@ impl App {
                 self.show_folder_sizes(side, request, &root, sizes, skipped);
             }
             Outcome::Ftp(view) => self.show_ftp(view),
+            Outcome::FtpMounted {
+                side,
+                request,
+                location,
+                navigation,
+                directory,
+            } => {
+                if self.panels[side].request == request {
+                    let panel = &mut self.panels[side];
+                    if panel.current().options.lock == TabLock::Fixed
+                        && !matches!(navigation, Navigation::Refresh)
+                        && panel.current().location() != location
+                    {
+                        panel.tabs.push(Tab::new(panel.current().path.clone()));
+                        panel.tab = panel.tabs.len() - 1;
+                    }
+                    self.next_request += 1;
+                    let id = self.next_request;
+                    self.panels[side].request = id;
+                    self.loaded(side, id, location, navigation, Ok(directory));
+                } else {
+                    self.status(
+                        "FTP-Verbindung nicht übernommen: Das Dateifenster hat sich geändert.",
+                    );
+                }
+            }
+            Outcome::PluginsUpdated(index, notice) => {
+                self.show_plugin_manager(Some(index));
+                if let Some(notice) = notice {
+                    self.ui().set_plugin_notice(notice.into());
+                }
+            }
             Outcome::FtpEditReady(draft) => self.open_downloaded_ftp_draft(*draft),
             Outcome::FtpEditUploaded(draft, log_error) => self.finish_ftp_upload(*draft, log_error),
             Outcome::Imported(import) => self.show_tc_import(import),

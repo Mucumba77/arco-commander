@@ -449,3 +449,201 @@ Suchtreffer und Lesefehler	Résultats et erreurs de lecture
 Suchlauf abbrechen	Annuler la recherche
 Suchkriterien	Critères de recherche
 Über Arco Commander	À propos d’Arco Commander
+Gesamtfortschritt	Progression globale
+Durchsatz	Débit
+Restzeit (geschätzt)	Temps restant estimé
+Vergangen	Temps écoulé
+Aktuelle Datei	Fichier en cours
+Warte auf Entscheidung	En attente de votre décision
+Übertragung läuft	Transfert en cours
+Auftrag läuft	Tâche en cours
+Eintrag	Élément
+Voraussichtlich fertig:	Fin estimée :
+Bearbeitet	Traités
+Ausstehend	Restants
+Aktueller Eintrag	Élément en cours
+Dateien und Ordner werden als einzelne Einträge gezählt. Bei Abbruch kann der aktuelle Eintrag noch abgeschlossen werden.	Les fichiers et dossiers sont comptés comme des éléments individuels. En cas d'annulation, l'élément en cours peut encore être terminé.
+Dateien werden kopiert …	Copie des fichiers …
+Dateien werden verschoben …	Déplacement des fichiers …
+Archiv wird erstellt …	Création de l’archive …
+Archiv wird entpackt …	Extraction de l’archive …
+Auswahl wird verarbeitet …	Traitement de la sélection …
+Entpacken · Schritt 1 von 2	Extraction · Étape 1 sur 2
+Dateien am Ziel bereitstellen · Schritt 2 von 2	Placement des fichiers à destination · Étape 2 sur 2
+Dateiumfang wird ermittelt …	Calcul de la taille de la sélection …
+Pause am nächsten Eintrag	Pause au prochain élément
+Quellarchiv	Archive source
+Zielarchiv	Archive de destination
+Vorhandene Dateien werden nicht überschrieben.	Les fichiers existants ne seront pas écrasés.
+Bei vorhandenen Dateien erscheint der Konfliktdialog.	Les fichiers existants ouvrent la boîte de dialogue de conflit.
+Gesamtes Archiv	Archive complète
+Zielordner auswählen	Choisir le dossier de destination
+Archivpasswort (erforderlich)	Mot de passe de l’archive (obligatoire)
+Archivpasswort (optional)	Mot de passe de l’archive (facultatif)
+Archiv wird abgeschlossen …	Finalisation de l’archive …
+Gib einen Zielordner ein.	Indiquez un dossier de destination.
+Der Zielordner muss eindeutig angegeben werden.	Indiquez un dossier de destination sans ambiguïté.
+Packerprofil	Profil d’archivage
+Die Dateiendung ergibt sich aus dem gewählten Packerprofil.	L’extension du fichier dépend du profil d’archivage sélectionné.
+Suchfortschritt	Progression de la recherche
+Geprüft	Examinés
+Treffer	Résultats
+Lesefehler	Erreurs de lecture
+Aktueller Pfad	Chemin actuel
+Suchbereich	Périmètre de recherche
+Suchorte durchsuchen …	Recherche dans les emplacements …
+Lokale Suchorte durchsuchen …	Recherche dans les emplacements locaux …
+Archiv durchsuchen …	Recherche dans l’archive …
+Everything-Abfrage läuft …	Interrogation d’Everything …
+WDX-Bedingungen prüfen …	Vérification des conditions WDX …
+Suche abgeschlossen	Recherche terminée
+Suche abgebrochen	Recherche annulée
+Dateiname und Inhalt	Nom et contenu du fichier
+Größe, Datum und Attribute	Taille, date et attributs
+Suchorte	Emplacements de recherche
+WDX-Feldbedingungen	Conditions des champs WDX
+Mindestens Bytes	Nombre minimum d’octets
+Höchstens Bytes	Nombre maximum d’octets
+Attribute, z. B. +r -hs	Attributs, p. ex. +r -hs
+Ab JJJJ-MM-TT	À partir du AAAA-MM-JJ
+Bis JJJJ-MM-TT	Jusqu’au AAAA-MM-JJ
+Unterordnerebenen, 0 für keine	Profondeur des sous-dossiers, 0 pour aucun
+Typ / Größe	Type / taille
+Bisheriger Name	Nom actuel
+Zeile kopieren	Copier la ligne
+Ergebnisaktion	Action sur les résultats
+Keine Einträge vorhanden.	Aucune entrée disponible.
+Gruppe	Groupe
+Namensmasken	Masques de nom
+Suchen und Ersetzen	Rechercher et remplacer
+[N] Name · [E] Erweiterung · [C] Zähler · [YMD] Datum	[N] Nom · [E] Extension · [C] Compteur · [YMD] Date
+Weitere Platzhalter	Autres variables
+[A] ganzer Name · [B] Elternordner · [C10+5:3] Zähler · [hms] Uhrzeit · [U]/[L]/[F]/[n] Schreibweise · [X] Zwischenablage · [=Plugin.Feld] WDX-Wert	[A] Nom complet · [B] Dossier parent · [C10+5:3] Compteur · [hms] Heure · [U]/[L]/[F]/[n] Casse · [X] Presse-papiers · [=Plugin.Champ] Valeur WDX
+Umbenennvorschau vorbereiten	Préparation de l’aperçu du renommage
+WDX-Umbenennvorschau vorbereiten	Préparation de l’aperçu du renommage WDX
+Namensmasken auswerten …	Évaluation des masques de nom …
+Dateien umbenennen	Renommer les fichiers
+Dateien werden umbenannt …	Renommage des fichiers …
+Umbenennung vorbereiten …	Préparation du renommage …
+Neue Namen übernehmen …	Application des nouveaux noms …
+Vorherige Namen wiederherstellen …	Restauration des anciens noms …
+Bei Abbruch versucht Arco, bereits ausgeführte Umbenennungen zurückzusetzen.	En cas d’annulation, Arco tente de rétablir les noms déjà modifiés.
+Abgleichrichtung	Sens de la synchronisation
+Vergleichsoptionen	Options de comparaison
+Gespeicherte Profile	Profils enregistrés
+Nach links	Vers la gauche
+Nach rechts	Vers la droite
+Löschungen bestätigen	Confirmer les suppressions
+Angezeigte Löschungen rechts dauerhaft ausführen	Supprimer définitivement les entrées affichées à droite
+Verzeichnisse vergleichen	Comparer les dossiers
+Verzeichnisse erfassen und vergleichen …	Analyse et comparaison des dossiers …
+FTP-Einträge vergleichen …	Comparaison des entrées FTP …
+Archivdaten für den Vergleich bereitstellen …	Préparation des données d’archive à comparer …
+Verzeichnisse werden synchronisiert …	Synchronisation des dossiers …
+Ausgewählte Aktionen ausführen …	Exécution des actions sélectionnées …
+Synchronisierung abgeschlossen	Synchronisation terminée
+Passwort für das linke Archiv	Mot de passe de l’archive de gauche
+Passwort für das rechte Archiv	Mot de passe de l’archive de droite
+Vergleichen	Comparer
+Schritte erledigt	Étapes terminées
+Schritte offen	Étapes restantes
+Erfasste Einträge	Entrées analysées
+Aktionen erledigt	Actions traitées
+Aktionen offen	Actions restantes
+Verbindung auswählen oder ein neues Profil anlegen.	Choisissez une connexion ou créez un profil.
+Server und Profil	Serveur et profil
+Übertragungsoptionen	Options de transfert
+Anmeldung	Connexion
+Ungespeicherte Änderungen	Modifications non enregistrées
+Profil unverändert	Profil inchangé
+Speichern & verbinden	Enregistrer et connecter
+Registrierung, Reihenfolge und Funktionen an einem Ort.	Enregistrement, ordre et fonctions au même endroit.
+DLL hinzufügen …	Ajouter une DLL …
+ZIP installieren …	Installer un ZIP …
+TC importieren …	Importer depuis TC …
+Name, Typ, Maske oder Pfad filtern	Filtrer par nom, type, masque ou chemin
+Plugins filtern	Filtrer les plugins
+Filter leeren	Effacer le filtre
+Plugin nach oben	Monter le plugin
+Plugin nach unten	Descendre le plugin
+Registrierte Plugins in Ausführungsreihenfolge	Plugins enregistrés dans l’ordre d’exécution
+Aktiv	Actif
+Deaktiviert	Désactivé
+Keine passenden Plugins.	Aucun plugin correspondant.
+Plugin auswählen	Choisir un plugin
+Registriere eine DLL oder installiere ein ZIP-Paket.	Enregistrez une DLL ou installez un paquet ZIP.
+Dateimasken	Masques de fichiers
+Alle bei manueller Auswahl	Tous lors de la sélection manuelle
+TC-Erkennung:	Détection TC :
+Aktivieren	Activer
+Deaktivieren	Désactiver
+Funktionen	Fonctions
+Dateioperationen …	Opérations sur les fichiers …
+WDX-Spalte hinzufügen …	Ajouter une colonne WDX …
+Registrierung bearbeiten …	Modifier l’enregistrement …
+Entfernen …	Supprimer …
+Die Listenreihenfolge bestimmt die Plugin-Priorität.	L’ordre de la liste détermine la priorité des plugins.
+Zum Umordnen den Filter leeren.	Effacez le filtre pour changer l’ordre.
+Plugin-Verwaltung	Gestion des plugins
+Plugin	Plugin
+Typ / Architektur	Type / architecture
+Installieren	Installer
+Bereits registriert	Déjà enregistré
+Neue Plugins werden deaktiviert registriert.	Les nouveaux plugins sont enregistrés désactivés.
+Einträge übersprungen.	entrées ignorées.
+Bereits vorhanden	Existe déjà
+Profil	Profil
+Übernahme / Modus	Importation / mode
+FTP-Datei bearbeiten	Modifier un fichier FTP
+Serverdatei	Fichier du serveur
+Lokale Arbeitskopie	Copie de travail locale
+Im Editor speichern und danach die Änderungen hochladen.	Enregistrez dans l’éditeur, puis envoyez les modifications.
+Im Editor öffnen	Ouvrir dans l’éditeur
+Kopie behalten und beenden	Conserver la copie et terminer
+Kopie löschen …	Supprimer la copie …
+Rückübertragung im Transfermanager vorgemerkt.	Envoi ajouté à la file du gestionnaire de transferts.
+Änderungen hochladen	Envoyer les modifications
+Sprache und Erscheinungsbild der Anwendung.	Langue et apparence de l’application.
+Sichtbare Leisten und Aufbau der Dateifenster.	Barres visibles et disposition des panneaux de fichiers.
+Auswahl, versteckte Dateien und Schnellsuche.	Sélection, fichiers cachés et recherche rapide.
+Befehle suchen und eigene Tastenkürzel zuweisen.	Recherchez des commandes et attribuez des raccourcis.
+Schrift und Größe mit direkter Vorschau.	Police et taille avec aperçu immédiat.
+Geschwindigkeit, Protokoll und Dateieigenschaften.	Vitesse, journal et propriétés des fichiers.
+Externe Werkzeuge für Bearbeitung und Suche.	Outils externes d’édition et de recherche.
+Symbolleisten	Barres d’outils
+Dateifenster und Navigation	Panneaux de fichiers et navigation
+Auswahl und Navigation	Sélection et navigation
+Strg+Bild auf/ab wechselt die Kategorie.	Ctrl+Page précédente/suivante change la catégorie.
+FTP-Auftrag läuft …	Opération FTP en cours …
+Plugin-Auftrag läuft …	Opération de plugin en cours …
+FTP-Download prüfen …	Vérification du téléchargement FTP …
+FTP-Datei herunterladen …	Téléchargement du fichier FTP …
+FTP-Verbindung herstellen	Connexion au serveur FTP
+Anmelden und Verzeichnis laden …	Connexion et chargement du dossier …
+FTP-Profile lesen	Lire les profils FTP
+FTP-Verbindungsprofile auswerten …	Lecture des profils de connexion FTP …
+FTP-Vorschau laden	Charger l’aperçu FTP
+Vorschau vorbereiten …	Préparation de l’aperçu …
+FTP-Dateirechte setzen	Définir les permissions FTP
+FTP-Dateirechte setzen …	Définition des permissions FTP …
+FTP-Verzeichnis bearbeiten	Modifier le dossier FTP
+FTP-Verzeichnis bearbeiten …	Modification du dossier FTP …
+FTP-Arbeitskopie laden	Télécharger la copie de travail FTP
+FTP-Änderungen prüfen und zurückübertragen …	Vérification et envoi des modifications FTP …
+FTP-Verzeichnis laden	Charger le dossier FTP
+FTP-Verzeichnis anfordern …	Demande du dossier FTP …
+FTP-Download fortsetzen …	Reprise du téléchargement FTP …
+FTP-Datei hochladen …	Envoi du fichier FTP …
+Plugin prüfen	Vérifier le plugin
+Plugin-Schnittstellen prüfen …	Vérification des interfaces du plugin …
+Plugin-Paket vorbereiten	Préparer le paquet de plugin
+Plugin-Paket lesen …	Lecture du paquet de plugin …
+Plugin-Paket entpacken …	Extraction du paquet de plugin …
+Plugin-Registrierungen prüfen …	Vérification des enregistrements de plugins …
+Plugin-Registrierungen importieren	Importer les enregistrements de plugins
+Total-Commander-Registrierungen auswerten …	Lecture des enregistrements Total Commander …
+Plugin ausführen	Exécuter le plugin
+Plugin-Host starten …	Démarrage de l’hôte de plugins …
+Plugin-Paket entfernen	Supprimer le paquet de plugin
+Paketdateien entfernen …	Suppression des fichiers du paquet …
+Auftrag fehlgeschlagen	Échec de l’opération

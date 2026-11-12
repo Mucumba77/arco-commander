@@ -226,7 +226,17 @@ impl App {
             owner: self.native_window_handle(),
             allow_elevation: elevated,
         };
-        self.enqueue_virtual_transfer(label, true, move |job| {
+        let (kind, target) = match &action {
+            ShellAction::Copy(target) => (crate::OperationKind::Copy, crate::display_path(target)),
+            ShellAction::Move(target) => (crate::OperationKind::Move, crate::display_path(target)),
+            ShellAction::Recycle | ShellAction::Delete => {
+                (crate::OperationKind::Delete, String::new())
+            }
+            _ => (crate::OperationKind::Task, String::new()),
+        };
+        let mut presentation = super::JobDescription::files(kind, &paths, Path::new(""));
+        presentation.target = target;
+        self.enqueue_virtual_operation(label, true, presentation, move |job| {
             let report = arco_windows::shell_transfer(
                 &paths,
                 &action,

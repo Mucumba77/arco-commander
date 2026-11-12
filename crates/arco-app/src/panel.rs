@@ -1245,6 +1245,7 @@ impl Tab {
 
     pub fn replace_selection(&mut self, mut selected: impl FnMut(&Entry) -> bool) {
         let mut marked = self.selection.borrow_mut();
+        let previous = marked.clone();
         marked.clear();
         self.selected_size = 0;
         for &index in &self.model.visible {
@@ -1257,7 +1258,21 @@ impl Tab {
             }
         }
         drop(marked);
-        self.model.notify.reset();
+        self.notify_selection(&previous);
+    }
+
+    fn notify_selection(&self, previous: &BTreeSet<PathBuf>) {
+        let selected = self.selection.borrow();
+        if previous == &*selected {
+            return;
+        }
+        for row in 0..self.model.row_count() {
+            if let Some(entry) = self.model.entry(row)
+                && previous.contains(&entry.path) != selected.contains(&entry.path)
+            {
+                self.model.notify.row_changed(row);
+            }
+        }
     }
 
     pub fn invert(&mut self) {
@@ -1285,7 +1300,7 @@ impl Tab {
             }
         }
         drop(marked);
-        self.model.notify.reset();
+        self.notify_selection(&self.previous_selection);
     }
 
     pub fn select_row(&mut self, row: usize, toggle: bool, range: bool) {
@@ -1307,7 +1322,9 @@ impl Tab {
                 }
             }
             drop(selected);
-            self.model.notify.reset();
+            for index in start..=end {
+                self.model.notify.row_changed(index);
+            }
         } else if toggle {
             self.toggle_current();
             self.anchor = row;

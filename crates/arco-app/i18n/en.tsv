@@ -449,3 +449,201 @@ Suchtreffer und Lesefehler	Search matches and read errors
 Suchlauf abbrechen	Cancel search
 Suchkriterien	Search criteria
 Über Arco Commander	About Arco Commander
+Gesamtfortschritt	Overall progress
+Durchsatz	Throughput
+Restzeit (geschätzt)	Estimated time remaining
+Vergangen	Elapsed
+Aktuelle Datei	Current file
+Warte auf Entscheidung	Waiting for a decision
+Übertragung läuft	Transfer in progress
+Auftrag läuft	Task in progress
+Eintrag	Item
+Voraussichtlich fertig:	Estimated finish:
+Bearbeitet	Processed
+Ausstehend	Remaining
+Aktueller Eintrag	Current entry
+Dateien und Ordner werden als einzelne Einträge gezählt. Bei Abbruch kann der aktuelle Eintrag noch abgeschlossen werden.	Files and folders are counted as individual entries. When cancelling, the current entry may still finish.
+Dateien werden kopiert …	Copying files …
+Dateien werden verschoben …	Moving files …
+Archiv wird erstellt …	Creating archive …
+Archiv wird entpackt …	Extracting archive …
+Auswahl wird verarbeitet …	Processing selection …
+Entpacken · Schritt 1 von 2	Extracting · Step 1 of 2
+Dateien am Ziel bereitstellen · Schritt 2 von 2	Placing files at destination · Step 2 of 2
+Dateiumfang wird ermittelt …	Calculating selection size …
+Pause am nächsten Eintrag	Pausing at the next entry
+Quellarchiv	Source archive
+Zielarchiv	Destination archive
+Vorhandene Dateien werden nicht überschrieben.	Existing files will not be overwritten.
+Bei vorhandenen Dateien erscheint der Konfliktdialog.	Existing files open the conflict dialog.
+Gesamtes Archiv	Entire archive
+Zielordner auswählen	Choose destination folder
+Archivpasswort (erforderlich)	Archive password (required)
+Archivpasswort (optional)	Archive password (optional)
+Archiv wird abgeschlossen …	Finalizing archive …
+Gib einen Zielordner ein.	Enter a destination folder.
+Der Zielordner muss eindeutig angegeben werden.	Specify an unambiguous destination folder.
+Packerprofil	Archiver profile
+Die Dateiendung ergibt sich aus dem gewählten Packerprofil.	The file extension is determined by the selected archiver profile.
+Suchfortschritt	Search progress
+Geprüft	Examined
+Treffer	Matches
+Lesefehler	Read errors
+Aktueller Pfad	Current path
+Suchbereich	Search scope
+Suchorte durchsuchen …	Searching locations …
+Lokale Suchorte durchsuchen …	Searching local locations …
+Archiv durchsuchen …	Searching archive …
+Everything-Abfrage läuft …	Querying Everything …
+WDX-Bedingungen prüfen …	Checking WDX conditions …
+Suche abgeschlossen	Search completed
+Suche abgebrochen	Search cancelled
+Dateiname und Inhalt	File name and content
+Größe, Datum und Attribute	Size, date and attributes
+Suchorte	Search locations
+WDX-Feldbedingungen	WDX field conditions
+Mindestens Bytes	Minimum bytes
+Höchstens Bytes	Maximum bytes
+Attribute, z. B. +r -hs	Attributes, e.g. +r -hs
+Ab JJJJ-MM-TT	From YYYY-MM-DD
+Bis JJJJ-MM-TT	Until YYYY-MM-DD
+Unterordnerebenen, 0 für keine	Subfolder depth, 0 for none
+Typ / Größe	Type / size
+Bisheriger Name	Current name
+Zeile kopieren	Copy row
+Ergebnisaktion	Result action
+Keine Einträge vorhanden.	No entries available.
+Gruppe	Group
+Namensmasken	Name masks
+Suchen und Ersetzen	Search and replace
+[N] Name · [E] Erweiterung · [C] Zähler · [YMD] Datum	[N] Name · [E] Extension · [C] Counter · [YMD] Date
+Weitere Platzhalter	More placeholders
+[A] ganzer Name · [B] Elternordner · [C10+5:3] Zähler · [hms] Uhrzeit · [U]/[L]/[F]/[n] Schreibweise · [X] Zwischenablage · [=Plugin.Feld] WDX-Wert	[A] Full name · [B] Parent folder · [C10+5:3] Counter · [hms] Time · [U]/[L]/[F]/[n] Case · [X] Clipboard · [=Plugin.Field] WDX value
+Umbenennvorschau vorbereiten	Preparing rename preview
+WDX-Umbenennvorschau vorbereiten	Preparing WDX rename preview
+Namensmasken auswerten …	Evaluating name masks …
+Dateien umbenennen	Rename files
+Dateien werden umbenannt …	Renaming files …
+Umbenennung vorbereiten …	Preparing rename …
+Neue Namen übernehmen …	Applying new names …
+Vorherige Namen wiederherstellen …	Restoring previous names …
+Bei Abbruch versucht Arco, bereits ausgeführte Umbenennungen zurückzusetzen.	On cancellation, Arco attempts to restore names already changed.
+Abgleichrichtung	Synchronization direction
+Vergleichsoptionen	Comparison options
+Gespeicherte Profile	Saved profiles
+Nach links	To the left
+Nach rechts	To the right
+Löschungen bestätigen	Confirm deletions
+Angezeigte Löschungen rechts dauerhaft ausführen	Permanently delete the displayed entries on the right
+Verzeichnisse vergleichen	Compare directories
+Verzeichnisse erfassen und vergleichen …	Scanning and comparing directories …
+FTP-Einträge vergleichen …	Comparing FTP entries …
+Archivdaten für den Vergleich bereitstellen …	Preparing archive data for comparison …
+Verzeichnisse werden synchronisiert …	Synchronizing directories …
+Ausgewählte Aktionen ausführen …	Running selected actions …
+Synchronisierung abgeschlossen	Synchronization completed
+Passwort für das linke Archiv	Password for the left archive
+Passwort für das rechte Archiv	Password for the right archive
+Vergleichen	Compare
+Schritte erledigt	Steps completed
+Schritte offen	Steps remaining
+Erfasste Einträge	Entries scanned
+Aktionen erledigt	Actions processed
+Aktionen offen	Actions remaining
+Verbindung auswählen oder ein neues Profil anlegen.	Select a connection or create a new profile.
+Server und Profil	Server and profile
+Übertragungsoptionen	Transfer options
+Anmeldung	Sign-in
+Ungespeicherte Änderungen	Unsaved changes
+Profil unverändert	Profile unchanged
+Speichern & verbinden	Save & connect
+Registrierung, Reihenfolge und Funktionen an einem Ort.	Registration, priority and functions in one place.
+DLL hinzufügen …	Add DLL …
+ZIP installieren …	Install ZIP …
+TC importieren …	Import from TC …
+Name, Typ, Maske oder Pfad filtern	Filter name, type, mask or path
+Plugins filtern	Filter plugins
+Filter leeren	Clear filter
+Plugin nach oben	Move plugin up
+Plugin nach unten	Move plugin down
+Registrierte Plugins in Ausführungsreihenfolge	Registered plugins in execution order
+Aktiv	Active
+Deaktiviert	Disabled
+Keine passenden Plugins.	No matching plugins.
+Plugin auswählen	Select a plugin
+Registriere eine DLL oder installiere ein ZIP-Paket.	Register a DLL or install a ZIP package.
+Dateimasken	File masks
+Alle bei manueller Auswahl	All when selected manually
+TC-Erkennung:	TC detection:
+Aktivieren	Enable
+Deaktivieren	Disable
+Funktionen	Functions
+Dateioperationen …	File operations …
+WDX-Spalte hinzufügen …	Add WDX column …
+Registrierung bearbeiten …	Edit registration …
+Entfernen …	Remove …
+Die Listenreihenfolge bestimmt die Plugin-Priorität.	List order determines plugin priority.
+Zum Umordnen den Filter leeren.	Clear the filter to change the order.
+Plugin-Verwaltung	Plugin manager
+Plugin	Plugin
+Typ / Architektur	Type / architecture
+Installieren	Install
+Bereits registriert	Already registered
+Neue Plugins werden deaktiviert registriert.	New plugins are registered as disabled.
+Einträge übersprungen.	entries skipped.
+Bereits vorhanden	Already exists
+Profil	Profile
+Übernahme / Modus	Import / mode
+FTP-Datei bearbeiten	Edit FTP file
+Serverdatei	Server file
+Lokale Arbeitskopie	Local working copy
+Im Editor speichern und danach die Änderungen hochladen.	Save in the editor, then upload the changes.
+Im Editor öffnen	Open in editor
+Kopie behalten und beenden	Keep copy and finish
+Kopie löschen …	Delete copy …
+Rückübertragung im Transfermanager vorgemerkt.	Upload queued in the transfer manager.
+Änderungen hochladen	Upload changes
+Sprache und Erscheinungsbild der Anwendung.	Application language and appearance.
+Sichtbare Leisten und Aufbau der Dateifenster.	Visible toolbars and file panel layout.
+Auswahl, versteckte Dateien und Schnellsuche.	Selection, hidden files and quick search.
+Befehle suchen und eigene Tastenkürzel zuweisen.	Find commands and assign custom shortcuts.
+Schrift und Größe mit direkter Vorschau.	Font and size with immediate preview.
+Geschwindigkeit, Protokoll und Dateieigenschaften.	Speed, logging and file properties.
+Externe Werkzeuge für Bearbeitung und Suche.	External tools for editing and search.
+Symbolleisten	Toolbars
+Dateifenster und Navigation	File panels and navigation
+Auswahl und Navigation	Selection and navigation
+Strg+Bild auf/ab wechselt die Kategorie.	Ctrl+Page Up/Down changes the category.
+FTP-Auftrag läuft …	FTP operation in progress …
+Plugin-Auftrag läuft …	Plugin operation in progress …
+FTP-Download prüfen …	Verifying FTP download …
+FTP-Datei herunterladen …	Downloading FTP file …
+FTP-Verbindung herstellen	Connecting to FTP
+Anmelden und Verzeichnis laden …	Signing in and loading directory …
+FTP-Profile lesen	Read FTP profiles
+FTP-Verbindungsprofile auswerten …	Reading FTP connection profiles …
+FTP-Vorschau laden	Load FTP preview
+Vorschau vorbereiten …	Preparing preview …
+FTP-Dateirechte setzen	Set FTP permissions
+FTP-Dateirechte setzen …	Setting FTP permissions …
+FTP-Verzeichnis bearbeiten	Modify FTP directory
+FTP-Verzeichnis bearbeiten …	Modifying FTP directory …
+FTP-Arbeitskopie laden	Download FTP working copy
+FTP-Änderungen prüfen und zurückübertragen …	Checking and uploading FTP changes …
+FTP-Verzeichnis laden	Load FTP directory
+FTP-Verzeichnis anfordern …	Requesting FTP directory …
+FTP-Download fortsetzen …	Resuming FTP download …
+FTP-Datei hochladen …	Uploading FTP file …
+Plugin prüfen	Check plugin
+Plugin-Schnittstellen prüfen …	Checking plugin interfaces …
+Plugin-Paket vorbereiten	Prepare plugin package
+Plugin-Paket lesen …	Reading plugin package …
+Plugin-Paket entpacken …	Extracting plugin package …
+Plugin-Registrierungen prüfen …	Checking plugin registrations …
+Plugin-Registrierungen importieren	Import plugin registrations
+Total-Commander-Registrierungen auswerten …	Reading Total Commander registrations …
+Plugin ausführen	Run plugin
+Plugin-Host starten …	Starting plugin host …
+Plugin-Paket entfernen	Remove plugin package
+Paketdateien entfernen …	Removing package files …
+Auftrag fehlgeschlagen	Operation failed
