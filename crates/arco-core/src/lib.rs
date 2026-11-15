@@ -12,6 +12,7 @@ pub mod everything;
 pub mod external_archives;
 pub mod files;
 pub mod ignore;
+pub mod io_progress;
 pub mod legacy_archives;
 #[allow(unsafe_code)] // Win32 file information, security and sparse-file APIs.
 mod native_copy;

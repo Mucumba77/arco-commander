@@ -419,36 +419,13 @@ impl App {
         value: &str,
         working_directory: &str,
     ) -> io::Result<()> {
-        let mut button = match parse_button(value, working_directory) {
-            Ok(button) => button,
-            Err(error) => {
-                self.show_button_editor(
-                    bar,
-                    index,
-                    value,
-                    working_directory,
-                    Some(&error.to_string()),
-                );
-                return Ok(());
-            }
-        };
+        let mut button = parse_button(value, working_directory)?;
         let mut buttons = self.editing_buttons(bar).to_vec();
         if let Some(index) = index {
             let current = buttons
                 .get_mut(index)
                 .ok_or_else(|| io::Error::other("Die Schaltfläche fehlt."))?;
-            match (&mut button.action, &mut current.action) {
-                (ButtonbarAction::Menu { buttons }, ButtonbarAction::Menu { buttons: old }) => {
-                    std::mem::swap(buttons, old);
-                }
-                (
-                    new @ ButtonbarAction::SwitchBar { .. },
-                    old @ ButtonbarAction::SwitchBar { .. },
-                ) => {
-                    std::mem::swap(new, old);
-                }
-                _ => {}
-            }
+            retain_nested_action(&mut button, current);
             *current = button;
         } else if buttons.len() < self.editing_limit(bar) {
             buttons.push(button);
@@ -480,7 +457,7 @@ impl App {
         self.commit_buttonbar_profile(draft)
     }
 
-    fn editing_buttons(&self, bar: usize) -> &[ButtonbarButton] {
+    pub(super) fn editing_buttons(&self, bar: usize) -> &[ButtonbarButton] {
         let mut buttons = self.buttons(bar);
         for &index in &self.buttonbar_edit_path {
             let Some(children) = buttons
@@ -494,7 +471,7 @@ impl App {
         buttons
     }
 
-    fn editing_limit(&self, bar: usize) -> usize {
+    pub(super) fn editing_limit(&self, bar: usize) -> usize {
         if self.buttonbar_edit_path.is_empty() {
             LIMITS[bar]
         } else {
@@ -761,6 +738,18 @@ impl App {
             levels.pop();
             self.show_buttonbar_menu(bar, levels);
         }
+    }
+}
+
+pub(super) fn retain_nested_action(button: &mut ButtonbarButton, current: &ButtonbarButton) {
+    match (&mut button.action, &current.action) {
+        (ButtonbarAction::Menu { buttons }, ButtonbarAction::Menu { buttons: old }) => {
+            buttons.clone_from(old);
+        }
+        (new @ ButtonbarAction::SwitchBar { .. }, old @ ButtonbarAction::SwitchBar { .. }) => {
+            *new = old.clone();
+        }
+        _ => (),
     }
 }
 
@@ -1465,7 +1454,7 @@ fn start_directory(value: &str) -> io::Result<Option<PathBuf>> {
     Ok((!value.is_empty()).then_some(path))
 }
 
-fn parse_button(value: &str, working_directory: &str) -> io::Result<ButtonbarButton> {
+pub(super) fn parse_button(value: &str, working_directory: &str) -> io::Result<ButtonbarButton> {
     if value.len() > 4096 {
         return Err(io::Error::other("Die Schaltfläche enthält zu viel Text."));
     }

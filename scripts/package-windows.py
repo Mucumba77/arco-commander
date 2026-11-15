@@ -1,5 +1,6 @@
 """Package and smoke-test the Windows release binaries without opening windows."""
 
+import argparse
 import hashlib
 import json
 import os
@@ -123,7 +124,7 @@ def copy_executable(source, destination, machine, subsystem):
     destination.write_bytes(data)
 
 
-def smoke_test(archive, name, version):
+def smoke_test(archive, name, version, *, run_app=True):
     def run(executable, *args, stdin=None):
         return subprocess.run(
             [str(executable), *map(str, args)], cwd=executable.parent, input=stdin,
@@ -136,11 +137,15 @@ def smoke_test(archive, name, version):
             require(package.testzip() is None, "Release ZIP failed its CRC check")
             package.extractall(root)
         app = root / name / "arco-commander.exe"
-        command = run(app, "--version")
-        require(command.returncode == 0 and command.stdout.strip() == f"Arco Commander {version}".encode(),
-                "The application binary does not report the release version")
-        command = run(app, "--help")
-        require(command.returncode == 0 and b"--portable" in command.stdout, "The application help failed")
+        if run_app:
+            command = run(app, "--version")
+            require(command.returncode == 0 and command.stdout.strip() == f"Arco Commander {version}".encode(),
+                    "The application binary does not report the release version")
+            command = run(app, "--help")
+            require(command.returncode == 0 and b"--portable" in command.stdout, "The application help failed")
+        else:
+            require(f"Arco Commander {version}".encode() in app.read_bytes(),
+                    "The application binary does not contain the release version")
 
         protocols = set()
         for helper in ("arco-plugin-host.exe", "arco-plugin-host-x86.exe"):
@@ -166,7 +171,7 @@ def smoke_test(archive, name, version):
         require(command.returncode != 0 and result.read_bytes() == b"keep", "ZIP-SFX did not protect an existing file")
 
 
-def package_release():
+def package_release(*, run_app=True):
     require(os.name == "nt", "Run packaging and smoke tests on Windows")
     require(not git("status", "--porcelain"), "Commit the release sources before packaging")
     commit = git("rev-parse", "HEAD")
@@ -192,7 +197,7 @@ def package_release():
         ):
             source_name = "arco-plugin-host.exe" if folder == wow_binaries else filename
             copy_executable(folder / source_name, stage / filename, machine, subsystem)
-        for document in DOCS:
+        for document in (*DOCS, f"docs/releases/v{version}.md"):
             destination = stage / document
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / document, destination)
@@ -227,13 +232,18 @@ Drittanbieterhinweise: DRITTANBIETER.md und licenses/
             for path in sorted(stage.rglob("*")):
                 if path.is_file():
                     package.write(path, path.relative_to(stage.parent).as_posix())
-        smoke_test(archive, name, version)
+        smoke_test(archive, name, version, run_app=run_app)
         digest = hashlib.sha256(archive.read_bytes()).hexdigest()
         archive.rename(final_archive)
         (output / "SHA256SUMS.txt").write_text(f"{digest}  {final_archive.name}\n", encoding="ascii")
-    print(f"Verified application version, both plugin hosts, ZIP-SFX and ZIP CRC: {final_archive}")
+    version_check = "application version/help" if run_app else "embedded version (application not started)"
+    print(f"Verified {version_check}, both plugin hosts, ZIP-SFX and ZIP CRC: {final_archive}")
     print(f"Dependency notices: {len(packages)}. SHA-256: {digest}")
 
 
 if __name__ == "__main__":
-    package_release()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--no-app-run", action="store_true",
+                        help="Never execute arco-commander.exe; check its embedded version statically")
+    arguments = parser.parse_args()
+    package_release(run_app=not arguments.no_app_run)

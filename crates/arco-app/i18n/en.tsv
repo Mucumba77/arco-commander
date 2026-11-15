@@ -647,3 +647,468 @@ Plugin-Host starten …	Starting plugin host …
 Plugin-Paket entfernen	Remove plugin package
 Paketdateien entfernen …	Removing package files …
 Auftrag fehlgeschlagen	Operation failed
+Byteabweichungen seitenweise prüfen. Die Dateien bleiben unverändert.	Review byte differences page by page. Files are left unchanged.
+Unterschiede abschnittsweise prüfen, bearbeiten oder in die andere Datei übernehmen.	Review, edit or merge differences one section at a time.
+Bearbeitbar	Editable
+Nicht gespeichert	Unsaved
+Bearbeitung speichern	Save edits
+Vergleichsregeln	Comparison rules
+Groß-/Kleinschreibung ignorieren	Ignore case
+Leerraum ignorieren	Ignore whitespace
+Zeilenenden ignorieren	Ignore line endings
+Neu vergleichen	Compare again
+Neu vergleichen · Strg+R	Compare again · Ctrl+R
+Hinweis zum Vergleich	Comparison notice
+Änderung gespeichert	Change saved
+Vorschau veraltet	Outdated preview
+Suchbereich geprüft	Search range checked
+Arbeitsschritte	Work steps
+Nur Abweichungen · bis zu 128 Positionen pro Seite · — bedeutet fehlendes Byte	Differences only · up to 128 positions per page · — means a missing byte
+Nur abweichende Abschnitte · Text bis 4 MiB / 200.000 Zeilen pro Datei · gekürzte Vorschauen sind schreibgeschützt	Changed sections only · text up to 4 MiB / 200,000 lines per file · truncated previews are read-only
+Änderung in die linke Datei schreiben?	Write change to the left file?
+Änderung in die rechte Datei schreiben?	Write change to the right file?
+Nur die Bearbeitung dieses Abschnitts wird gespeichert.	Only the edits to this section will be saved.
+Der Originalabschnitt der anderen Datei ersetzt diesen Abschnitt.	The original section from the other file replaces this section.
+Änderung speichern	Save change
+Nicht gespeicherte Bearbeitung verwerfen?	Discard unsaved edits?
+Deine Bearbeitung bleibt erhalten, wenn du hier zurückgehst.	Go back to keep your edits.
+Verwerfen und fortfahren	Discard and continue
+Vorheriger Unterschied · Umschalt+F7	Previous difference · Shift+F7
+Nächster Unterschied · F7	Next difference · F7
+← Nach links übernehmen	← Merge to left
+Nach rechts übernehmen →	Merge to right →
+F7 Weiter · Umschalt+F7 Zurück · Esc Schließen oder Abbrechen	F7 Next · Shift+F7 Previous · Esc Close or cancel
+F7 Weiter · Umschalt+F7 Zurück · Strg+R Neu vergleichen · Esc Zurück oder Schließen	F7 Next · Shift+F7 Previous · Ctrl+R Compare again · Esc Back or close
+Offset (hex) · Byte · Zeichen	Offset (hex) · Byte · Character
+Abweichungen auf dieser Seite	Differences on this page
+Keine weiteren Byteabweichungen in diesem Suchbereich.	No more byte differences in this search range.
+Dateien sind bytegleich.	Files are byte-identical.
+Unterschied	Difference
+Zeilen	Lines
+Einfügeposition vor Zeile	Insertion point before line
+Keine Textunterschiede nach den gewählten Vergleichsregeln.	No text differences under the selected comparison rules.
+Änderung gespeichert. Die Vorschau ist veraltet; bitte neu vergleichen.	Change saved. The preview is outdated; please compare again.
+Linke Datei lesen …	Reading left file …
+Rechte Datei lesen …	Reading right file …
+Vergleichsregeln anwenden …	Applying comparison rules …
+Textunterschiede ermitteln …	Finding text differences …
+Vergleich abgeschlossen	Comparison complete
+Vorherige Byteabweichungen suchen …	Finding previous byte differences …
+Nächste Byteabweichungen suchen …	Finding next byte differences …
+Zieldatei prüfen und Änderung speichern …	Checking target file and saving change …
+Dateien werden verglichen …	Comparing files …
+Vergleich fehlgeschlagen	Comparison failed
+… Vorschau gekürzt	… Preview truncated
+Aktivität	Activity
+Geänderte Regeln mit Neu vergleichen anwenden.	Apply changed rules with Compare again.
+F7 Weiter · Umschalt+F7 Zurück · Strg+R Neu vergleichen · Esc Schließen oder Abbrechen	F7 Next · Shift+F7 Previous · Ctrl+R Compare again · Esc Close or cancel
+Binärvergleich	Binary comparison
+Dateien nach Inhalt vergleichen	Compare file contents
+Nur lesen	Read-only
+Auswahl erfassen	Scan selection
+Einträge bearbeiten	Edit entries
+Einträge verarbeiten	Process entries
+Ergebnis	Result
+Dateiattribute	File attributes
+Unverändert lässt das jeweilige Attribut jedes Eintrags bestehen.	Unchanged preserves the corresponding attribute on each entry.
+Schreibgeschützt (R)	Read-only (R)
+Versteckt (H)	Hidden (H)
+System (S)	System (S)
+Archiv (A)	Archive (A)
+Unverändert	Unchanged
+Setzen	Set
+Zeitstempel	Timestamps
+Nur aktivierte Zeitstempel ändern. Format: JJJJ-MM-TT HH:MM:SS, Ortszeit.	Only change enabled timestamps. Format: YYYY-MM-DD HH:MM:SS, local time.
+Geändert	Modified
+Erstellt	Created
+Letzter Zugriff	Last accessed
+Änderungsdatum	Modification date
+Erstellungsdatum	Creation date
+Zugriffsdatum	Access date
+Geltungsbereich	Scope
+Unterordner und enthaltene Dateien einbeziehen	Include subfolders and their files
+Die Ignorierliste gilt auch hier. Verknüpfungen werden nicht verfolgt. Bereits angewendete Änderungen bleiben bei Abbruch bestehen.	The ignore list applies here too. Links are not followed. Changes already applied remain after cancellation.
+Änderungen für die gezeigte Auswahl übernehmen.	Apply changes to the displayed selection.
+Wähle mindestens eine Änderung.	Choose at least one change.
+Eigenschaft	Property
+Wert	Value
+Windows-Berechtigungen	Windows permissions
+Besitzer, Vererbung und Zugriffsrechte im Windows-Eigenschaftendialog unter Sicherheit bearbeiten.	Edit owner, inheritance and access permissions on the Security tab of Windows Properties.
+Für Windows-Eigenschaften und Zugriffsrechte einen einzelnen Eintrag auswählen.	Select a single entry for Windows Properties and access permissions.
+Attribute und Zeitstempel …	Attributes and timestamps …
+Windows-Eigenschaften …	Windows Properties …
+Unix-Rechte ändern …	Change Unix permissions …
+FTP-Unix-Rechte ändern	Change FTP Unix permissions
+Neuer Zugriffsmodus	New access mode
+Alle ausgewählten Einträge erhalten diese Rechte. Der Server muss SITE CHMOD unterstützen; vorhandene Rechte werden nicht automatisch abgeleitet.	All selected entries receive these permissions. The server must support SITE CHMOD; existing modes are not inferred automatically.
+Oktal, z. B. 644 oder 755	Octal, e.g. 644 or 755
+Unix-Rechte als Oktalwert	Unix permissions in octal
+Vorlage wählen	Choose preset
+Rechtevorlage	Permission preset
+Drei oder vier Oktalziffern von 0 bis 7 eingeben.	Enter three or four octal digits from 0 to 7.
+Rechtematrix	Permission matrix
+Besitzer	Owner
+Andere	Others
+Lesen	Read
+Schreiben	Write
+Spezielle Modusbits	Special mode bits
+Bei Abbruch bleiben bereits gesetzte Rechte bestehen. Ordnerinhalte werden nicht rekursiv geändert.	Permissions already applied remain after cancellation. Folder contents are not changed recursively.
+Der neue Modus gilt für die gesamte Auswahl.	The new mode applies to the entire selection.
+Oktalwert eingeben oder Rechte auswählen.	Enter an octal value or select permissions.
+Rechte übernehmen	Apply permissions
+Dateieigenschaften	File properties
+Eigenschaften lesen	Read properties
+Eigenschaften lesen …	Reading properties …
+Einträge werden verarbeitet …	Processing entries …
+Attribute und Zeitstempel setzen …	Applying attributes and timestamps …
+Auswahl und Unterordner erfassen …	Scanning selection and subfolders …
+Attribute und Zeitstempel	Attributes and timestamps
+Ungültige Attributauswahl.	Invalid attribute selection.
+Gib mindestens eine Änderung an.	Specify at least one change.
+Verwende JJJJ-MM-TT HH:MM:SS für Zeitstempel.	Use YYYY-MM-DD HH:MM:SS for timestamps.
+Die Ortszeit ist nicht eindeutig.	The local time is ambiguous or does not exist.
+Der Zeitpunkt liegt außerhalb des Windows-Zeitbereichs.	The timestamp is outside the Windows time range.
+Gib drei oder vier Oktalziffern ein, zum Beispiel 644.	Enter three or four octal digits, for example 644.
+Erfolgreich	Successful
+Abgeschlossen	Completed
+Ignoriert	Ignored
+Fehlgeschlagen	Failed
+Virtueller Eintrag	Virtual entry
+Typ	Type
+Name	Name
+Nicht ermittelt	Not determined
+Nicht verfügbar	Unavailable
+Nicht geliefert	Not provided
+Keine besonderen Attribute	No special attributes
+Komprimiert	Compressed
+Verschlüsselt	Encrypted
+Ordnerinhalte nicht eingerechnet	Folder contents not included
+Dateigröße der Auswahl	Size of selected files
+Unvollständig	Incomplete
+Nicht vollständig ermittelt	Not fully determined
+Nicht gesetzt	Not set
+Gesetzt	Set
+Unterschiedlich	Mixed
+Verknüpfungsziel	Link target
+Verknüpfungen	Links
+Verknüpfung	Link
+Anderer Eintrag	Other entry
+Umfang	Contents
+Verzeichnisformat	Directory format
+Unix-Rechte	Unix permissions
+Vom Server nicht als Modus geliefert	Not supplied as a mode by the server
+Server-Zeitstempel (UTC)	Server timestamp (UTC)
+FTP-Eigenschaften	FTP properties
+WFX-Eigenschaften	WFX properties
+Archiv-Eigenschaften	Archive properties
+Einträge	Entries
+Bytes	Bytes
+Übernehmen	Apply
+Fehler	Errors
+Neu laden	Reload
+Berechnen	Calculate
+Zusammenfügen	Join
+Kodieren	Encode
+Dekodieren	Decode
+Leseposition der aktuellen Quelle	Read position in current source
+Aktuelle Phase	Current phase
+Lesedurchsatz	Read throughput
+Lese-Restzeit (geschätzt)	Estimated remaining read time
+Lesezeitwerte gelten für die aktuelle Quelle. Verarbeitung und Speichern folgen als eigene Phasen.	Read-time estimates apply to the current source. Processing and saving follow as separate phases.
+Datei oder Schritt	File or step
+Prüfsumme oder Status	Checksum or status
+Quellen	Sources
+Reihenfolge	Order
+Quelle kopieren	Copy source
+Prüfverfahren	Checksum method
+Verfahren	Method
+Format oder Modus	Format or mode
+Erwartete Prüfsumme	Expected checksum
+Teilgröße in MiB	Part size in MiB
+Positive ganze Zahl; 1 MiB entspricht 1.048.576 Bytes.	Positive integer; 1 MiB is 1,048,576 bytes.
+Ausgabe	Output
+Prüfsummendatei (optional)	Checksum file (optional)
+Name der Ausgabedatei	Output file name
+Ordner wählen …	Choose folder …
+Ohne Ausgabename werden Prüfsummen nur im Ergebnis angezeigt.	Without an output name, checksums are displayed only in the results.
+Vorhandene Dateien werden nicht überschrieben. Bereits abgeschlossene Ausgaben bleiben nach Abbruch bestehen.	Existing files are not overwritten. Outputs already completed remain after cancellation.
+Tab wechselt die Felder · Leertaste/Enter betätigt Schaltflächen · Esc schließt oder fordert Abbruch an	Tab changes fields · Space/Enter activates buttons · Esc closes or requests cancellation
+Prüfsummen erzeugen	Create checksums
+Prüfsummendatei prüfen	Verify checksum file
+Datei teilen	Split file
+Dateien zusammenfügen	Join files
+Dateien kodieren	Encode files
+Dateien dekodieren	Decode files
+Die Dateien einer Prüfsummenliste prüfen. Dateipfade außerhalb ihres Ordners werden abgewiesen.	Verify files in a checksum list. Paths outside its directory are rejected.
+Ausgewählte Dateien berechnen und optional eine neue Prüfsummenliste speichern.	Calculate checksums for selected files and optionally save a new checksum list.
+Die erwartete Prüfsumme bleibt vor dem Start sichtbar und bearbeitbar.	The expected checksum remains visible and editable before starting.
+TC erzeugt Basisname.001 und eine CRC-Begleitdatei; reine Dateiteile verwenden Originalname.001. Der Satz wird erst nach vollständigem Lesen veröffentlicht.	TC creates basename.001 and a CRC companion file; raw parts use originalname.001. The set is published only after reading the entire source.
+CRC-Satz automatisch vervollständigen	Complete CRC set automatically
+Die CRC-Begleitdatei bestimmt Originalname, vollständigen Teilesatz, Größe und Prüfsumme. Erst nach erfolgreicher Prüfung wird gespeichert.	The CRC companion file determines the original name, full set of parts, size and checksum. The output is saved only after successful verification.
+Lexikografische Reihenfolge	Lexicographic order
+Die angezeigten Quellen werden in lexikografischer Reihenfolge verbunden. Vorhandene Ausgaben bleiben erhalten.	Displayed sources are joined in lexicographic order. Existing outputs are preserved.
+Transportkodierungen für Dateien. Zusammengehörige UUE-/XXE-Teile und MIME-Nachrichtenteile werden gemeinsam verarbeitet. BinHex ist zum Dekodieren verfügbar.	File transport encodings. Related UUE/XXE parts and MIME message fragments are processed together. BinHex is available for decoding.
+Automatisch nach Dateiendung	Automatic by file extension
+Total Commander (.crc)	Total Commander (.crc)
+Nur Dateiteile	Raw file parts
+Dateiteile erfassen	Scan file parts
+CRC-Begleitdatei lesen …	Reading CRC companion file …
+Wähle ein gültiges Verfahren.	Choose a valid method.
+Teilgröße muss eine positive ganze Zahl in MiB sein.	Part size must be a positive integer in MiB.
+Gib einen Zielordner an.	Specify a destination folder.
+Die erwartete Prüfsumme passt nicht zum gewählten Algorithmus.	The expected checksum does not match the selected algorithm.
+Quelldaten lesen …	Reading source data …
+Daten prüfen und verarbeiten …	Checking and processing data …
+Ausgaben prüfen und speichern …	Checking and saving outputs …
+Dateiwerkzeug läuft …	File tool running …
+Dateiwerkzeug	File tool
+Abweichung	Mismatch
+Prüfsumme stimmt	Checksum matches
+Prüfsumme weicht ab	Checksum mismatch
+Gespeichert	Saved
+Dekodiert	Decoded
+Datei	File
+Absolute Ordnerpfade verwenden. Ein leeres Gegenverzeichnis lässt das andere Dateifenster unverändert.	Use absolute folder paths. Leave the opposite folder empty to keep the other panel unchanged.
+Absoluter EXE-Pfad	Absolute EXE path
+Aktion	Action
+Aktionstyp	Action type
+Aktuelle Leiste	Current bar
+Anlegen, bearbeiten und sortieren	Create, edit and reorder
+Arbeitsordner (optional)	Working folder (optional)
+Argumente	arguments
+Argumente vor dem Start prüfen	Review arguments before starting
+Argumente übergeben (ein Argument je Zeile)	Pass arguments (one per line)
+Argumente, ein Argument je Zeile	Arguments, one per line
+Ausführen / öffnen	Run / open
+Auswählen	Select
+Befehl	Command
+Befehl wählen …	Choose a command …
+Beschriftung	Label
+Darstellung	Appearance
+Darstellung und Aktion getrennt bearbeiten. Programme werden erst beim ausdrücklichen Aufruf gestartet.	Edit appearance and action separately. Programs start only when explicitly invoked.
+Datei wählen …	Choose file …
+Datei auswählen	Select file
+Den gewählten Eintrag aus der Konfiguration entfernen? Dateien und Programme bleiben erhalten.	Remove this entry from the configuration? Files and programs will be kept.
+Diese Aktion ändert die gespeicherte Buttonbar- und Starterkonfiguration. Fortfahren?	This action changes the saved button bar and launcher configuration. Continue?
+Doppelklick oder Enter öffnet den Eintrag · Strg+F filtert · Esc schließt	Double-click or Enter opens the entry · Ctrl+F filters · Esc closes
+Doppelklick/Enter: bearbeiten · F2: bearbeiten · Einfg: neu · Alt+↑/↓: Reihenfolge · Entf: entfernen	Double-click/Enter: edit · F2: edit · Insert: new · Alt+↑/↓: reorder · Delete: remove
+Ein Favorit öffnet einen Ordner oder ein zusammengehöriges Ordnerpaar.	A favorite opens a folder or a linked pair of folders.
+Eine Ebene nach oben	Up one level
+Eingabe	Input
+Einträge verwaltest du nach dem Speichern über die Aktion Untermenü. Vorhandene Einträge und importierte Leistenwechsel bleiben beim gleichen Aktionstyp erhalten.	After saving, manage entries with Submenu. Existing entries and imported bar switches are retained when the action type stays the same.
+Exportieren …	Export …
+Favoriten mit Namen, Gruppen und vollständigen Ordnerpfaden verwalten.	Manage favorites with names, groups and complete folder paths.
+Favoriten verwalten …	Manage favorites …
+Favoritengruppe	Favorite group
+Fensterzustand	Window state
+Gewählten Tab verwalten …	Manage selected tab …
+Gruppe (optional, Ebenen mit / trennen)	Group (optional, separate levels with /)
+Gruppe öffnen	Open group
+Importieren …	Import …
+Internen Befehl wählen	Choose internal command
+Interner Befehl	Internal command
+Keine Einträge. Leere den Filter oder lege einen neuen Eintrag an.	No entries. Clear the filter or create a new entry.
+Leistenwechsel	Switch bar
+Liste filtern	Filter list
+Maximiert	Maximized
+Minimiert	Minimized
+Nach Name, Pfad oder Befehl filtern …	Filter by name, path or command …
+Nach oben verschieben	Move up
+Nach unten verschieben	Move down
+Name (optional)	Name (optional)
+Nicht gespeicherte Änderungen	Unsaved changes
+Nicht gesperrt	Unlocked
+Normal	Normal
+Ordner fest gesperrt	Folder locked
+Ordner im aktiven Dateifenster	Folder in the active panel
+Ordner im anderen Dateifenster (optional)	Folder in the opposite panel (optional)
+Programm	Program
+Programm starten	Start program
+Programmoptionen	Program options
+Prüfe den Hinweis oben und bestätige die Aktion ausdrücklich.	Review the notice above and explicitly confirm the action.
+Rückkehr zum Stammordner	Return to base folder
+Schaltflächen	buttons
+Schaltflächen in Anzeigereihenfolge	Buttons in display order
+Speichern startet kein Programm. Leere Argumentzeilen bleiben als leere Argumente erhalten. Die Argumentprüfung aktiviert die TC-Platzhalterauswertung.	Saving does not start a program. Empty argument lines remain empty arguments. Argument review enables TC placeholder expansion.
+Standardsymbol oder eigener Bildpfad; DLL-Ressourcen mit Komma und Index, z. B. shell32.dll,3.	Built-in icon or image path; DLL resources use a comma and index, e.g. shell32.dll,3.
+Standardsymbol wählen	Choose built-in icon
+Standardsymbol wählen …	Choose built-in icon …
+Starter verwalten …	Manage launcher …
+Symbol	Icon
+Symbolname, Bildpfad oder DLL-Ressource	Icon name, image path or DLL resource
+Tab-Gruppen speichern beide Dateifenster einschließlich Pfaden, Namen und Sperren.	Tab groups save both panels including paths, names and locks.
+Tab: nächstes Feld · Umschalt+Tab: zurück · Strg+S: übernehmen · Esc: abbrechen	Tab: next field · Shift+Tab: previous · Ctrl+S: apply · Esc: cancel
+Total-Commander-Platzhalter auswerten	Expand Total Commander placeholders
+Untermenü	Submenu
+Untermenüebenen	submenu levels
+Verwalten	Manage
+Verwerfen	Discard
+Vorhandene Untereinträge beim Typwechsel entfernen	Remove existing child entries when changing type
+Vorlage öffnen	Open template
+Weiter bearbeiten	Continue editing
+Wähle eine Aktion. Ausführen oder Doppelklick startet sie; Verwalten ändert nur die Konfiguration.	Choose an action. Run or double-click starts it; Manage only changes the configuration.
+Wählen …	Choose …
+Änderung bestätigen	Confirm change
+Übergeordnete Leiste	Parent bar
+Tab-Name (leer = Ordnername)	Tab name (empty = folder name)
+Windows-Argumente	Windows arguments
+Absoluter Dateipfad	Absolute file path
+Vorschau laden	Load preview
+Gruppe löschen	Delete group
+Tabs ersetzen	Replace tabs
+Ein einzeiliges Feld enthält Steuerzeichen.	A single-line field contains control characters.
+Bestätige zuerst das Entfernen der vorhandenen Untereinträge.	Confirm removal of the existing child entries first.
+Wähle einen gültigen Fensterzustand.	Choose a valid window state.
+Wähle einen gültigen Aktionstyp.	Choose a valid action type.
+Der Befehl passt nicht zum gewählten Aktionstyp.	The command does not match the selected action type.
+Gib einen absoluten Zielpfad mit der Endung .tab ein.	Enter an absolute destination path ending in .tab.
+Wähle einen neuen Dateinamen. Vorhandene Tab-Dateien werden nicht überschrieben.	Choose a new file name. Existing tab files are not overwritten.
+Absteigend	Descending
+Alle	All
+Als Standardaktion für passende Dateien verwenden	Use as the default action for matching files
+Ansicht beibehalten	Keep current view
+Ansicht und Spalten	View and columns
+Ansichtsmodus	View mode
+Ansichtsmodus wählen	Choose a view mode
+Aufsteigend	Ascending
+Ausrichtung	Alignment
+Auswahl	Selection
+Auswahl und Cursor legen Hintergründe fest. Sonst bestimmt die erste passende Dateimaske die Schriftfarbe.	Selection and Cursor set background colors. Otherwise the first matching file mask sets the text color.
+Automatische Ansichtsregeln verwenden	Use automatic view rules
+Automatischer Wechsel	Automatic switching
+Bedingungen und Priorität ohne Textformat bearbeiten. Die erste passende Regel bestimmt die Ansicht.	Edit conditions and priority in separate fields. The first matching rule determines the view.
+Behalten	Keep
+Bezeichnung	Name
+Breite in Pixeln (40 bis 600)	Width in pixels (40 to 600)
+Cursor	Cursor
+Darstellung, Spaltensatz und Sortierung gemeinsam festlegen. Importierte Farben bleiben erhalten.	Set the view, column set and sorting together. Imported colors are retained.
+Darstellungsart	View type
+Das erste Feld hat die höchste Priorität. Jedes Feld darf nur einmal vorkommen; Unsortiert steht allein.	The first field has the highest priority. Each field can appear once; Unsorted must stand alone.
+Datei anzeigen	View file
+Dateien und Aktion	Files and action
+Dateimasken oder Auswahl / Cursor	File masks or Auswahl / Cursor
+Dateimasken, Programm und Argumente getrennt bearbeiten. Diese Zuordnung gilt nur innerhalb von Arco Commander.	Edit file masks, program and arguments separately. This association only applies within Arco Commander.
+Der Name bleibt beim Bearbeiten erhalten, damit Verweise auf diese Ansicht gültig bleiben.	The name is kept when editing so references to this view remain valid.
+Details	Details
+Die Namensspalte bleibt links bestehen. Plugin-Felder und TC-Ausdrücke behalten ihre Identität.	The name column remains on the left. Plugin fields and TC expressions retain their identity.
+Die erste passende Regel gewinnt. Änderungen an Einträgen und Reihenfolge werden erst mit Speichern übernommen.	The first matching rule wins. Changes to entries and their order are applied only when saved.
+Die erste passende Standardaktion gewinnt. Reihenfolge ändern oder Aktionen bearbeiten; Speichern startet kein Programm.	The first matching default action wins. Reorder or edit actions; saving does not start a program.
+Diese Aktion ändert die gespeicherte Konfiguration. Fortfahren?	This action changes the saved configuration. Continue?
+Doppelklick/Enter: anwenden · F2: bearbeiten · Einfg: neu · Entf: entfernen	Double-click/Enter: apply · F2: edit · Insert: new · Delete: remove
+Eigene Spaltensätze benötigen die Detailansicht. Importierte Ansichtsfarben bleiben erhalten.	Custom column sets require the Details view. Imported view colors are retained.
+Eintrag aus dem Entwurf entfernen?	Remove this entry from the draft?
+Enthält Dateien nach Maske (optional)	Contains files matching masks (optional)
+Enthält keine Dateien nach Maske (optional)	Contains no files matching masks (optional)
+Erweiterter TC-Regelausdruck	Advanced TC rule expression
+Erweiterung	Extension
+Es gilt die erste passende Standardaktion in der Verwaltung. Diese Zuordnung gilt innerhalb von Arco Commander.	The first matching default action in the manager is used. This association applies within Arco Commander.
+Farbe im dunklen Schema (#RRGGBB)	Dark theme color (#RRGGBB)
+Farbe im hellen Schema (#RRGGBB)	Light theme color (#RRGGBB)
+Farben für helle und dunkle Darstellung getrennt festlegen. Leere Listen verwenden die Standardfarben.	Set light and dark theme colors separately. Empty lists use the default colors.
+Farbreihenfolge	Color priority
+Gewählter Eintrag	Selected entry
+Im aktiven Tab anwenden	Apply to active tab
+Importierte TC-Bedingungen werden als vollständiger Ausdruck erhalten, einschließlich Verknüpfungen.	Imported TC conditions are retained as complete expressions, including operators.
+Kommentare	Comments
+Kurz	Brief
+Laufwerke	Drives
+Lokale Ordner	Local folders
+Maximale Anzahl Einträge:	Maximum number of entries:
+Mehrere Masken mit Semikolon trennen; hinter | stehen Ausschlüsse, z. B. *.txt;*.md | intern*.	Separate masks with semicolons; exclusions follow |, e.g. *.txt;*.md | internal*.
+Meine Ansicht	My view
+Meine Spalten	My columns
+Meine WFX-Spalten	My WFX columns
+Mindestanteil passender Dateien in % (optional)	Minimum percentage of matching files (optional)
+Mindestens eine Bedingung genügt (ODER)	At least one condition is sufficient (OR)
+Miniaturen	Thumbnails
+Nicht gespeicherte Änderungen · Strg+S: speichern · Esc: abbrechen	Unsaved changes · Ctrl+S: save · Esc: cancel
+Nicht verfügbares Sortierfeld	Unavailable sort field
+Noch keine Einträge. Mit Neu einen Eintrag hinzufügen.	No entries yet. Use New to add an entry.
+Pfadmaske (optional)	Path mask (optional)
+Pfeile: auswählen · Enter/F2: Felder · Einfg: neu · Alt+↑/↓: Reihenfolge · Entf: entfernen	Arrows: select · Enter/F2: fields · Insert: new · Alt+↑/↓: reorder · Delete: remove
+Platzhalter stehen jeweils als eigenes Argument. Ohne {{datei}} oder {{name}} wird der Dateipfad automatisch angehängt. Speichern startet kein Programm.	Each placeholder is a separate argument. Without {{datei}} or {{name}}, the file path is appended automatically. Saving does not start a program.
+Regel	Rule
+Regelpriorität	Rule priority
+Sortierfeld	Sort field
+Sortierfelder	sort fields
+Sortierfelder in Prioritätsreihenfolge anordnen. Leere Listen verwenden die Standardsortierung.	Arrange sort fields by priority. Empty lists use the default sorting.
+Sortierpriorität	Sort priority
+Sortierrichtung	Sort direction
+Spalten einzeln bearbeiten und sortieren. Plugin-Felder und importierte Ausdrücke bleiben vollständig erhalten.	Edit and reorder individual columns. Plugin fields and imported expressions are fully retained.
+Spaltenfeld	Column field
+Spaltenreihenfolge	Column order
+Spaltensatz	Column set
+Spaltentitel	Column heading
+Standardspalten	Standard columns
+Suchergebnisse	Search results
+TC-Regelausdruck	TC rule expression
+TC-Spaltenausdruck	TC column expression
+Tab: nächstes Feld · Umschalt+Tab: zurück · Strg+S: speichern	Tab: next field · Shift+Tab: previous · Ctrl+S: save
+UNC / Netzwerk	UNC / network
+Beim Entfernen eines Ansichtsmodus werden auch seine automatischen Regeln entfernt.	Removing a view mode also removes its automatic rules.
+Beim Entfernen eines Spaltensatzes werden zugehörige Ansichten auf Standardspalten zurückgesetzt.	Removing a column set resets dependent views to standard columns.
+Standardaktion	Default action
+Zusätzliche Aktion	Additional action
+Lege zuerst einen Ansichtsmodus an.	Create a view mode first.
+Spaltentitel benötigen höchstens 80 Zeichen ohne Steuerzeichen.	Column headings require at most 80 characters without control characters.
+Wähle ein gültiges Spaltenfeld.	Choose a valid column field.
+Wähle eine gültige Ausrichtung.	Choose a valid alignment.
+Wähle einen gültigen Geltungsbereich.	Choose a valid scope.
+Wähle Sortierfeld und Richtung.	Choose a sort field and direction.
+Die Konfiguration hat sich geändert.	The configuration has changed.
+Die Konfiguration fehlt.	The configuration is missing.
+Unbekannte Bearbeitungsaktion.	Unknown editing action.
+Bei der Auswahl eines WFX-Feldes wird die Plugin-Sortierrichtung übernommen. Danach kannst du sie ausdrücklich ändern.	Choosing a WFX field applies its plugin sort direction. You can then change it explicitly.
+Alles kopieren	Copy all
+Archivendung ohne Punkt	Archive extension without a dot
+Argumente – ein Argument je Zeile	Arguments – one argument per line
+Auftrag abgeschlossen	Task completed
+Der Auftrag ist abgeschlossen.	The task is complete.
+Der Auftrag wurde abgebrochen. Bereits abgeschlossene Schritte bleiben bestehen.	The task was cancelled. Completed steps are kept.
+Der Vorgang konnte nicht abgeschlossen werden. Die Details enthalten die Fehlermeldung.	The operation could not be completed. The details contain the error message.
+Details anzeigen	Show details
+Details ausblenden	Hide details
+Details kopieren	Copy details
+Drucken …	Print …
+Eine Regel je Zeile; ein abschließender Backslash gilt nur für Ordner. Aktivierung und Text werden zusammen gespeichert.	One rule per line; a trailing backslash applies only to folders. Rules and activation are saved together.
+Einfache Ersetzung (optional, Muster=>Ersatz)	Simple replacement (optional, pattern=>replacement)
+Einige Einträge konnten nicht vollständig verarbeitet werden. Die Details enthalten die betroffenen Stellen.	Some entries could not be fully processed. The details identify the affected items.
+Ersetzungsgruppen auswerten	Expand replacement groups
+Erweiterung getrennt umbenennen	Rename the extension separately
+Erweiterung und Ersetzung	Extension and replacement
+Externes Programm	External program
+Groß-/Kleinschreibung beachten	Match case
+Hinweis mit Einschränkungen	Completed with limitations
+Ignorierliste verwenden	Use ignore list
+In die Zwischenablage kopiert.	Copied to the clipboard.
+Information	Information
+Namensmaske, Erweiterung und Suchoptionen als Vorlage speichern. Dabei werden keine Dateien umbenannt.	Save the name mask, extension and search options as a template. This does not rename files.
+Nur erstes Vorkommen	First occurrence only
+Pfade und Dateimasken	Paths and file masks
+Platzhalter	Wildcards
+Platzhalter: {{archive}} für das Ziel, {{sources}} für Quelldateien oder @{{list}} für eine Dateiliste.	Placeholders: {{archive}} for the destination, {{sources}} for source files or @{{list}} for a file list.
+Profilname, Programm, Archivendung und Argumente getrennt bearbeiten.	Edit the profile name, program, archive extension and arguments separately.
+Regeln und Aktivierung gemeinsam bearbeiten. Änderungen gelten erst nach dem Speichern.	Edit rules and activation together. Changes apply only after saving.
+Speichern führt den Packer nicht aus. Archiv und Quellen werden beim Packen als getrennte Argumente eingesetzt.	Saving does not run the packer. Archive and sources are passed as separate arguments when packing.
+Suchen nach	Find
+Suchen und Ersetzen verwenden	Use search and replace
+Umbenennvorschau	Rename preview
+Vollständige Details	Complete details
+Weitere Informationen stehen in den Details.	Further information is available in the details.
+Weitere Meldungen warten:	More messages waiting:
+Warnung	Warning
+Der Auftrag ist mit Fehlern abgeschlossen. Prüfe die betroffenen Einträge in den Details.	The task completed with errors. Check the affected entries in the details.
+Übersprungen	Skipped
+Meldungen	Messages
+Letztes Ergebnis	Last result
+Meldungen und letztes Ergebnis	Messages and last result
+Laufwerk auswählen und öffnen	Select a drive and open it
+Pfeile: auswählen · Doppelklick/Enter: öffnen · Laufwerksbuchstabe: direkt öffnen · Esc: abbrechen	Arrows: select · Double-click/Enter: open · Drive letter: open directly · Esc: cancel
+Vorschau nicht verfügbar	Preview unavailable
+Dateiverwaltung mit zwei Dateifenstern für Windows.	Dual-panel file management for Windows.
+Es liegen keine weiteren Meldungen vor.	There are no further messages.
+Doppelklick/Enter: bearbeiten · F2: bearbeiten · Einfg: neu · Entf: entfernen	Double-click/Enter: edit · F2: edit · Insert: new · Delete: remove
+Doppelklick/Enter: Umbenennvorschau · F2: bearbeiten · Einfg: neu · Entf: entfernen	Double-click/Enter: rename preview · F2: edit · Insert: new · Delete: remove
+Einlesen	Read
+Dateipfad	File path
+Fehlerdetails	Error details

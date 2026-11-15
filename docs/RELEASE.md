@@ -38,6 +38,8 @@ py -3 scripts/package-windows.py
 
 Das Skript prüft Architektur, GUI-Subsystem, lokale Buildpfade und die Programmversion. Es entpackt das ZIP für Tests des Programmaufrufs, der beiden Plugin-Hosts und des ZIP-SFX-Moduls. Die Fensterbedienung und Zielsysteme haben separate manuelle Prüffälle.
 
+Wenn die Anwendung ausdrücklich nicht gestartet werden soll, verwende `py -3 scripts/package-windows.py --no-app-run`. Diese Variante führt auch `--version` und `--help` nicht aus und prüft stattdessen die eingebettete Versionszeichenfolge im Programm. Beide Plugin-Hosts, ZIP-SFX und die Paketintegrität werden weiterhin ohne Fenster geprüft. Release-Hinweise müssen den ausgelassenen Anwendungstest und die ausstehenden Fenstertests nennen.
+
 ## GitHub
 
 Lege den annotierten Tag `v<VERSION>` auf den geprüften Commit. Lade das ZIP und `SHA256SUMS.txt` in einen Release-Entwurf zum Tag und vergleiche die Hashes. Veröffentliche den geprüften Entwurf als reguläre aktuelle Version. Die Release-Hinweise nennen Betriebssysteme, optionale Voraussetzungen, Signaturstatus und Stand der manuellen Prüfung. Füge für Slint den offiziellen **Made with Slint**-Badge auf der Downloadseite ein.

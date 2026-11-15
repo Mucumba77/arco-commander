@@ -62,7 +62,7 @@ export component FormSection inherits Rectangle {
     }
 }
 
-export enum OperationKind { task, copy, move, pack, extract, delete, search, rename, sync, ftp, plugin }
+export enum OperationKind { task, copy, move, pack, extract, delete, search, rename, sync, ftp, plugin, compare, metadata, utility }
 
 export struct JobMetrics {
     source: string,
@@ -137,11 +137,11 @@ export component ProgressMeter inherits VerticalLayout {
 export component ProgressMetrics inherits HorizontalLayout {
     in property <OperationKind> kind;
     in property <JobMetrics> data;
-    property <bool> counted: root.kind == OperationKind.delete || root.kind == OperationKind.rename || root.kind == OperationKind.sync || ((root.kind == OperationKind.ftp || root.kind == OperationKind.plugin) && root.data.items != "" && root.data.bytes == "");
-    property <bool> activity: (root.kind == OperationKind.ftp || root.kind == OperationKind.plugin) && root.data.items == "" && root.data.bytes == "";
+    property <bool> counted: root.kind == OperationKind.metadata || root.kind == OperationKind.delete || root.kind == OperationKind.rename || root.kind == OperationKind.sync || ((root.kind == OperationKind.ftp || root.kind == OperationKind.plugin || root.kind == OperationKind.compare || root.kind == OperationKind.utility) && root.data.items != "" && root.data.bytes == "");
+    property <bool> activity: (root.kind == OperationKind.ftp || root.kind == OperationKind.plugin || root.kind == OperationKind.compare || root.kind == OperationKind.utility) && root.data.items == "" && root.data.bytes == "";
     spacing: 9px;
-    if !root.activity : MetricTile { label: root.kind == OperationKind.search ? @tr("Geprüft") : root.kind == OperationKind.rename ? @tr("Schritte erledigt") : root.kind == OperationKind.sync ? (root.data.items == "" ? @tr("Erfasste Einträge") : @tr("Aktionen erledigt")) : root.counted ? @tr("Bearbeitet") : @tr("Durchsatz"); value: root.kind == OperationKind.search || root.counted ? root.data.processed : root.data.speed; }
-    if !root.activity : MetricTile { label: root.kind == OperationKind.search ? @tr("Treffer") : root.kind == OperationKind.rename ? @tr("Schritte offen") : root.kind == OperationKind.sync ? @tr("Aktionen offen") : root.counted ? @tr("Ausstehend") : @tr("Restzeit (geschätzt)"); value: root.kind == OperationKind.search ? root.data.matched : root.counted ? root.data.pending : root.data.remaining; }
+    if !root.activity : MetricTile { label: root.kind == OperationKind.metadata && root.data.items == "" ? @tr("Erfasste Einträge") : root.kind == OperationKind.search ? @tr("Geprüft") : root.kind == OperationKind.rename || (root.kind == OperationKind.compare && root.counted) ? @tr("Schritte erledigt") : root.kind == OperationKind.sync ? (root.data.items == "" ? @tr("Erfasste Einträge") : @tr("Aktionen erledigt")) : root.counted ? @tr("Bearbeitet") : root.kind == OperationKind.utility ? @tr("Lesedurchsatz") : @tr("Durchsatz"); value: root.kind == OperationKind.search || root.counted ? root.data.processed : root.data.speed; }
+    if !root.activity : MetricTile { label: root.kind == OperationKind.metadata && root.data.items == "" ? @tr("Lesefehler") : root.kind == OperationKind.search ? @tr("Treffer") : root.kind == OperationKind.rename || (root.kind == OperationKind.compare && root.counted) ? @tr("Schritte offen") : root.kind == OperationKind.sync ? @tr("Aktionen offen") : root.counted ? @tr("Ausstehend") : root.kind == OperationKind.utility ? @tr("Lese-Restzeit (geschätzt)") : @tr("Restzeit (geschätzt)"); value: root.kind == OperationKind.metadata && root.data.items == "" ? root.data.errors : root.kind == OperationKind.search ? root.data.matched : root.counted ? root.data.pending : root.data.remaining; }
     MetricTile { label: @tr("Vergangen"); value: root.data.elapsed; }
 }
 
@@ -152,7 +152,7 @@ export component ReviewTable inherits Rectangle {
     in property <string> primary-label;
     in property <string> secondary-label;
     property <int> selection;
-    property <length> secondary-width: 230px;
+    in property <length> secondary-width: 230px;
     callback copy(string);
     forward-focus: keys;
     min-height: 140px;
@@ -279,7 +279,7 @@ export component TransferProgressCard inherits Rectangle {
     in property <bool> pausable;
     in property <bool> paused;
     property <bool> deleting: root.kind == OperationKind.delete;
-    property <bool> counted: root.deleting || root.kind == OperationKind.rename || root.kind == OperationKind.sync || ((root.kind == OperationKind.ftp || root.kind == OperationKind.plugin) && root.data.items != "" && root.data.bytes == "");
+    property <bool> counted: root.deleting || root.kind == OperationKind.metadata || root.kind == OperationKind.rename || root.kind == OperationKind.sync || ((root.kind == OperationKind.ftp || root.kind == OperationKind.plugin || root.kind == OperationKind.compare || root.kind == OperationKind.utility) && root.data.items != "" && root.data.bytes == "");
     callback pause();
     callback cancel();
     callback hide-progress();
@@ -298,6 +298,9 @@ export component TransferProgressCard inherits Rectangle {
             icon: root.deleting ? @image-url("icons/trash.svg")
                 : root.kind == OperationKind.ftp ? @image-url("icons/network.svg")
                 : root.kind == OperationKind.plugin ? @image-url("icons/settings.svg")
+                : root.kind == OperationKind.utility ? @image-url("icons/file.svg")
+                : root.kind == OperationKind.metadata ? @image-url("icons/settings.svg")
+                : root.kind == OperationKind.compare ? @image-url("icons/compare.svg")
                 : root.kind == OperationKind.search ? @image-url("icons/search.svg")
                 : root.kind == OperationKind.rename ? @image-url("icons/edit.svg")
                 : root.kind == OperationKind.sync ? @image-url("icons/sync.svg")
@@ -314,20 +317,20 @@ export component TransferProgressCard inherits Rectangle {
             VerticalLayout {
                 padding: 12px;
                 spacing: 5px;
-                if root.origin != "" : FieldLabel { text: root.kind == OperationKind.search ? @tr("Suchbereich") : root.kind == OperationKind.sync ? @tr("Links") : root.kind == OperationKind.extract ? @tr("Quellarchiv") : @tr("Quelle"); }
+                if root.origin != "" : FieldLabel { text: root.kind == OperationKind.search ? @tr("Suchbereich") : root.kind == OperationKind.sync || root.kind == OperationKind.compare ? @tr("Links") : root.kind == OperationKind.extract ? @tr("Quellarchiv") : @tr("Quelle"); }
                 if root.origin != "" : Text { text: root.origin; color: Colors.muted; font-size: 12px; overflow: elide; Tooltip { text: @markdown("\{root.origin}"); } }
-                if root.target != "" : FieldLabel { text: root.kind == OperationKind.sync ? @tr("Rechts") : root.kind == OperationKind.pack ? @tr("Zielarchiv") : @tr("Ziel"); }
+                if root.target != "" : FieldLabel { text: root.kind == OperationKind.sync || root.kind == OperationKind.compare ? @tr("Rechts") : root.kind == OperationKind.pack ? @tr("Zielarchiv") : @tr("Ziel"); }
                 if root.target != "" : Text { text: root.target; color: Colors.text; font-size: 12px; overflow: elide; Tooltip { text: @markdown("\{root.target}"); } }
             }
         }
-        ProgressMeter { label: root.kind == OperationKind.search ? @tr("Suchfortschritt") : @tr("Gesamtfortschritt"); progress: root.progress; paused: root.paused || (root.cancelling && !root.data.recovering); }
+        ProgressMeter { label: root.kind == OperationKind.utility ? (root.data.bytes == "" ? @tr("Aktuelle Phase") : @tr("Leseposition der aktuellen Quelle")) : root.kind == OperationKind.metadata ? (root.data.items == "" ? @tr("Auswahl erfassen") : @tr("Einträge verarbeiten")) : root.kind == OperationKind.search ? @tr("Suchfortschritt") : root.kind == OperationKind.compare ? (root.data.items != "" ? @tr("Arbeitsschritte") : root.data.bytes != "" ? @tr("Suchbereich geprüft") : @tr("Aktivität")) : @tr("Gesamtfortschritt"); progress: root.progress; paused: root.paused || (root.cancelling && !root.data.recovering); }
         ProgressMetrics { kind: root.kind; data: root.data; }
         if !root.counted && root.kind != OperationKind.search : HorizontalLayout {
             spacing: 8px;
             Text { text: root.data.items; color: Colors.accent; font-size: 12px; horizontal-stretch: 1; }
             Text { text: root.data.bytes; color: Colors.muted; font-size: 12px; }
         }
-        if root.data.finish != "" : Text {
+        if root.data.finish != "" && root.kind != OperationKind.utility : Text {
             text: @tr("Voraussichtlich fertig:") + " " + root.data.finish;
             color: Colors.muted; font-size: 12px; horizontal-alignment: right;
         }
@@ -758,6 +761,7 @@ export component CompactDialogCard inherits Rectangle {
     in property <int> revision;
     in property <string> title;
     in property <string> description;
+    in property <string> notice;
     in property <string> value;
     in property <string> secondary-value;
     in property <string> label;
@@ -772,80 +776,80 @@ export component CompactDialogCard inherits Rectangle {
     property <int> choice;
     callback submit(string, string, int);
     callback dismiss();
-
+    preferred-height: card.preferred-height;
     background: Colors.panel;
     border-radius: 14px;
     border-width: 1px;
     border-color: Colors.edge;
-
-    changed revision => {
-        root.first = root.value;
-        root.second = root.secondary-value;
-        root.choice = 0;
-    }
-
-    VerticalLayout {
-        padding: 17px;
-        spacing: 10px;
-        alignment: start;
-        DialogHeading {
-            icon: root.input ? @image-url("icons/edit.svg") : @image-url("icons/check.svg");
-            title: root.title;
-            subtitle: root.description;
-        }
-        if root.input : VerticalLayout {
-            spacing: 4px;
-            if root.label != "" : FieldLabel { text: root.label; }
-            prompt-input := LineEdit {
-                property <int> cycle: root.focus-cycle;
-                changed cycle => { if (self.cycle > 0) { self.focus(); } }
-                text <=> root.first;
-                input-type: root.secret ? password : text;
-                accessible-label: root.label;
-                accepted => { root.submit(root.first, root.second, root.choice); }
-                init => { self.focus(); }
+    changed revision => { root.first = root.value; root.second = root.secondary-value; root.choice = 0; }
+    changed notice => { scroll.viewport-y = 0px; }
+    function show-fields() { scroll.viewport-y = min(0px, scroll.height - scroll.viewport-height); }
+    FocusScope {
+        width: 100%; height: 100%; focus-on-tab-navigation: false;
+        key-pressed(event) => {
+            if (event.text == Key.Escape) { root.dismiss(); return accept; }
+            if (!event.modifiers.control && !event.modifiers.alt && (event.text == Key.PageUp || event.text == Key.PageDown)) {
+                scroll.viewport-y = clamp(scroll.viewport-y + (event.text == Key.PageUp ? 1 : -1) * scroll.height * 0.8, min(0px, scroll.height - scroll.viewport-height), 0px);
+                return accept;
             }
+            return reject;
         }
-        if root.input && root.secondary-label != "" : VerticalLayout {
-            spacing: 4px;
-            FieldLabel { text: root.secondary-label; }
-            LineEdit {
-                text <=> root.second;
-                input-type: root.secondary-secret ? password : text;
-                accessible-label: root.secondary-label;
-                accepted => { root.submit(root.first, root.second, root.choice); }
+        card := VerticalLayout {
+            padding: 17px; spacing: 10px;
+            DialogHeading { icon: root.input ? @image-url("icons/edit.svg") : @image-url("icons/check.svg"); title: root.title; }
+            scroll := ScrollView {
+                vertical-stretch: 1;
+                preferred-height: min(340px, fields.preferred-height);
+                fields := VerticalLayout {
+                    padding: 0px; spacing: 10px;
+                    if root.notice != "" : TextEdit { text: root.notice; read-only: true; height: 80px; wrap: word-wrap; accessible-label: @tr("Fehlerdetails"); }
+                    if root.description != "" : Text { text: root.description; color: Colors.muted; wrap: word-wrap; }
+                    if root.input : VerticalLayout {
+                        spacing: 4px;
+                        FieldLabel { text: root.label == "" ? root.title : root.label; }
+                        LineEdit {
+                            property <int> cycle: root.focus-cycle;
+                            changed cycle => { if (self.cycle > 0) { self.focus(); root.show-fields(); } }
+                            text <=> root.first; input-type: root.secret ? password : text;
+                            accessible-label: root.label == "" ? root.title : root.label;
+                            edited => { root.show-fields(); }
+                            accepted => { root.submit(root.first, root.second, root.choice); }
+                            init => { self.focus(); }
+                        }
+                    }
+                    if root.input && root.secondary-label != "" : VerticalLayout {
+                        spacing: 4px;
+                        FieldLabel { text: root.secondary-label; }
+                        LineEdit { text <=> root.second; input-type: root.secondary-secret ? password : text; accessible-label: root.secondary-label; edited => { root.show-fields(); } accepted => { root.submit(root.first, root.second, root.choice); } }
+                    }
+                    if root.options.length > 0 : VerticalLayout {
+                        spacing: 4px;
+                        FieldLabel { text: root.options-label == "" ? @tr("Auswahl") : root.options-label; }
+                        ComboBox {
+                            property <int> cycle: root.focus-cycle;
+                            changed cycle => { if (self.cycle > 0 && !root.input) { self.focus(); root.show-fields(); } }
+                            model: root.options; current-index <=> root.choice;
+                            accessible-label: root.options-label == "" ? @tr("Auswahl") : root.options-label;
+                            init => { if (!root.input) { self.focus(); } }
+                        }
+                    }
+                }
             }
-        }
-        if root.options.length > 0 : VerticalLayout {
-            spacing: 4px;
-            FieldLabel { text: root.options-label == "" ? @tr("Auswahl") : root.options-label; }
-            ComboBox {
-                property <int> cycle: root.focus-cycle;
-                changed cycle => { if (self.cycle > 0 && !root.input) { self.focus(); } }
-                model: root.options;
-                current-index <=> root.choice;
-                accessible-label: root.options-label == "" ? @tr("Auswahl") : root.options-label;
-                init => { if (!root.input) { self.focus(); } }
-            }
-        }
-        Rectangle { height: 1px; background: Colors.edge; }
-        HorizontalLayout {
-            spacing: 8px;
-            Rectangle { horizontal-stretch: 1; }
-            Button {
-                property <int> cycle: root.focus-cycle;
-                changed cycle => { if (self.cycle > 0 && !root.input && root.options.length == 0) { self.focus(); } }
-                text: @tr("Abbrechen");
-                clicked => { root.dismiss(); }
-                init => { if (!root.input && root.options.length == 0) { self.focus(); } }
-            }
-            Button {
-                property <int> cycle: root.focus-cycle;
-                changed cycle => { if (self.cycle < 0) { self.focus(); } }
-                text: root.confirm-label != "" ? root.confirm-label
-                    : root.options.length > 0 ? @tr("Auswahl bestätigen") : @tr("Bestätigen");
-                primary: true;
-                clicked => { root.submit(root.first, root.second, root.choice); }
+            Rectangle { height: 1px; background: Colors.edge; }
+            HorizontalLayout {
+                spacing: 8px; Rectangle { horizontal-stretch: 1; }
+                Button {
+                    property <int> cycle: root.focus-cycle;
+                    changed cycle => { if (self.cycle > 0 && !root.input && root.options.length == 0) { self.focus(); } }
+                    text: @tr("Abbrechen"); clicked => { root.dismiss(); }
+                    init => { if (!root.input && root.options.length == 0) { self.focus(); } }
+                }
+                Button {
+                    property <int> cycle: root.focus-cycle;
+                    changed cycle => { if (self.cycle < 0) { self.focus(); } }
+                    text: root.confirm-label != "" ? root.confirm-label : root.options.length > 0 ? @tr("Auswahl bestätigen") : @tr("Bestätigen");
+                    primary: true; clicked => { root.submit(root.first, root.second, root.choice); }
+                }
             }
         }
     }

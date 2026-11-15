@@ -8,6 +8,7 @@ use crate::sync::FileMasks;
 use globset::{GlobBuilder, GlobMatcher};
 use std::{collections::BTreeMap, ffi::OsString, io, path::Path};
 
+#[derive(Clone)]
 pub struct TcViews {
     pub columns: BTreeMap<String, Vec<Column>>,
     pub column_layouts: BTreeMap<u16, TcColumnLayout>,

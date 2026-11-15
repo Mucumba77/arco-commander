@@ -1,6 +1,7 @@
 use crate::files;
+use crate::io_progress::{self, ObservedFile, Observer, Phase};
 use std::ffi::OsStr;
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -71,8 +72,18 @@ pub fn encode(
     format: Format,
     cancel: &AtomicBool,
 ) -> io::Result<PathBuf> {
+    encode_observed(source, directory, format, cancel, &|_| {})
+}
+
+pub fn encode_observed(
+    source: &Path,
+    directory: &Path,
+    format: Format,
+    cancel: &AtomicBool,
+    observer: Observer<'_>,
+) -> io::Result<PathBuf> {
     match format {
-        Format::Mime => return mime::encode(source, directory, cancel),
+        Format::Mime => return mime::encode_observed(source, directory, cancel, observer),
         Format::BinHex => {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -83,7 +94,7 @@ pub fn encode(
     }
     files::check_cancel(cancel)?;
     let metadata = source_file(source)?;
-    let mut input = BufReader::new(File::open(source)?);
+    let mut input = BufReader::new(ObservedFile::open(source, cancel, observer)?);
     let directory = fs::canonicalize(directory)?;
     let name = source
         .file_name()
@@ -131,6 +142,7 @@ pub fn encode(
         output.flush()?;
     }
     files::ensure_unchanged(source, &metadata)?;
+    io_progress::phase(source, Phase::Publishing, observer);
     publish(staged, &target, cancel)?;
     Ok(target)
 }
@@ -141,11 +153,21 @@ pub fn decode(
     format: Format,
     cancel: &AtomicBool,
 ) -> io::Result<Vec<PathBuf>> {
+    decode_observed(source, directory, format, cancel, &|_| {})
+}
+
+pub fn decode_observed(
+    source: &Path,
+    directory: &Path,
+    format: Format,
+    cancel: &AtomicBool,
+    observer: Observer<'_>,
+) -> io::Result<Vec<PathBuf>> {
     match format {
-        Format::Mime => mime::decode(source, directory, cancel),
-        Format::BinHex => binhex::decode(source, directory, cancel),
+        Format::Mime => mime::decode_observed(source, directory, cancel, observer),
+        Format::BinHex => binhex::decode_observed(source, directory, cancel, observer),
         Format::Uue | Format::Xxe => {
-            decode_armored(source, directory, format, cancel).map(|(path, _)| vec![path])
+            decode_armored(source, directory, format, cancel, observer).map(|(path, _)| vec![path])
         }
     }
 }
@@ -155,13 +177,31 @@ pub fn decode_mime_batch(
     directory: &Path,
     cancel: &AtomicBool,
 ) -> Vec<(PathBuf, io::Result<Vec<PathBuf>>)> {
-    mime::decode_batch(sources, directory, cancel)
+    decode_mime_batch_observed(sources, directory, cancel, &|_| {})
+}
+
+pub fn decode_mime_batch_observed(
+    sources: &[PathBuf],
+    directory: &Path,
+    cancel: &AtomicBool,
+    observer: Observer<'_>,
+) -> Vec<(PathBuf, io::Result<Vec<PathBuf>>)> {
+    mime::decode_batch_observed(sources, directory, cancel, observer)
 }
 
 pub fn decode_armored_batch(
     sources: &[(PathBuf, Format)],
     directory: &Path,
     cancel: &AtomicBool,
+) -> Vec<(PathBuf, io::Result<()>)> {
+    decode_armored_batch_observed(sources, directory, cancel, &|_| {})
+}
+
+pub fn decode_armored_batch_observed(
+    sources: &[(PathBuf, Format)],
+    directory: &Path,
+    cancel: &AtomicBool,
+    observer: Observer<'_>,
 ) -> Vec<(PathBuf, io::Result<()>)> {
     let mut sources = sources.iter().collect::<Vec<_>>();
     sources.sort_by(|left, right| left.0.cmp(&right.0));
@@ -179,9 +219,10 @@ pub fn decode_armored_batch(
         if consumed.contains(&key(source)) {
             continue;
         }
-        let result = decode_armored(source, directory, *format, cancel).map(|(_, parts)| {
-            consumed.extend(parts.iter().skip(1).map(|path| key(path)));
-        });
+        let result =
+            decode_armored(source, directory, *format, cancel, observer).map(|(_, parts)| {
+                consumed.extend(parts.iter().skip(1).map(|path| key(path)));
+            });
         let cancelled = result
             .as_ref()
             .is_err_and(|error| error.kind() == io::ErrorKind::Interrupted);
@@ -199,12 +240,13 @@ fn decode_armored(
     directory: &Path,
     format: Format,
     cancel: &AtomicBool,
+    observer: Observer<'_>,
 ) -> io::Result<(PathBuf, Vec<PathBuf>)> {
     if !matches!(format, Format::Uue | Format::Xxe) {
         return Err(io::ErrorKind::InvalidInput.into());
     }
     files::check_cancel(cancel)?;
-    let mut input = ArmoredParts::open(source)?;
+    let mut input = ArmoredParts::open(source, cancel, observer)?;
     let mut line = Vec::new();
     let name = read_header(&mut input.reader, &mut line, cancel)?;
     let directory = fs::canonicalize(directory)?;
@@ -255,6 +297,7 @@ fn decode_armored(
     for (path, metadata) in &input.sources {
         files::ensure_unchanged(path, metadata)?;
     }
+    io_progress::phase(source, Phase::Publishing, observer);
     publish(staged, &target, cancel)?;
     Ok((
         target,
@@ -262,18 +305,23 @@ fn decode_armored(
     ))
 }
 
-struct ArmoredParts {
+struct ArmoredParts<'a> {
     sources: Vec<(PathBuf, fs::Metadata)>,
-    reader: BufReader<io::Take<File>>,
+    reader: BufReader<io::Take<ObservedFile<'a>>>,
+    observer: Observer<'a>,
+    cancel: &'a AtomicBool,
 }
 
-impl ArmoredParts {
-    fn open(source: &Path) -> io::Result<Self> {
+impl<'a> ArmoredParts<'a> {
+    fn open(source: &Path, cancel: &'a AtomicBool, observer: Observer<'a>) -> io::Result<Self> {
         let metadata = source_file(source)?;
-        let reader = BufReader::new(File::open(source)?.take(metadata.len()));
+        let reader =
+            BufReader::new(ObservedFile::open(source, cancel, observer)?.take(metadata.len()));
         Ok(Self {
             sources: vec![(source.to_path_buf(), metadata)],
             reader,
+            observer,
+            cancel,
         })
     }
 
@@ -292,7 +340,9 @@ impl ArmoredParts {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
             Err(error) => return Err(error),
         };
-        self.reader = BufReader::new(File::open(&next)?.take(metadata.len()));
+        self.reader = BufReader::new(
+            ObservedFile::open(&next, self.cancel, self.observer)?.take(metadata.len()),
+        );
         self.sources.push((next, metadata));
         read_line(&mut self.reader, line)
     }
@@ -451,6 +501,56 @@ fn invalid(message: &'static str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observed_codecs_keep_formats_and_cancel_before_publication() {
+        use std::{cell::Cell, sync::atomic::Ordering};
+        let fixture = tempfile::tempdir().unwrap();
+        let source = fixture.path().join("input.dat");
+        let data = vec![73; 150_000];
+        fs::write(&source, &data).unwrap();
+        for (index, format) in [Format::Uue, Format::Xxe, Format::Mime]
+            .into_iter()
+            .enumerate()
+        {
+            let encoded_dir = fixture.path().join(format!("encoded{index}"));
+            let decoded_dir = fixture.path().join(format!("decoded{index}"));
+            fs::create_dir(&encoded_dir).unwrap();
+            fs::create_dir(&decoded_dir).unwrap();
+            let read = Cell::new(0);
+            let encoded = encode_observed(
+                &source,
+                &encoded_dir,
+                format,
+                &AtomicBool::new(false),
+                &|p| {
+                    if p.phase == Phase::Reading {
+                        read.set(p.completed);
+                    }
+                },
+            )
+            .unwrap();
+            assert_eq!(read.get(), data.len() as u64);
+            let decoded = decode_observed(
+                &encoded,
+                &decoded_dir,
+                format,
+                &AtomicBool::new(false),
+                &|_| {},
+            )
+            .unwrap();
+            assert_eq!(fs::read(&decoded[0]).unwrap(), data);
+            fs::remove_file(&decoded[0]).unwrap();
+            let cancel = AtomicBool::new(false);
+            let result = decode_observed(&encoded, &decoded_dir, format, &cancel, &|p| {
+                if p.phase == Phase::Publishing {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            });
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted);
+            assert_eq!(fs::read_dir(decoded_dir).unwrap().count(), 0);
+        }
+    }
 
     #[test]
     fn numbered_and_lettered_armored_parts_are_decoded_once_and_require_every_part() {

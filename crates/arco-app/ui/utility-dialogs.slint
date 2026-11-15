@@ -1,0 +1,136 @@
+import { ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
+import { Colors, Button } from "dialog-theme.slint";
+import { DialogHeading, FieldLabel, FormSection, ProgressMeter, ProgressMetrics, JobMetrics, OperationKind, ReviewRow, ReviewTable } from "operation-dialogs.slint";
+
+export enum UtilityKind { hash, verify, expected, split, join, encode, decode }
+export struct UtilityForm { target: string, output: string, expected: string, part-size: string, option: int }
+export struct UtilityData { kind: UtilityKind, title: string, description: string, sources: [ReviewRow], options: [string], initial: UtilityForm }
+export struct UtilityState { notice: string, error-field: int, summary: string, rows: [ReviewRow] }
+
+export component UtilityCard inherits Rectangle {
+    in property <UtilityData> data;
+    in property <UtilityState> state;
+    in property <bool> busy;
+    in property <bool> cancelling;
+    in property <float> progress;
+    in property <JobMetrics> metrics;
+    in property <int> focus-cycle;
+    property <UtilityForm> form;
+    property <bool> hashing: root.data.kind == UtilityKind.hash || root.data.kind == UtilityKind.verify || root.data.kind == UtilityKind.expected;
+    property <bool> writes: root.data.kind == UtilityKind.hash || root.data.kind == UtilityKind.split || root.data.kind == UtilityKind.join || root.data.kind == UtilityKind.encode || root.data.kind == UtilityKind.decode;
+    property <bool> has-name: root.data.kind == UtilityKind.hash || root.data.kind == UtilityKind.join;
+    property <bool> target-enabled: root.writes && (root.data.kind != UtilityKind.hash || root.form.output != "");
+    property <string> action-label: root.data.kind == UtilityKind.hash ? @tr("Berechnen") : root.data.kind == UtilityKind.split ? @tr("Teilen") : root.data.kind == UtilityKind.join ? @tr("Zusammenfügen") : root.data.kind == UtilityKind.encode ? @tr("Kodieren") : root.data.kind == UtilityKind.decode ? @tr("Dekodieren") : @tr("Prüfen");
+    callback apply(UtilityForm);
+    callback action(int);
+    callback copy(string);
+    callback cancel();
+    callback close();
+    callback browse() -> string;
+    function focus-first() { if (choices.enabled) { choices.focus(); } else { sources.focus(); } }
+    init => { root.form = root.data.initial; root.focus-first(); }
+    changed focus-cycle => { if (!root.busy) { if (root.focus-cycle > 0) { root.focus-first(); } else { run.focus(); } } }
+    changed busy => { if (!root.busy) { close-button.focus(); } }
+    background: Colors.panel; border-radius: 16px; border-width: 1px; border-color: Colors.edge;
+    FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) { if (root.busy) { root.cancel(); } else { root.close(); } return accept; }
+            return reject;
+        }
+        VerticalLayout {
+            padding: 20px; spacing: 12px;
+            DialogHeading { icon: root.hashing ? @image-url("icons/compare.svg") : root.data.kind == UtilityKind.split || root.data.kind == UtilityKind.join ? @image-url("icons/copy.svg") : @image-url("icons/file.svg"); title: root.data.title; subtitle: root.data.description; }
+            if root.state.notice != "" : Text { text: root.state.notice; color: Colors.archive; wrap: word-wrap; }
+            ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    padding: 0px; spacing: 12px;
+                    if root.busy : FormSection {
+                        title: root.cancelling ? @tr("Abbruch angefordert …") : root.metrics.phase;
+                        ProgressMeter { label: root.metrics.bytes != "" ? @tr("Leseposition der aktuellen Quelle") : @tr("Aktuelle Phase"); progress: root.progress; paused: root.cancelling; }
+                        ProgressMetrics { kind: OperationKind.utility; data: root.metrics; }
+                        HorizontalLayout { spacing: 8px; Text { text: root.metrics.bytes; color: Colors.muted; horizontal-stretch: 1; } Text { text: root.metrics.items; color: Colors.accent; } }
+                        Text { text: root.metrics.source; color: Colors.text; overflow: elide; Tooltip { text: @markdown("\{root.metrics.source}"); } }
+                        Text { text: @tr("Lesezeitwerte gelten für die aktuelle Quelle. Verarbeitung und Speichern folgen als eigene Phasen."); color: Colors.muted; wrap: word-wrap; font-size: 12px; }
+                        stop := Button {
+                            property <int> cycle: root.focus-cycle;
+                            changed cycle => { self.focus(); }
+                            init => { self.focus(); }
+                            text: @tr("Abbrechen"); destructive: true; enabled: !root.cancelling; clicked => { root.cancel(); }
+                        }
+                    }
+                    if root.state.summary != "" : FormSection {
+                        title: @tr("Ergebnis");
+                        Text { text: root.state.summary; color: Colors.text; wrap: word-wrap; }
+                        results := ReviewTable { height: 210px; secondary-width: 350px; rows: root.state.rows; primary-label: @tr("Datei oder Schritt"); secondary-label: root.hashing ? @tr("Prüfsumme oder Status") : @tr("Ergebnis"); copy(value) => { root.copy(value); } }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Button { text: @tr("Zeile kopieren"); icon: @image-url("icons/copy.svg"); enabled: root.state.rows.length > 0; clicked => { results.copy-current(); } }
+                            Button { text: @tr("Text kopieren"); clicked => { root.action(1); } }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                    }
+                    FormSection {
+                        title: @tr("Quellen");
+                        sources := ReviewTable { height: 120px; secondary-width: 100px; rows: root.data.sources; primary-label: @tr("Datei"); secondary-label: @tr("Reihenfolge"); copy(value) => { root.copy(value); } }
+                        Button { text: @tr("Quelle kopieren"); enabled: root.data.sources.length > 0; clicked => { sources.copy-current(); } }
+                    }
+                    FormSection {
+                        title: root.hashing ? @tr("Prüfverfahren") : @tr("Verfahren");
+                        FieldLabel { text: root.hashing ? @tr("Algorithmus") : @tr("Format oder Modus"); }
+                        choices := ComboBox { model: root.data.options; current-index <=> root.form.option; enabled: !root.busy && root.data.options.length > 1; accessible-label: root.hashing ? @tr("Algorithmus") : @tr("Format oder Modus"); }
+                        if root.data.kind == UtilityKind.expected : VerticalLayout {
+                            spacing: 5px;
+                            FieldLabel { text: @tr("Erwartete Prüfsumme"); }
+                            LineEdit {
+                                property <UtilityState> validation: root.state;
+                                changed validation => { if (root.state.error-field == 5) { self.focus(); } }
+                                text <=> root.form.expected; enabled: !root.busy; accessible-label: @tr("Erwartete Prüfsumme");
+                            }
+                        }
+                        if root.data.kind == UtilityKind.split : VerticalLayout {
+                            spacing: 5px;
+                            FieldLabel { text: @tr("Teilgröße in MiB"); }
+                            LineEdit {
+                                property <UtilityState> validation: root.state;
+                                changed validation => { if (root.state.error-field == 3) { self.focus(); } }
+                                text <=> root.form.part-size; enabled: !root.busy; accessible-label: @tr("Teilgröße in MiB");
+                            }
+                            Text { text: @tr("Positive ganze Zahl; 1 MiB entspricht 1.048.576 Bytes."); color: Colors.muted; font-size: 12px; }
+                        }
+                    }
+                    if root.writes : FormSection {
+                        title: @tr("Ausgabe");
+                        if root.has-name : VerticalLayout {
+                            spacing: 5px;
+                            FieldLabel { text: root.data.kind == UtilityKind.hash ? @tr("Prüfsummendatei (optional)") : @tr("Name der Ausgabedatei"); }
+                            LineEdit {
+                                property <UtilityState> validation: root.state;
+                                changed validation => { if (root.state.error-field == 2) { self.focus(); } }
+                                text <=> root.form.output; enabled: !root.busy; accessible-label: root.data.kind == UtilityKind.hash ? @tr("Prüfsummendatei (optional)") : @tr("Name der Ausgabedatei");
+                            }
+                        }
+                        FieldLabel { text: @tr("Zielordner"); }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            LineEdit {
+                                property <UtilityState> validation: root.state;
+                                changed validation => { if (root.state.error-field == 1) { self.focus(); } }
+                                text <=> root.form.target; enabled: root.target-enabled && !root.busy; accessible-label: @tr("Zielordner");
+                            }
+                            Button { text: @tr("Ordner wählen …"); icon: @image-url("icons/folder.svg"); enabled: root.target-enabled && !root.busy; clicked => { let folder = root.browse(); if (folder != "") { root.form.target = folder; } } }
+                        }
+                        Text { text: root.data.kind == UtilityKind.hash && root.form.output == "" ? @tr("Ohne Ausgabename werden Prüfsummen nur im Ergebnis angezeigt.") : @tr("Vorhandene Dateien werden nicht überschrieben. Bereits abgeschlossene Ausgaben bleiben nach Abbruch bestehen."); color: Colors.muted; wrap: word-wrap; font-size: 12px; }
+                    }
+                }
+            }
+            Rectangle { height: 1px; background: Colors.edge; }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: @tr("Tab wechselt die Felder · Leertaste/Enter betätigt Schaltflächen · Esc schließt oder fordert Abbruch an"); color: Colors.muted; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; }
+                close-button := Button { text: @tr("Schließen"); enabled: !root.busy; clicked => { root.close(); } }
+                run := Button { text: root.action-label; primary: true; enabled: !root.busy; clicked => { root.apply(root.form); } }
+            }
+        }
+    }
+}

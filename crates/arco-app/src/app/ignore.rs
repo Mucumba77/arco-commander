@@ -36,14 +36,29 @@ impl App {
     }
 
     pub(crate) fn read_ignore_list(&mut self, value: &str) -> io::Result<()> {
+        if self.job.is_some() {
+            return Err(io::Error::other("Ein Auftrag läuft bereits."));
+        }
         let value = value.trim().trim_matches('"');
         if value.is_empty() {
             return Err(io::Error::other("Gib den Pfad zur Ignorierliste ein."));
         }
         let path = self.current().path.join(Path::new(value));
-        self.start_job("Lese Ignorierliste …", false, move |_| {
-            Ok(Outcome::IgnoreImported(IgnoreList::read_tc(&path)?))
-        });
+        self.start_operation_job(
+            "Lese Ignorierliste …",
+            false,
+            super::JobDescription::new(
+                crate::OperationKind::Task,
+                crate::display_path(&path),
+                String::new(),
+            ),
+            move |job| {
+                arco_core::files::check_cancel(&job.cancel)?;
+                let rules = IgnoreList::read_tc(&path)?;
+                arco_core::files::check_cancel(&job.cancel)?;
+                Ok(Outcome::IgnoreImported(rules))
+            },
+        );
         Ok(())
     }
 

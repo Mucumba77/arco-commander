@@ -29,6 +29,7 @@ export component Button inherits Rectangle {
     in property <bool> primary;
     in property <bool> destructive;
     in property <bool> compact;
+    in property <bool> elide-text;
     in property <bool> enabled: true;
     in property <bool> checkable;
     in property <bool> colorize-icon: true;
@@ -40,7 +41,7 @@ export component Button inherits Rectangle {
         : root.emphasized ? Colors.accent-ink : root.destructive ? Colors.archive : Colors.text;
     callback clicked();
     forward-focus: keys;
-    min-width: max(34px, content.min-width);
+    min-width: root.elide-text ? 34px : max(34px, content.min-width);
     min-height: max(root.compact ? 24px : 34px, content.min-height);
     horizontal-stretch: 0;
     vertical-stretch: 0;
@@ -77,6 +78,8 @@ export component Button inherits Rectangle {
         }
         if root.text != "" : Text {
             text: root.text;
+            min-width: root.elide-text ? 0px : self.preferred-width;
+            overflow: root.elide-text ? elide : clip;
             color: root.ink;
             font-size: 13px;
             font-weight: root.emphasized ? 600 : 400;

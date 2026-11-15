@@ -1,3 +1,15 @@
+import { MessageCard, MessageData, MessageLevel, MessageStat, TextDraftCard, TextDraftData, TextDraftForm, TextDraftKind } from "auxiliary-dialogs.slint";
+export { MessageData, MessageLevel, MessageStat, TextDraftData, TextDraftForm, TextDraftKind } from "auxiliary-dialogs.slint";
+import { ConfigurationCard, ConfigurationData, ConfigurationForm, ConfigurationItem, ConfigurationKind } from "configuration-dialog.slint";
+export { ConfigurationData, ConfigurationForm, ConfigurationItem, ConfigurationKind } from "configuration-dialog.slint";
+import { NavigationListCard, NavigationEditorCard, NavigationData, NavigationForm, NavigationRow } from "navigation-dialogs.slint";
+export { NavigationData, NavigationForm, NavigationRow } from "navigation-dialogs.slint";
+import { UtilityCard, UtilityKind, UtilityData, UtilityState, UtilityForm } from "utility-dialogs.slint";
+export { UtilityKind, UtilityData, UtilityState, UtilityForm } from "utility-dialogs.slint";
+import { TextComparisonCard, DiffData } from "comparison-dialog.slint";
+import { MetadataCard, PermissionsCard, PropertiesCard, MetadataForm, MutationData, PropertiesData } from "metadata-dialogs.slint";
+export { MetadataForm, MutationData, PropertiesData } from "metadata-dialogs.slint";
+export { DiffData } from "comparison-dialog.slint";
 import { ComboBox, LineEdit, ListView, Palette, ScrollView, TextEdit } from "std-widgets.slint";
 import { Colors, Button, CheckBox, NavButton, ActionButton, DetailCell, FocusBoundary } from "dialog-theme.slint";
 import { DialogHeading, FieldLabel, FileOperationCard, ReaderPane, ImagePane, TransferManagerCard, TransferManagerData, CompactDialogCard, ProgressRail, TransferProgressCard, JobMetrics, OperationKind, FormSection, ProgressMeter, ProgressMetrics, ReviewRow, ReviewTable, ReviewCard } from "operation-dialogs.slint";
@@ -76,25 +88,6 @@ export struct NtfsDraft {
     sparse: bool,
     creation-time: bool,
     copy-links: bool,
-}
-
-export struct DiffData {
-    binary: bool,
-    left-path: string,
-    right-path: string,
-    left-range: string,
-    right-range: string,
-    left-text: string,
-    right-text: string,
-    summary: string,
-    editable-left: bool,
-    editable-right: bool,
-    has-previous: bool,
-    has-next: bool,
-    has-change: bool,
-    ignore-case: bool,
-    ignore-whitespace: bool,
-    ignore-line-endings: bool,
 }
 
 export struct FileColumn {
@@ -343,6 +336,7 @@ export component SearchWindow inherits Window {
     min-height: 540px;
     background: Colors.background;
     property <ColorScheme> scheme: Colors.light ? ColorScheme.light : ColorScheme.dark;
+    property <int> focus-cycle;
     init => { Palette.color-scheme = root.scheme; }
     changed scheme => { Palette.color-scheme = root.scheme; }
     in property <SearchDraft> draft;
@@ -375,9 +369,11 @@ export component SearchWindow inherits Window {
             }
             return reject;
         }
+        FocusBoundary { reached => { root.focus-cycle = min(0, root.focus-cycle) - 1; } }
         VerticalLayout {
             padding: 12px; spacing: 12px;
             if !root.busy && !root.has-result : SearchCard {
+                focus-cycle: root.focus-cycle;
                 draft: root.draft; base: root.base; profiles: root.profiles; wdx-profiles: root.wdx-profiles;
                 archive: root.archive; notice: root.notice; has-selection: root.has-selection;
                 configure(data, name, operation) => { root.configure(data, name, operation); }
@@ -397,12 +393,13 @@ export component SearchWindow inherits Window {
                     Rectangle { vertical-stretch: 1; }
                     HorizontalLayout {
                         spacing: 8px; Rectangle { horizontal-stretch: 1; }
-                        Button { text: @tr("Schließen"); clicked => { root.close-search(); } }
-                        Button { text: @tr("Suchlauf abbrechen"); enabled: !root.cancelling; destructive: true; clicked => { root.cancel-search(); } init => { self.focus(); } }
+                        Button { property <int> cycle: root.focus-cycle; changed cycle => { if (self.cycle > 0 || root.cancelling) { self.focus(); } } text: @tr("Schließen"); clicked => { root.close-search(); } }
+                        Button { property <int> cycle: root.focus-cycle; changed cycle => { if (self.cycle < 0 && !root.cancelling) { self.focus(); } } text: @tr("Suchlauf abbrechen"); enabled: !root.cancelling; destructive: true; clicked => { root.cancel-search(); } init => { self.focus(); } }
                     }
                 }
             }
             if !root.busy && root.has-result : ReviewCard {
+                focus-cycle: root.focus-cycle;
                 kind: OperationKind.search; title: root.result-title; description: root.working-base;
                 rows: root.result-rows; primary-label: @tr("Name"); secondary-label: @tr("Typ / Größe");
                 confirm-label: @tr("Treffer übernehmen"); can-confirm: root.can-use; can-edit: true;
@@ -414,6 +411,7 @@ export component SearchWindow inherits Window {
             }
             if !root.busy && root.has-result && root.notice != "" : Text { text: root.notice; color: Colors.archive; wrap: word-wrap; }
         }
+        FocusBoundary { reached => { root.focus-cycle = max(0, root.focus-cycle) + 1; } }
     }
 }
 
@@ -1388,111 +1386,6 @@ component FileConflictCard inherits Rectangle {
     }
 }
 
-component TextComparisonCard inherits Rectangle {
-    in property <int> focus-cycle;
-    changed focus-cycle => { if (root.focus-cycle > 0) { ignore-case.focus(); } }
-    in property <DiffData> data;
-    in property <int> revision;
-    in property <bool> busy;
-    callback navigate(int);
-    callback compare(bool, bool, bool);
-    callback save(int, bool, string);
-    callback close();
-    property <int> requested-side: -1;
-    property <bool> requested-edit;
-
-    function reset() {
-        left.text = root.data.left-text;
-        right.text = root.data.right-text;
-        ignore-case.checked = root.data.ignore-case;
-        ignore-whitespace.checked = root.data.ignore-whitespace;
-        ignore-line-endings.checked = root.data.ignore-line-endings;
-        root.requested-side = -1;
-    }
-    init => { root.reset(); }
-    changed revision => { root.reset(); }
-    background: Colors.panel;
-    border-color: Colors.accent;
-    border-width: 1px;
-    border-radius: 10px;
-
-    VerticalLayout {
-        padding: 14px;
-        spacing: 8px;
-        DialogHeading { icon: @image-url("icons/compare.svg"); title: root.data.binary ? @tr("Binärvergleich") : @tr("Dateien nach Inhalt vergleichen"); }
-        HorizontalLayout {
-            visible: !root.data.binary;
-            spacing: 5px;
-            ignore-case := CheckBox { text: "Groß-/Kleinschreibung ignorieren"; }
-            ignore-whitespace := CheckBox { text: "Leerraum ignorieren"; }
-            ignore-line-endings := CheckBox { text: "Zeilenenden ignorieren"; }
-            Button {
-                text: "Neu vergleichen";
-                enabled: !root.busy && root.requested-side < 0;
-                clicked => { root.compare(ignore-case.checked, ignore-whitespace.checked, ignore-line-endings.checked); }
-            }
-        }
-        Text { text: root.data.summary; color: Colors.accent; }
-        HorizontalLayout {
-            spacing: 8px;
-            vertical-stretch: 1;
-            VerticalLayout {
-                horizontal-stretch: 1;
-                spacing: 4px;
-                DetailCell { text: "Links · " + root.data.left-path; }
-                Text { text: root.data.left-range; color: Colors.muted; }
-                left := TextEdit { read-only: !root.data.editable-left || root.busy || root.requested-side >= 0; vertical-stretch: 1; }
-                Button {
-                    text: "Bearbeitung links speichern";
-                    visible: !root.data.binary;
-                    enabled: root.data.editable-left && left.text != root.data.left-text && !root.busy && root.requested-side < 0;
-                    clicked => { root.requested-side = 0; root.requested-edit = true; }
-                }
-            }
-            VerticalLayout {
-                horizontal-stretch: 1;
-                spacing: 4px;
-                DetailCell { text: "Rechts · " + root.data.right-path; }
-                Text { text: root.data.right-range; color: Colors.muted; }
-                right := TextEdit { read-only: !root.data.editable-right || root.busy || root.requested-side >= 0; vertical-stretch: 1; }
-                Button {
-                    text: "Bearbeitung rechts speichern";
-                    visible: !root.data.binary;
-                    enabled: root.data.editable-right && right.text != root.data.right-text && !root.busy && root.requested-side < 0;
-                    clicked => { root.requested-side = 1; root.requested-edit = true; }
-                }
-            }
-        }
-        if root.requested-side < 0 : HorizontalLayout {
-            spacing: 5px;
-            Button { text: root.data.binary ? "Vorherige Abweichungen" : "Vorheriger Unterschied"; enabled: root.data.has-previous && !root.busy; clicked => { root.navigate(-1); } }
-            Button { text: root.data.binary ? "Nächste Abweichungen" : "Nächster Unterschied"; enabled: root.data.has-next && !root.busy; clicked => { root.navigate(1); } }
-            Rectangle { horizontal-stretch: 1; }
-            if !root.data.binary : Button { text: "← Nach links übernehmen"; enabled: root.data.has-change && !root.busy; clicked => { root.requested-side = 0; root.requested-edit = false; } }
-            if !root.data.binary : Button { text: "Nach rechts übernehmen →"; enabled: root.data.has-change && !root.busy; clicked => { root.requested-side = 1; root.requested-edit = false; } }
-            compare-close := Button {
-                property <int> cycle: root.focus-cycle;
-                changed cycle => { if (self.cycle < 0) { self.focus(); } }
-                text: @tr("Schließen"); clicked => { root.close(); }
-            }
-        }
-        if root.requested-side >= 0 : HorizontalLayout {
-            spacing: 5px;
-            Text { text: root.requested-side == 0 ? "Ausgewählten Abschnitt in die linke Datei schreiben?" : "Ausgewählten Abschnitt in die rechte Datei schreiben?"; color: Colors.accent; horizontal-stretch: 1; vertical-alignment: center; }
-            Button { text: @tr("Zurück"); clicked => { root.requested-side = -1; } }
-            Button {
-                property <int> cycle: root.focus-cycle;
-                changed cycle => { if (self.cycle < 0) { self.focus(); } }
-                text: "Schreiben";
-                clicked => {
-                    root.save(root.requested-side, root.requested-edit, root.requested-side == 0 ? left.text : right.text);
-                    root.requested-side = -1;
-                }
-            }
-        }
-    }
-}
-
 component SyncReviewCard inherits Rectangle {
     in property <int> focus-cycle;
     changed focus-cycle => { if (root.focus-cycle > 0) { result-filter.focus(); } else if (run-sync.enabled && !root.comparison-only) { run-sync.focus(); } else { close-sync.focus(); } }
@@ -1882,11 +1775,13 @@ component FilePanel inherits Rectangle {
                         VerticalLayout {
                             Button {
                                 text: tab.label;
+                                width: 108px; elide-text: true;
                                 icon: tab.locked ? @image-url("icons/lock.svg") : @image-url("");
                                 checkable: true;
                                 checked: root.data.tab == i;
                                 accessible-label: tab.path;
                                 clicked => { root.select-tab(i); root.return-to-list(); }
+                                Tooltip { text: @markdown("\{tab.label}\n\{tab.path}"); }
                             }
                             if tab.has-tint : Rectangle { height: 3px; border-radius: 1px; background: tab.tint; }
                         }
@@ -2446,7 +2341,7 @@ component SettingsCard inherits Rectangle {
 
 component DrivePicker inherits FocusScope {
     in property <int> focus-cycle;
-    changed focus-cycle => { root.focus(); }
+    changed focus-cycle => { if (root.focus-cycle > 0) { root.focus(); } else if (open.enabled) { open.focus(); } else { cancel.focus(); } }
     in property <string> title;
     in property <[string]> drives;
     in property <int> initial;
@@ -2460,9 +2355,12 @@ component DrivePicker inherits FocusScope {
         if (root.drives.length == 0) { return reject; }
         if (event.text == Key.UpArrow || event.text == Key.DownArrow) {
             root.selection = clamp(root.selection + (event.text == Key.UpArrow ? -1 : 1), 0, root.drives.length - 1);
-            choices.viewport-y = min(0px, max(choices.height - choices.viewport-height, -root.selection * 34px));
+            root.scroll-selection();
             return accept;
         }
+        if (event.text == Key.Home) { root.selection = 0; root.scroll-selection(); return accept; }
+        if (event.text == Key.End) { root.selection = root.drives.length - 1; root.scroll-selection(); return accept; }
+        if (event.text == Key.PageUp || event.text == Key.PageDown) { root.selection = clamp(root.selection + (event.text == Key.PageUp ? -4 : 4), 0, root.drives.length - 1); root.scroll-selection(); return accept; }
         if (event.text == Key.Return) { root.choose(root.drives[root.selection]); return accept; }
         if (root.letter(event.text)) { return accept; }
         return reject;
@@ -2475,21 +2373,29 @@ component DrivePicker inherits FocusScope {
         border-color: Colors.accent;
         background: Colors.panel;
         VerticalLayout {
-            padding: 12px;
-            spacing: 6px;
-            Text { text: root.title; font-size: 17px; font-weight: 700; color: Colors.text; }
+            padding: 20px;
+            spacing: 12px;
+            DialogHeading { title: root.title; subtitle: @tr("Laufwerk auswählen und öffnen"); icon: @image-url("icons/drive.svg"); }
             choices := ListView {
-                for drive[index] in root.drives : Button {
-                    height: 34px;
-                    text: drive;
-                    checkable: true;
-                    checked: index == root.selection;
-                    clicked => { root.choose(drive); }
+                vertical-stretch: 1;
+                for drive[index] in root.drives : Rectangle {
+                    height: 46px; background: index == root.selection ? Colors.cursor : Colors.background; border-radius: 7px;
+                    accessible-role: list-item; accessible-label: drive;
+                    HorizontalLayout { padding: 10px; spacing: 10px;
+                        Image { source: @image-url("icons/drive.svg"); colorize: Colors.accent; width: 20px; height: 20px; }
+                        Text { text: drive; color: Colors.text; vertical-alignment: center; }
+                    }
+                    TouchArea { clicked => { root.selection = index; root.focus(); } double-clicked => { root.choose(drive); } }
                 }
             }
-            DetailCell { text: "↑ ↓ wählen · Enter öffnen · Esc abbrechen"; }
+            Text { text: @tr("Pfeile: auswählen · Doppelklick/Enter: öffnen · Laufwerksbuchstabe: direkt öffnen · Esc: abbrechen"); color: Colors.muted; font-size: 11px; wrap: word-wrap; }
+            HorizontalLayout { spacing: 8px; Rectangle { horizontal-stretch: 1; }
+                cancel := Button { text: @tr("Abbrechen"); clicked => { root.cancel(); } }
+                open := Button { text: @tr("Öffnen"); primary: true; enabled: root.drives.length > 0; clicked => { root.choose(root.drives[root.selection]); } }
+            }
         }
     }
+    function scroll-selection() { choices.viewport-y = min(0px, max(choices.height - choices.viewport-height, -root.selection * 46px)); }
 }
 
 export struct PreviewBounds { x: float, y: float, width: float, height: float }
@@ -2568,6 +2474,8 @@ export component ListerWindow inherits Window {
     in property <string> preview-text;
     in property <image> preview-image;
     property <int> zoom-percent;
+    property <int> focus-cycle;
+    changed focus-cycle => { if (root.focus-cycle < 0 || (!root.has-page && !root.has-image && !root.has-rich)) { close-button.focus(); } }
     out property <PreviewBounds> rich-bounds: {
         x: rich-host.absolute-position.x / 1px,
         y: rich-host.absolute-position.y / 1px,
@@ -2614,6 +2522,7 @@ export component ListerWindow inherits Window {
             return reject;
         }
 
+        FocusBoundary { reached => { root.focus-cycle = min(0, root.focus-cycle) - 1; } }
         VerticalLayout {
             padding: 12px;
             spacing: 9px;
@@ -2627,6 +2536,7 @@ export component ListerWindow inherits Window {
             Rectangle {
                 vertical-stretch: 1;
                 if root.has-page : ReaderPane {
+                    focus-cycle: root.focus-cycle;
                     width: 100%; height: 100%;
                     busy: root.busy;
                     hex: root.hex;
@@ -2648,6 +2558,12 @@ export component ListerWindow inherits Window {
                     visible: !root.has-page && !root.has-image;
                     background: Colors.panel;
                     border-radius: 8px;
+                    if !root.busy && !root.has-rich : VerticalLayout {
+                        padding: 24px; spacing: 12px; alignment: center;
+                        Image { source: @image-url("icons/warning.svg"); colorize: Colors.folder; width: 32px; height: 32px; }
+                        Text { text: @tr("Vorschau nicht verfügbar"); color: Colors.text; font-size: 18px; font-weight: 600; }
+                        Text { text: root.status; color: Colors.muted; wrap: word-wrap; }
+                    }
                 }
             }
             Rectangle { height: 1px; background: Colors.edge; }
@@ -2655,20 +2571,23 @@ export component ListerWindow inherits Window {
             HorizontalLayout {
                 spacing: 6px;
                 if root.has-rich : ActionButton {
+                    property <int> cycle: root.focus-cycle;
+                    changed cycle => { if (self.cycle > 0) { self.focus(); } }
                     icon: @image-url("icons/code.svg");
                     text: @tr("Quelldaten anzeigen");
                     enabled: !root.busy;
                     clicked => { root.view-raw(); }
                 }
-                if root.has-image : Button { text: @tr("Einpassen"); checkable: true; checked: root.zoom-percent == 0; clicked => { root.zoom-percent = 0; } }
+                if root.has-image : Button { property <int> cycle: root.focus-cycle; changed cycle => { if (self.cycle > 0) { self.focus(); } } text: @tr("Einpassen"); checkable: true; checked: root.zoom-percent == 0; clicked => { root.zoom-percent = 0; } }
                 if root.has-image : Button { text: "−"; accessible-label: @tr("Bild verkleinern"); enabled: root.zoom-percent != 25; clicked => { root.step-zoom(-25); } }
                 if root.has-image : Button { text: root.zoom-percent > 0 ? "\{root.zoom-percent} %" : "100 %"; accessible-label: @tr("Originalgröße"); clicked => { root.zoom-percent = 100; } }
                 if root.has-image : Button { text: "+"; accessible-label: @tr("Bild vergrößern"); enabled: root.zoom-percent != 400; clicked => { root.step-zoom(25); } }
                 Rectangle { horizontal-stretch: 1; }
                 Button { text: @tr("Vollbild"); clicked => { root.toggle-fullscreen(); } }
-                Button { text: @tr("Schließen"); clicked => { root.close-lister(); } }
+                close-button := Button { text: @tr("Schließen"); clicked => { root.close-lister(); } }
             }
         }
+        FocusBoundary { reached => { root.focus-cycle = max(0, root.focus-cycle) + 1; } }
     }
 
     function step-zoom(delta: int) {
@@ -2694,6 +2613,26 @@ export component MainWindow inherits Window {
     in property <FileConflictData> file-conflict;
     in property <DiffData> diff-data;
     in property <int> diff-revision;
+    in property <string> diff-notice;
+    in property <UtilityData> utility-data;
+    in property <NavigationData> navigation-data;
+    in property <ConfigurationData> configuration-data;
+    in property <MessageData> message-data;
+    in property <string> message-feedback;
+    in property <int> message-waiting;
+    in property <int> pending-result-count;
+    in property <bool> has-last-result;
+    in property <TextDraftData> text-draft-data;
+    in property <string> dialog-notice;
+    in property <[NavigationRow]> navigation-rows;
+    in property <string> navigation-notice;
+    in-out property <int> navigation-selection;
+    in property <UtilityState> utility-state;
+    in property <PropertiesData> properties-data;
+    in property <MetadataForm> metadata-initial;
+    in property <int> metadata-revision;
+    in property <string> metadata-selection;
+    in property <MutationData> mutation-data;
     in property <int> separate-tree-mode;
     in property <TreeData> left-tree;
     in property <TreeData> right-tree;
@@ -2868,6 +2807,22 @@ export component MainWindow inherits Window {
     callback rename-edited();
     callback viewer-control(int, string, int);
     callback diff-navigate(int);
+    callback utility-apply(UtilityForm);
+    callback navigation-apply(NavigationForm);
+    callback configuration-edit(int, int, ConfigurationForm, ConfigurationItem);
+    callback configuration-apply(ConfigurationForm, ConfigurationItem);
+    callback copy-message(bool);
+    callback text-draft-apply(TextDraftForm);
+    callback navigation-action(int, int);
+    callback navigation-filter(string);
+    callback navigation-file(bool, string) -> string;
+    callback utility-action(int);
+    callback properties-action(int);
+    callback copy-property(string);
+    callback metadata-apply(MetadataForm);
+    callback permissions-apply(string);
+    pure callback permission-parse(string) -> int;
+    pure callback permission-format(int) -> string;
     callback diff-options(bool, bool, bool);
     callback diff-save(int, bool, string);
     callback directory-loaded();
@@ -3195,6 +3150,7 @@ export component MainWindow inherits Window {
                     text: root.button-label(@tr("Fortschritt"), root.shortcut-labels.job-details);
                     clicked => { root.job-expanded = true; }
                 }
+                if root.message-waiting + root.pending-result-count > 0 || root.has-last-result : Button { text: root.message-waiting + root.pending-result-count > 0 ? @tr("Meldungen") + " (" + (root.message-waiting + root.pending-result-count) + ")" : @tr("Letztes Ergebnis"); icon: @image-url("icons/info.svg"); clicked => { root.action("show-messages"); } }
             }
         }
 
@@ -3261,10 +3217,10 @@ export component MainWindow inherits Window {
             TouchArea { clicked => { root.action("close-drives"); } }
             DrivePicker {
                 focus-cycle: root.dialog-focus-cycle;
-                x: root.drive-side == 0 ? left-view.absolute-position.x + 16px : min(parent.width - self.width - 12px, right-view.absolute-position.x + 16px);
-                y: root.drive-side == 0 ? left-view.absolute-position.y + 13px : min(parent.height - self.height - 12px, right-view.absolute-position.y + 13px);
-                width: 236px;
-                height: 87px + min(7, root.drives.length) * 34px;
+                x: clamp(root.drive-side == 0 ? left-view.absolute-position.x + 16px : right-view.absolute-position.x + 16px, 16px, parent.width - self.width - 16px);
+                y: clamp(root.drive-side == 0 ? left-view.absolute-position.y + 13px : right-view.absolute-position.y + 13px, 16px, parent.height - self.height - 16px);
+                width: min(560px, parent.width - 32px);
+                height: min(parent.height - 32px, 180px + min(7, root.drives.length) * 46px);
                 title: root.drive-side == 0 ? @tr("Linkes Laufwerk wählen") : @tr("Rechtes Laufwerk wählen");
                 drives: root.drives;
                 initial: root.drive-selection;
@@ -3408,22 +3364,151 @@ export component MainWindow inherits Window {
                 cancel => { root.action("close-dialog"); }
             }
         }
+        if root.dialog-kind == "message" : Rectangle {
+            background: #050a14a8; width: 100%; height: 100%; TouchArea { }
+            MessageCard {
+                width: min(parent.width - 32px, self.expanded && root.message-data.wide ? 1000px : 780px);
+                height: min(parent.height - 32px, (self.expanded ? 460px + clamp(root.message-data.details-lines - 4, 0, 16) * 18px : 320px) + (root.message-data.stats.length > 0 ? 76px : 0px) + (root.message-data.options.length > 0 ? 70px : 0px));
+                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                data: root.message-data; feedback: root.message-feedback; waiting: root.message-waiting + root.pending-result-count;
+                revision: root.dialog-revision; focus-cycle: root.dialog-focus-cycle;
+                copy(all) => { root.copy-message(all); }
+                confirm(choice) => { root.submit(root.dialog-value, root.dialog-second, choice); }
+                close => { root.action("close-dialog"); }
+            }
+        }
+        if root.dialog-kind == "text-draft" : Rectangle {
+            background: #050a14a8; width: 100%; height: 100%; TouchArea { }
+            TextDraftCard {
+                width: min(parent.width - 32px, 920px); height: min(parent.height - 32px, 820px);
+                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                data: root.text-draft-data; notice: root.dialog-notice;
+                revision: root.dialog-revision; focus-cycle: root.dialog-focus-cycle;
+                apply(form) => { root.text-draft-apply(form); }
+                file(saving, initial) => { return root.navigation-file(saving, initial); }
+                close => { root.action("close-dialog"); }
+            }
+        }
+        if root.dialog-kind == "configuration" : Rectangle {
+            background: #050a14a8; width: 100%; height: 100%; TouchArea { }
+            ConfigurationCard {
+                width: min(parent.width - 32px, 1050px); height: min(parent.height - 32px, 870px);
+                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                data: root.configuration-data; focus-cycle: root.dialog-focus-cycle;
+                edit(action, index, form, item) => { root.configuration-edit(action, index, form, item); }
+                apply(form, item) => { root.configuration-apply(form, item); }
+                file(saving, initial) => { return root.navigation-file(saving, initial); }
+                close => { root.action("close-dialog"); }
+            }
+        }
+        if root.dialog-kind == "navigation-list" : Rectangle {
+            background: #050a14a8; width: 100%; height: 100%; TouchArea { }
+            NavigationListCard {
+                width: min(parent.width - 32px, 960px); height: min(parent.height - 32px, 760px);
+                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                data: root.navigation-data; rows: root.navigation-rows; notice: root.navigation-notice;
+                selection <=> root.navigation-selection;
+                revision: root.dialog-revision; focus-cycle: root.dialog-focus-cycle;
+                filter(query) => { root.navigation-filter(query); }
+                action(value, choice) => { root.navigation-action(value, choice); }
+                close => { root.action("close-dialog"); }
+            }
+        }
+        if root.dialog-kind == "navigation-editor" : Rectangle {
+            background: #050a14a8; width: 100%; height: 100%; TouchArea { }
+            NavigationEditorCard {
+                width: min(parent.width - 32px, 900px); height: min(parent.height - 32px, root.navigation-data.mode == 2 ? 860px : root.navigation-data.mode == 1 ? 660px : 440px);
+                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                data: root.navigation-data; notice: root.navigation-notice;
+                revision: root.dialog-revision; focus-cycle: root.dialog-focus-cycle;
+                apply(form) => { root.navigation-apply(form); }
+                file(saving, initial) => { return root.navigation-file(saving, initial); }
+                browse => { return root.browse-operation-target(); }
+                close => { root.action("close-dialog"); }
+            }
+        }
+        if root.dialog-kind == "utility" : Rectangle {
+            background: #050a14a8; width: 100%; height: 100%;
+            TouchArea { }
+            UtilityCard {
+                width: min(parent.width - 32px, 1000px); height: min(parent.height - 32px, 850px);
+                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                data: root.utility-data; state: root.utility-state;
+                busy: root.job-active; cancelling: root.job-cancelling; progress: root.job-progress;
+                metrics: root.job-metrics; focus-cycle: root.dialog-focus-cycle;
+                apply(form) => { root.utility-apply(form); }
+                action(value) => { root.utility-action(value); }
+                copy(value) => { root.copy-property(value); }
+                browse => { return root.browse-operation-target(); }
+                cancel => { root.action("cancel-job"); }
+                close => { root.action("close-dialog"); }
+            }
+        }
+        if root.dialog-kind == "properties" : Rectangle {
+            background: #050a14a8; width: 100%; height: 100%;
+            TouchArea { }
+            PropertiesCard {
+                width: min(parent.width - 32px, 960px); height: min(parent.height - 32px, 760px);
+                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                data: root.properties-data; focus-cycle: root.dialog-focus-cycle; busy: root.job-active;
+                action(value) => { root.properties-action(value); }
+                copy(value) => { root.copy-property(value); }
+                close => { root.action("close-dialog"); }
+            }
+        }
+        if root.dialog-kind == "metadata" : Rectangle {
+            background: #050a14a8; width: 100%; height: 100%;
+            TouchArea { }
+            MetadataCard {
+                width: min(parent.width - 32px, 880px); height: min(parent.height - 32px, 800px);
+                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                initial: root.metadata-initial; revision: root.metadata-revision; selection: root.metadata-selection;
+                state: root.mutation-data; busy: root.job-active; cancelling: root.job-cancelling;
+                progress: root.job-progress; metrics: root.job-metrics; focus-cycle: root.dialog-focus-cycle;
+                apply(form) => { root.metadata-apply(form); }
+                copy(value) => { root.copy-property(value); }
+                cancel => { root.action("cancel-job"); }
+                close => { root.action("close-dialog"); }
+            }
+        }
+        if root.dialog-kind == "permissions" : Rectangle {
+            background: #050a14a8; width: 100%; height: 100%;
+            TouchArea { }
+            PermissionsCard {
+                width: min(parent.width - 32px, 860px); height: min(parent.height - 32px, 800px);
+                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                selection: root.metadata-selection; state: root.mutation-data;
+                busy: root.job-active; cancelling: root.job-cancelling; progress: root.job-progress;
+                metrics: root.job-metrics; focus-cycle: root.dialog-focus-cycle;
+                parse-mode(value) => { return root.permission-parse(value); }
+                format-mode(value) => { return root.permission-format(value); }
+                apply(value) => { root.permissions-apply(value); }
+                copy(value) => { root.copy-property(value); }
+                cancel => { root.action("cancel-job"); }
+                close => { root.action("close-dialog"); }
+            }
+        }
         if root.dialog-kind == "text-comparison" : Rectangle {
             background: #050a14a8;
             width: 100%; height: 100%;
             TouchArea { }
             TextComparisonCard {
                 focus-cycle: root.dialog-focus-cycle;
-                width: min(parent.width - 32px, 1150px);
-                height: min(parent.height - 32px, 650px);
+                width: min(parent.width - 32px, 1200px);
+                height: min(parent.height - 32px, 800px);
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 data: root.diff-data;
                 revision: root.diff-revision;
                 busy: root.job-active;
+                cancelling: root.job-cancelling;
+                progress: root.job-progress;
+                metrics: root.job-metrics;
+                notice: root.diff-notice;
                 navigate(delta) => { root.diff-navigate(delta); }
                 compare(ignore-case, ignore-space, ignore-eol) => { root.diff-options(ignore-case, ignore-space, ignore-eol); }
                 save(side, edited, text) => { root.diff-save(side, edited, text); }
+                cancel-job => { root.action("cancel-job"); }
                 close => { root.action("close-dialog"); }
             }
         }
@@ -3581,9 +3666,10 @@ export component MainWindow inherits Window {
                 revision: root.dialog-revision;
                 title: root.dialog-title;
                 description: root.dialog-description;
+                notice: root.dialog-notice;
                 value: root.dialog-value;
                 secondary-value: root.dialog-second;
-                label: root.dialog-placeholder;
+                label: root.dialog-placeholder == "" ? root.dialog-title : root.dialog-placeholder;
                 secondary-label: root.dialog-second-placeholder;
                 options: root.dialog-options;
                 options-label: root.dialog-options-label;
@@ -3635,7 +3721,7 @@ export component MainWindow inherits Window {
                 copy-all => { root.action("copy-result"); } copy-row(text) => { root.copy-review-text(text); }
             }
         }
-        if root.dialog-kind != "ftp-edit" && root.dialog-kind != "management-review" && root.dialog-kind != "multi-rename" && root.dialog-kind != "rename-review" && root.dialog-kind != "search-results" && root.dialog-kind != "" && root.dialog-kind != "input" && root.dialog-kind != "confirm" && root.dialog-kind != "viewer" && root.dialog-kind != "image" && root.dialog-kind != "transfer" && root.dialog-kind != "transfer-manager" && root.dialog-kind != "archive-pack" && root.dialog-kind != "archive-pack-profile" && root.dialog-kind != "archive-extract" && root.dialog-kind != "palette" && root.dialog-kind != "text-comparison" && root.dialog-kind != "transfer-conflict" && root.dialog-kind != "advanced-search" && root.dialog-kind != "sync-options" && root.dialog-kind != "sync-review" && root.dialog-kind != "ftp-browser" && root.dialog-kind != "ftp-profiles" && root.dialog-kind != "plugins" : Rectangle {
+        if root.dialog-kind != "message" && root.dialog-kind != "text-draft" && root.dialog-kind != "configuration" && root.dialog-kind != "navigation-list" && root.dialog-kind != "navigation-editor" && root.dialog-kind != "utility" && root.dialog-kind != "metadata" && root.dialog-kind != "permissions" && root.dialog-kind != "properties" && root.dialog-kind != "ftp-edit" && root.dialog-kind != "management-review" && root.dialog-kind != "multi-rename" && root.dialog-kind != "rename-review" && root.dialog-kind != "search-results" && root.dialog-kind != "" && root.dialog-kind != "input" && root.dialog-kind != "confirm" && root.dialog-kind != "viewer" && root.dialog-kind != "image" && root.dialog-kind != "transfer" && root.dialog-kind != "transfer-manager" && root.dialog-kind != "archive-pack" && root.dialog-kind != "archive-pack-profile" && root.dialog-kind != "archive-extract" && root.dialog-kind != "palette" && root.dialog-kind != "text-comparison" && root.dialog-kind != "transfer-conflict" && root.dialog-kind != "advanced-search" && root.dialog-kind != "sync-options" && root.dialog-kind != "sync-review" && root.dialog-kind != "ftp-browser" && root.dialog-kind != "ftp-profiles" && root.dialog-kind != "plugins" : Rectangle {
             background: #050a14a8;
             width: 100%; height: 100%;
             TouchArea { }

@@ -1,7 +1,7 @@
 use super::{App, JobContext, LoadedDirectory, Navigation, Outcome, StagedPreview};
 use crate::commands::{Dialog, Pending};
 use crate::panel::{Location, WfxLocation};
-use crate::{human_size, preview};
+use crate::preview;
 use arco_core::archive_view::MAX_PREVIEW;
 use arco_core::files::{self, Directory, Entry, Kind};
 use arco_core::plugin::{self, Operation, Registration, WfxOperation};
@@ -217,15 +217,12 @@ impl App {
             "properties" => {
                 if let Some(entry) = self.current().display_row(self.current().cursor) {
                     let path = location.child(&entry.name.to_string_lossy());
-                    let details = format!(
-                        "{}::{}\n{}",
-                        location.plugin.name,
-                        path,
-                        entry
-                            .size
-                            .map_or_else(|| "Ordner oder Größe unbekannt".into(), human_size)
+                    let sheet = super::properties::Sheet::virtual_entry(
+                        "WFX-Eigenschaften",
+                        format!("{}::{}", location.plugin.name, path),
+                        Some(entry),
                     );
-                    self.text("WFX-Eigenschaften", &details);
+                    self.show_properties(sheet);
                 }
             }
             "mkdir" => self.dialog(

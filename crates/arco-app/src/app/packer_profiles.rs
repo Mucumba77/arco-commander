@@ -67,29 +67,7 @@ impl App {
         previous: Option<&str>,
         value: &str,
     ) -> io::Result<()> {
-        let mut lines = value.lines().map(str::trim);
-        let name = lines.next().unwrap_or_default();
-        if name.is_empty() || name.chars().count() > 80 {
-            return Err(io::Error::other(
-                "Der Profilname muss 1 bis 80 Zeichen enthalten.",
-            ));
-        }
-        let executable = PathBuf::from(lines.next().unwrap_or_default().trim_matches('"'));
-        let extension = lines
-            .next()
-            .unwrap_or_default()
-            .trim_start_matches('.')
-            .to_ascii_lowercase();
-        let arguments = lines
-            .filter(|line| !line.is_empty())
-            .map(str::to_owned)
-            .collect();
-        let profile = PackerProfile {
-            executable,
-            extension,
-            arguments,
-        };
-        profile.validate()?;
+        let (name, profile) = parse_profile(value)?;
         let mut updated = self.profile_snapshot();
         if let Some(previous) = previous {
             updated.packer_profiles.remove(previous);
@@ -194,5 +172,54 @@ impl App {
             },
         );
         Ok(())
+    }
+}
+
+fn parse_profile(value: &str) -> io::Result<(&str, PackerProfile)> {
+    let mut lines = value.lines();
+    let name = lines.next().unwrap_or_default().trim();
+    if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
+        return Err(io::Error::other(
+            "Der Profilname muss 1 bis 80 Zeichen enthalten.",
+        ));
+    }
+    let executable = PathBuf::from(lines.next().unwrap_or_default().trim().trim_matches('"'));
+    let extension = lines
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    let arguments = lines
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect();
+    let profile = PackerProfile {
+        executable,
+        extension,
+        arguments,
+    };
+    profile.validate()?;
+    Ok((name, profile))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn profile_arguments_keep_literal_spaces_and_validate_placeholders() {
+        let executable = std::env::temp_dir().join("packer.exe");
+        let text = format!(
+            "Pack\n{}\n.zip\na\n  literal spaces  \n\n{{archive}}\n{{sources}}",
+            executable.display()
+        );
+        let (name, profile) = parse_profile(&text).unwrap();
+        assert_eq!(name, "Pack");
+        assert_eq!(profile.extension, "zip");
+        assert_eq!(
+            profile.arguments,
+            vec!["a", "  literal spaces  ", "{archive}", "{sources}"]
+        );
+        assert!(parse_profile(&text.replace("{sources}", "{archive}")).is_err());
     }
 }

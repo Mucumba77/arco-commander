@@ -105,7 +105,7 @@ impl App {
             .collect()
     }
 
-    pub(super) fn choose_wfx_columns(&mut self, plugin: Registration) {
+    pub(in crate::app) fn choose_wfx_columns(&mut self, plugin: Registration) {
         let sets = self.profile.views.wfx_columns.get(&plugin.path);
         let names: Vec<_> = sets
             .into_iter()
@@ -185,7 +185,7 @@ impl App {
         Ok(())
     }
 
-    pub(super) fn manage_wfx_columns(
+    pub(in crate::app) fn manage_wfx_columns(
         &mut self,
         plugin: Registration,
         name: String,
@@ -220,17 +220,27 @@ impl App {
             self.status("Dieses WFX-Plugin ist deaktiviert.");
             return;
         }
-        self.start_job("Lese WFX-Spaltenfelder …", false, move |job| {
-            let fields = plugin::wfx_content_fields(&plugin.path, &job.cancel, &mut |prompt| {
-                job.prompt(&plugin.name, prompt)
-            })?;
-            if fields.is_empty() {
-                return Err(io::Error::other(
-                    "Das WFX-Plugin liefert keine Spaltenfelder.",
-                ));
-            }
-            Ok(Outcome::WfxColumnFields(Box::new(plugin), name, fields))
-        });
+        self.start_operation_job(
+            "Lese WFX-Spaltenfelder …",
+            false,
+            crate::app::JobDescription::new(
+                crate::OperationKind::Plugin,
+                plugin.name.clone(),
+                String::new(),
+            ),
+            move |job| {
+                let fields =
+                    plugin::wfx_content_fields(&plugin.path, &job.cancel, &mut |prompt| {
+                        job.prompt(&plugin.name, prompt)
+                    })?;
+                if fields.is_empty() {
+                    return Err(io::Error::other(
+                        "Das WFX-Plugin liefert keine Spaltenfelder.",
+                    ));
+                }
+                Ok(Outcome::WfxColumnFields(Box::new(plugin), name, fields))
+            },
+        );
     }
 
     pub(in crate::app) fn edit_wfx_columns(
@@ -314,6 +324,16 @@ impl App {
         let mut lines = value.lines();
         let name = name_line(lines.next(), original.as_deref())?;
         let columns = parse_wfx_columns(lines, fields)?;
+        self.save_wfx_column_values(plugin, original, name, columns)
+    }
+
+    pub(in crate::app) fn save_wfx_column_values(
+        &mut self,
+        plugin: Registration,
+        original: Option<String>,
+        name: String,
+        columns: Vec<Column>,
+    ) -> io::Result<()> {
         let mut sets = self.wfx_column_sets(&plugin.path);
         if original.is_none() && sets.sets.contains_key(&name) {
             return Err(io::Error::other(

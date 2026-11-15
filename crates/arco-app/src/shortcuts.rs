@@ -88,7 +88,7 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("Ctrl+PageDown", "open"),
     ("Home", "cursor-first"),
     ("End", "cursor-last"),
-    ("Insert", "mark"),
+    ("Insert", "select-down"),
     ("Space", "mark"),
     ("Delete", "delete"),
     ("Shift+Delete", "delete-permanent"),
@@ -491,6 +491,16 @@ pub fn repeatable(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn insert_marks_and_advances_while_space_keeps_the_cursor() {
+        let bindings = effective(&Overrides::new());
+        assert_eq!(bindings.get("Insert"), Some(&"select-down"));
+        assert_eq!(bindings.get("Space"), Some(&"mark"));
+        assert!(repeatable(bindings["Insert"]));
+        let overrides = Overrides::from([("Insert".into(), Some("mark".into()))]);
+        assert_eq!(effective(&overrides).get("Insert"), Some(&"mark"));
+    }
 
     #[test]
     fn total_commander_chords_normalize_modifiers_and_keep_system_keys_reserved() {

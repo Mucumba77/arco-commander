@@ -647,3 +647,468 @@ Plugin-Host starten …	Démarrage de l’hôte de plugins …
 Plugin-Paket entfernen	Supprimer le paquet de plugin
 Paketdateien entfernen …	Suppression des fichiers du paquet …
 Auftrag fehlgeschlagen	Échec de l’opération
+Binärvergleich	Comparaison binaire
+Dateien nach Inhalt vergleichen	Comparer le contenu des fichiers
+Nur lesen	Lecture seule
+Byteabweichungen seitenweise prüfen. Die Dateien bleiben unverändert.	Examiner les différences octet par octet, page par page. Les fichiers restent inchangés.
+Unterschiede abschnittsweise prüfen, bearbeiten oder in die andere Datei übernehmen.	Examiner, modifier ou transférer les différences section par section.
+Bearbeitbar	Modifiable
+Nicht gespeichert	Non enregistré
+Bearbeitung speichern	Enregistrer les modifications
+Vergleichsregeln	Règles de comparaison
+Groß-/Kleinschreibung ignorieren	Ignorer la casse
+Leerraum ignorieren	Ignorer les espaces
+Zeilenenden ignorieren	Ignorer les fins de ligne
+Neu vergleichen	Comparer à nouveau
+Neu vergleichen · Strg+R	Comparer à nouveau · Ctrl+R
+Hinweis zum Vergleich	Information sur la comparaison
+Änderung gespeichert	Modification enregistrée
+Vorschau veraltet	Aperçu obsolète
+Suchbereich geprüft	Zone de recherche vérifiée
+Arbeitsschritte	Étapes de travail
+Nur Abweichungen · bis zu 128 Positionen pro Seite · — bedeutet fehlendes Byte	Différences uniquement · jusqu’à 128 positions par page · — indique un octet absent
+Nur abweichende Abschnitte · Text bis 4 MiB / 200.000 Zeilen pro Datei · gekürzte Vorschauen sind schreibgeschützt	Sections différentes uniquement · texte jusqu’à 4 Mio / 200 000 lignes par fichier · les aperçus tronqués sont en lecture seule
+Änderung in die linke Datei schreiben?	Écrire la modification dans le fichier de gauche ?
+Änderung in die rechte Datei schreiben?	Écrire la modification dans le fichier de droite ?
+Nur die Bearbeitung dieses Abschnitts wird gespeichert.	Seules les modifications de cette section seront enregistrées.
+Der Originalabschnitt der anderen Datei ersetzt diesen Abschnitt.	La section originale de l’autre fichier remplacera cette section.
+Änderung speichern	Enregistrer la modification
+Nicht gespeicherte Bearbeitung verwerfen?	Abandonner les modifications non enregistrées ?
+Deine Bearbeitung bleibt erhalten, wenn du hier zurückgehst.	Revenez en arrière pour conserver vos modifications.
+Verwerfen und fortfahren	Abandonner et continuer
+Vorheriger Unterschied · Umschalt+F7	Différence précédente · Maj+F7
+Nächster Unterschied · F7	Différence suivante · F7
+← Nach links übernehmen	← Transférer à gauche
+Nach rechts übernehmen →	Transférer à droite →
+F7 Weiter · Umschalt+F7 Zurück · Esc Schließen oder Abbrechen	F7 Suivant · Maj+F7 Précédent · Échap Fermer ou annuler
+F7 Weiter · Umschalt+F7 Zurück · Strg+R Neu vergleichen · Esc Zurück oder Schließen	F7 Suivant · Maj+F7 Précédent · Ctrl+R Comparer à nouveau · Échap Retour ou fermer
+Offset (hex) · Byte · Zeichen	Position (hex) · Octet · Caractère
+Abweichungen auf dieser Seite	Différences sur cette page
+Keine weiteren Byteabweichungen in diesem Suchbereich.	Aucune autre différence d’octets dans cette zone de recherche.
+Dateien sind bytegleich.	Les fichiers sont identiques octet par octet.
+Unterschied	Différence
+Zeilen	Lignes
+Einfügeposition vor Zeile	Point d’insertion avant la ligne
+Keine Textunterschiede nach den gewählten Vergleichsregeln.	Aucune différence de texte selon les règles sélectionnées.
+Änderung gespeichert. Die Vorschau ist veraltet; bitte neu vergleichen.	Modification enregistrée. L’aperçu est obsolète ; veuillez comparer à nouveau.
+Linke Datei lesen …	Lecture du fichier de gauche …
+Rechte Datei lesen …	Lecture du fichier de droite …
+Vergleichsregeln anwenden …	Application des règles de comparaison …
+Textunterschiede ermitteln …	Recherche des différences de texte …
+Vergleich abgeschlossen	Comparaison terminée
+Vorherige Byteabweichungen suchen …	Recherche des différences d’octets précédentes …
+Nächste Byteabweichungen suchen …	Recherche des différences d’octets suivantes …
+Zieldatei prüfen und Änderung speichern …	Vérification du fichier cible et enregistrement de la modification …
+Dateien werden verglichen …	Comparaison des fichiers …
+Vergleich fehlgeschlagen	Échec de la comparaison
+… Vorschau gekürzt	… Aperçu tronqué
+Aktivität	Activité
+Geänderte Regeln mit Neu vergleichen anwenden.	Appliquer les règles modifiées avec Comparer à nouveau.
+F7 Weiter · Umschalt+F7 Zurück · Strg+R Neu vergleichen · Esc Schließen oder Abbrechen	F7 Suivant · Maj+F7 Précédent · Ctrl+R Comparer à nouveau · Échap Fermer ou annuler
+Übernehmen	Appliquer
+Fehler	Erreurs
+Neu laden	Actualiser
+Auswahl erfassen	Analyser la sélection
+Einträge bearbeiten	Modifier les éléments
+Einträge verarbeiten	Traiter les éléments
+Ergebnis	Résultat
+Dateiattribute	Attributs des fichiers
+Unverändert lässt das jeweilige Attribut jedes Eintrags bestehen.	Inchangé conserve l’attribut correspondant de chaque élément.
+Schreibgeschützt (R)	Lecture seule (R)
+Versteckt (H)	Masqué (H)
+System (S)	Système (S)
+Archiv (A)	Archive (A)
+Unverändert	Inchangé
+Setzen	Activer
+Zeitstempel	Horodatages
+Nur aktivierte Zeitstempel ändern. Format: JJJJ-MM-TT HH:MM:SS, Ortszeit.	Modifier uniquement les horodatages activés. Format : AAAA-MM-JJ HH:MM:SS, heure locale.
+Geändert	Modifié
+Erstellt	Créé
+Letzter Zugriff	Dernier accès
+Änderungsdatum	Date de modification
+Erstellungsdatum	Date de création
+Zugriffsdatum	Date d’accès
+Geltungsbereich	Portée
+Unterordner und enthaltene Dateien einbeziehen	Inclure les sous-dossiers et leurs fichiers
+Die Ignorierliste gilt auch hier. Verknüpfungen werden nicht verfolgt. Bereits angewendete Änderungen bleiben bei Abbruch bestehen.	La liste d’exclusion s’applique ici aussi. Les liens ne sont pas suivis. Les modifications déjà appliquées subsistent après annulation.
+Änderungen für die gezeigte Auswahl übernehmen.	Appliquer les modifications à la sélection affichée.
+Wähle mindestens eine Änderung.	Choisissez au moins une modification.
+Eigenschaft	Propriété
+Wert	Valeur
+Windows-Berechtigungen	Autorisations Windows
+Besitzer, Vererbung und Zugriffsrechte im Windows-Eigenschaftendialog unter Sicherheit bearbeiten.	Modifier le propriétaire, l’héritage et les autorisations dans l’onglet Sécurité des propriétés Windows.
+Für Windows-Eigenschaften und Zugriffsrechte einen einzelnen Eintrag auswählen.	Sélectionner un seul élément pour les propriétés Windows et les autorisations d’accès.
+Attribute und Zeitstempel …	Attributs et horodatages …
+Windows-Eigenschaften …	Propriétés Windows …
+Unix-Rechte ändern …	Modifier les droits Unix …
+FTP-Unix-Rechte ändern	Modifier les droits Unix FTP
+Neuer Zugriffsmodus	Nouveau mode d’accès
+Alle ausgewählten Einträge erhalten diese Rechte. Der Server muss SITE CHMOD unterstützen; vorhandene Rechte werden nicht automatisch abgeleitet.	Tous les éléments sélectionnés recevront ces droits. Le serveur doit prendre en charge SITE CHMOD ; les modes existants ne sont pas déduits automatiquement.
+Oktal, z. B. 644 oder 755	Octal, par ex. 644 ou 755
+Unix-Rechte als Oktalwert	Droits Unix en octal
+Vorlage wählen	Choisir un modèle
+Rechtevorlage	Modèle de droits
+Drei oder vier Oktalziffern von 0 bis 7 eingeben.	Saisir trois ou quatre chiffres octaux de 0 à 7.
+Rechtematrix	Matrice des droits
+Besitzer	Propriétaire
+Andere	Autres
+Lesen	Lecture
+Schreiben	Écriture
+Spezielle Modusbits	Bits de mode spéciaux
+Bei Abbruch bleiben bereits gesetzte Rechte bestehen. Ordnerinhalte werden nicht rekursiv geändert.	Les droits déjà appliqués subsistent après annulation. Le contenu des dossiers n’est pas modifié récursivement.
+Der neue Modus gilt für die gesamte Auswahl.	Le nouveau mode s’applique à toute la sélection.
+Oktalwert eingeben oder Rechte auswählen.	Saisir une valeur octale ou sélectionner les droits.
+Rechte übernehmen	Appliquer les droits
+Dateieigenschaften	Propriétés des fichiers
+Eigenschaften lesen	Lire les propriétés
+Eigenschaften lesen …	Lecture des propriétés …
+Einträge werden verarbeitet …	Traitement des éléments …
+Attribute und Zeitstempel setzen …	Application des attributs et horodatages …
+Auswahl und Unterordner erfassen …	Analyse de la sélection et des sous-dossiers …
+Attribute und Zeitstempel	Attributs et horodatages
+Ungültige Attributauswahl.	Sélection d’attributs incorrecte.
+Gib mindestens eine Änderung an.	Indiquez au moins une modification.
+Verwende JJJJ-MM-TT HH:MM:SS für Zeitstempel.	Utilisez AAAA-MM-JJ HH:MM:SS pour les horodatages.
+Die Ortszeit ist nicht eindeutig.	L’heure locale est ambiguë ou inexistante.
+Der Zeitpunkt liegt außerhalb des Windows-Zeitbereichs.	L’horodatage est hors de la plage de dates Windows.
+Gib drei oder vier Oktalziffern ein, zum Beispiel 644.	Saisissez trois ou quatre chiffres octaux, par exemple 644.
+Erfolgreich	Réussi
+Abgeschlossen	Terminé
+Ignoriert	Ignoré
+Fehlgeschlagen	Échec
+Virtueller Eintrag	Élément virtuel
+Typ	Type
+Name	Nom
+Nicht ermittelt	Non déterminé
+Nicht verfügbar	Indisponible
+Nicht geliefert	Non fourni
+Keine besonderen Attribute	Aucun attribut particulier
+Komprimiert	Compressé
+Verschlüsselt	Chiffré
+Ordnerinhalte nicht eingerechnet	Contenu des dossiers non inclus
+Dateigröße der Auswahl	Taille des fichiers sélectionnés
+Unvollständig	Incomplet
+Nicht vollständig ermittelt	Non entièrement déterminé
+Nicht gesetzt	Non activé
+Gesetzt	Activé
+Unterschiedlich	Différent
+Verknüpfungsziel	Cible du lien
+Verknüpfungen	Liens
+Verknüpfung	Lien
+Anderer Eintrag	Autre élément
+Umfang	Contenu
+Verzeichnisformat	Format du répertoire
+Unix-Rechte	Droits Unix
+Vom Server nicht als Modus geliefert	Non fournis comme mode par le serveur
+Server-Zeitstempel (UTC)	Horodatage du serveur (UTC)
+FTP-Eigenschaften	Propriétés FTP
+WFX-Eigenschaften	Propriétés WFX
+Archiv-Eigenschaften	Propriétés de l’archive
+Einträge	Éléments
+Bytes	Octets
+Datei	Fichier
+Berechnen	Calculer
+Zusammenfügen	Assembler
+Kodieren	Encoder
+Dekodieren	Décoder
+Leseposition der aktuellen Quelle	Position de lecture dans la source actuelle
+Aktuelle Phase	Phase actuelle
+Lesedurchsatz	Débit de lecture
+Lese-Restzeit (geschätzt)	Temps de lecture restant estimé
+Lesezeitwerte gelten für die aktuelle Quelle. Verarbeitung und Speichern folgen als eigene Phasen.	Les estimations de lecture concernent la source actuelle. Le traitement et l’enregistrement suivent comme phases distinctes.
+Datei oder Schritt	Fichier ou étape
+Prüfsumme oder Status	Somme de contrôle ou état
+Quellen	Sources
+Reihenfolge	Ordre
+Quelle kopieren	Copier la source
+Prüfverfahren	Méthode de contrôle
+Verfahren	Méthode
+Format oder Modus	Format ou mode
+Erwartete Prüfsumme	Somme de contrôle attendue
+Teilgröße in MiB	Taille des parties en Mio
+Positive ganze Zahl; 1 MiB entspricht 1.048.576 Bytes.	Entier positif ; 1 Mio correspond à 1 048 576 octets.
+Ausgabe	Sortie
+Prüfsummendatei (optional)	Fichier de contrôle (facultatif)
+Name der Ausgabedatei	Nom du fichier de sortie
+Ordner wählen …	Choisir un dossier …
+Ohne Ausgabename werden Prüfsummen nur im Ergebnis angezeigt.	Sans nom de sortie, les sommes de contrôle sont uniquement affichées dans les résultats.
+Vorhandene Dateien werden nicht überschrieben. Bereits abgeschlossene Ausgaben bleiben nach Abbruch bestehen.	Les fichiers existants ne sont pas écrasés. Les sorties déjà terminées subsistent après annulation.
+Tab wechselt die Felder · Leertaste/Enter betätigt Schaltflächen · Esc schließt oder fordert Abbruch an	Tab change de champ · Espace/Entrée active les boutons · Échap ferme ou demande l’annulation
+Prüfsummen erzeugen	Créer des sommes de contrôle
+Prüfsummendatei prüfen	Vérifier un fichier de contrôle
+Datei teilen	Fractionner un fichier
+Dateien zusammenfügen	Assembler des fichiers
+Dateien kodieren	Encoder des fichiers
+Dateien dekodieren	Décoder des fichiers
+Die Dateien einer Prüfsummenliste prüfen. Dateipfade außerhalb ihres Ordners werden abgewiesen.	Vérifier les fichiers d’une liste de contrôle. Les chemins hors de son dossier sont refusés.
+Ausgewählte Dateien berechnen und optional eine neue Prüfsummenliste speichern.	Calculer les sommes des fichiers sélectionnés et enregistrer éventuellement une nouvelle liste.
+Die erwartete Prüfsumme bleibt vor dem Start sichtbar und bearbeitbar.	La somme de contrôle attendue reste visible et modifiable avant le démarrage.
+TC erzeugt Basisname.001 und eine CRC-Begleitdatei; reine Dateiteile verwenden Originalname.001. Der Satz wird erst nach vollständigem Lesen veröffentlicht.	TC crée nomdebase.001 et un fichier CRC ; les parties brutes utilisent nomoriginal.001. Le jeu n’est publié qu’après lecture complète de la source.
+CRC-Satz automatisch vervollständigen	Compléter automatiquement le jeu CRC
+Die CRC-Begleitdatei bestimmt Originalname, vollständigen Teilesatz, Größe und Prüfsumme. Erst nach erfolgreicher Prüfung wird gespeichert.	Le fichier CRC détermine le nom original, le jeu complet, la taille et la somme de contrôle. La sortie n’est enregistrée qu’après vérification réussie.
+Lexikografische Reihenfolge	Ordre lexicographique
+Die angezeigten Quellen werden in lexikografischer Reihenfolge verbunden. Vorhandene Ausgaben bleiben erhalten.	Les sources affichées sont assemblées dans l’ordre lexicographique. Les sorties existantes sont conservées.
+Transportkodierungen für Dateien. Zusammengehörige UUE-/XXE-Teile und MIME-Nachrichtenteile werden gemeinsam verarbeitet. BinHex ist zum Dekodieren verfügbar.	Encodages de transport des fichiers. Les parties UUE/XXE et fragments MIME associés sont traités ensemble. BinHex est disponible au décodage.
+Automatisch nach Dateiendung	Automatique selon l’extension
+Total Commander (.crc)	Total Commander (.crc)
+Nur Dateiteile	Parties brutes uniquement
+Dateiteile erfassen	Analyser les parties de fichier
+CRC-Begleitdatei lesen …	Lecture du fichier CRC …
+Wähle ein gültiges Verfahren.	Choisissez une méthode valide.
+Teilgröße muss eine positive ganze Zahl in MiB sein.	La taille des parties doit être un entier positif en Mio.
+Gib einen Zielordner an.	Indiquez un dossier de destination.
+Die erwartete Prüfsumme passt nicht zum gewählten Algorithmus.	La somme attendue ne correspond pas à l’algorithme sélectionné.
+Quelldaten lesen …	Lecture des données sources …
+Daten prüfen und verarbeiten …	Vérification et traitement des données …
+Ausgaben prüfen und speichern …	Vérification et enregistrement des sorties …
+Dateiwerkzeug läuft …	Outil de fichiers en cours …
+Dateiwerkzeug	Outil de fichiers
+Abweichung	Différence
+Prüfsumme stimmt	Somme de contrôle correcte
+Prüfsumme weicht ab	Somme de contrôle différente
+Gespeichert	Enregistré
+Dekodiert	Décodé
+Absolute Ordnerpfade verwenden. Ein leeres Gegenverzeichnis lässt das andere Dateifenster unverändert.	Utilisez des chemins absolus. Laissez le dossier opposé vide pour conserver l’autre panneau.
+Absoluter EXE-Pfad	Chemin absolu de l’exécutable
+Aktion	Action
+Aktionstyp	Type d’action
+Aktuelle Leiste	Barre actuelle
+Anlegen, bearbeiten und sortieren	Créer, modifier et réordonner
+Arbeitsordner (optional)	Dossier de travail (facultatif)
+Argumente	arguments
+Argumente vor dem Start prüfen	Vérifier les arguments avant le lancement
+Argumente übergeben (ein Argument je Zeile)	Transmettre des arguments (un par ligne)
+Argumente, ein Argument je Zeile	Arguments, un par ligne
+Ausführen / öffnen	Exécuter / ouvrir
+Auswählen	Sélectionner
+Befehl	Commande
+Befehl wählen …	Choisir une commande …
+Beschriftung	Libellé
+Darstellung	Apparence
+Darstellung und Aktion getrennt bearbeiten. Programme werden erst beim ausdrücklichen Aufruf gestartet.	Modifiez séparément l’apparence et l’action. Les programmes ne démarrent que sur demande explicite.
+Datei wählen …	Choisir un fichier …
+Datei auswählen	Sélectionner un fichier
+Den gewählten Eintrag aus der Konfiguration entfernen? Dateien und Programme bleiben erhalten.	Supprimer cette entrée de la configuration ? Les fichiers et les programmes seront conservés.
+Diese Aktion ändert die gespeicherte Buttonbar- und Starterkonfiguration. Fortfahren?	Cette action modifie la configuration enregistrée des barres et du lanceur. Continuer ?
+Doppelklick oder Enter öffnet den Eintrag · Strg+F filtert · Esc schließt	Double-clic ou Entrée pour ouvrir · Ctrl+F pour filtrer · Échap pour fermer
+Doppelklick/Enter: bearbeiten · F2: bearbeiten · Einfg: neu · Alt+↑/↓: Reihenfolge · Entf: entfernen	Double-clic/Entrée : modifier · F2 : modifier · Inser : nouveau · Alt+↑/↓ : ordre · Suppr : retirer
+Ein Favorit öffnet einen Ordner oder ein zusammengehöriges Ordnerpaar.	Un favori ouvre un dossier ou une paire de dossiers associés.
+Eine Ebene nach oben	Remonter d’un niveau
+Eingabe	Saisie
+Einträge verwaltest du nach dem Speichern über die Aktion Untermenü. Vorhandene Einträge und importierte Leistenwechsel bleiben beim gleichen Aktionstyp erhalten.	Après l’enregistrement, gérez les entrées avec Sous-menu. Les entrées et les changements de barre importés sont conservés si le type reste identique.
+Exportieren …	Exporter …
+Favoriten mit Namen, Gruppen und vollständigen Ordnerpfaden verwalten.	Gérez les favoris avec leurs noms, groupes et chemins complets.
+Favoriten verwalten …	Gérer les favoris …
+Favoritengruppe	Groupe de favoris
+Fensterzustand	État de la fenêtre
+Gewählten Tab verwalten …	Gérer l’onglet sélectionné …
+Gruppe (optional, Ebenen mit / trennen)	Groupe (facultatif, niveaux séparés par /)
+Gruppe öffnen	Ouvrir le groupe
+Importieren …	Importer …
+Internen Befehl wählen	Choisir une commande interne
+Interner Befehl	Commande interne
+Keine Einträge. Leere den Filter oder lege einen neuen Eintrag an.	Aucune entrée. Effacez le filtre ou créez une entrée.
+Leistenwechsel	Changer de barre
+Liste filtern	Filtrer la liste
+Maximiert	Agrandie
+Minimiert	Réduite
+Nach Name, Pfad oder Befehl filtern …	Filtrer par nom, chemin ou commande …
+Nach oben verschieben	Monter
+Nach unten verschieben	Descendre
+Name (optional)	Nom (facultatif)
+Nicht gespeicherte Änderungen	Modifications non enregistrées
+Nicht gesperrt	Non verrouillé
+Normal	Normal
+Ordner fest gesperrt	Dossier verrouillé
+Ordner im aktiven Dateifenster	Dossier du panneau actif
+Ordner im anderen Dateifenster (optional)	Dossier de l’autre panneau (facultatif)
+Programm	Programme
+Programm starten	Lancer un programme
+Programmoptionen	Options du programme
+Prüfe den Hinweis oben und bestätige die Aktion ausdrücklich.	Lisez l’avertissement ci-dessus et confirmez explicitement l’action.
+Rückkehr zum Stammordner	Retour au dossier de base
+Schaltflächen	boutons
+Schaltflächen in Anzeigereihenfolge	Boutons dans l’ordre d’affichage
+Speichern startet kein Programm. Leere Argumentzeilen bleiben als leere Argumente erhalten. Die Argumentprüfung aktiviert die TC-Platzhalterauswertung.	Enregistrer ne lance aucun programme. Les lignes vides restent des arguments vides. La vérification active les variables TC.
+Standardsymbol oder eigener Bildpfad; DLL-Ressourcen mit Komma und Index, z. B. shell32.dll,3.	Icône intégrée ou chemin d’image ; pour une ressource DLL, ajoutez une virgule et l’index, par exemple shell32.dll,3.
+Standardsymbol wählen	Choisir une icône intégrée
+Standardsymbol wählen …	Choisir une icône intégrée …
+Starter verwalten …	Gérer le lanceur …
+Symbol	Icône
+Symbolname, Bildpfad oder DLL-Ressource	Nom d’icône, chemin d’image ou ressource DLL
+Tab-Gruppen speichern beide Dateifenster einschließlich Pfaden, Namen und Sperren.	Les groupes enregistrent les deux panneaux avec leurs chemins, noms et verrouillages.
+Tab: nächstes Feld · Umschalt+Tab: zurück · Strg+S: übernehmen · Esc: abbrechen	Tab : champ suivant · Maj+Tab : précédent · Ctrl+S : appliquer · Échap : annuler
+Total-Commander-Platzhalter auswerten	Interpréter les variables Total Commander
+Untermenü	Sous-menu
+Untermenüebenen	niveaux de sous-menus
+Verwalten	Gérer
+Verwerfen	Abandonner
+Vorhandene Untereinträge beim Typwechsel entfernen	Supprimer les sous-entrées existantes lors du changement de type
+Vorlage öffnen	Ouvrir le modèle
+Weiter bearbeiten	Continuer la modification
+Wähle eine Aktion. Ausführen oder Doppelklick startet sie; Verwalten ändert nur die Konfiguration.	Choisissez une action. Exécuter ou double-cliquer la lance ; Gérer modifie seulement la configuration.
+Wählen …	Choisir …
+Änderung bestätigen	Confirmer la modification
+Übergeordnete Leiste	Barre parente
+Tab-Name (leer = Ordnername)	Nom de l’onglet (vide = nom du dossier)
+Windows-Argumente	Arguments Windows
+Absoluter Dateipfad	Chemin absolu du fichier
+Vorschau laden	Charger l’aperçu
+Gruppe löschen	Supprimer le groupe
+Tabs ersetzen	Remplacer les onglets
+Ein einzeiliges Feld enthält Steuerzeichen.	Un champ sur une ligne contient des caractères de contrôle.
+Bestätige zuerst das Entfernen der vorhandenen Untereinträge.	Confirmez d’abord la suppression des sous-entrées existantes.
+Wähle einen gültigen Fensterzustand.	Choisissez un état de fenêtre valide.
+Wähle einen gültigen Aktionstyp.	Choisissez un type d’action valide.
+Der Befehl passt nicht zum gewählten Aktionstyp.	La commande ne correspond pas au type d’action sélectionné.
+Gib einen absoluten Zielpfad mit der Endung .tab ein.	Saisissez un chemin de destination absolu avec l’extension .tab.
+Wähle einen neuen Dateinamen. Vorhandene Tab-Dateien werden nicht überschrieben.	Choisissez un nouveau nom. Les fichiers d’onglets existants ne sont pas écrasés.
+Absteigend	Décroissant
+Alle	Tous
+Als Standardaktion für passende Dateien verwenden	Utiliser comme action par défaut pour les fichiers correspondants
+Ansicht beibehalten	Conserver la vue actuelle
+Ansicht und Spalten	Vue et colonnes
+Ansichtsmodus	Mode d’affichage
+Ansichtsmodus wählen	Choisir un mode d’affichage
+Aufsteigend	Croissant
+Ausrichtung	Alignement
+Auswahl	Sélection
+Auswahl und Cursor legen Hintergründe fest. Sonst bestimmt die erste passende Dateimaske die Schriftfarbe.	Sélection et Curseur définissent les couleurs de fond. Sinon, le premier masque correspondant détermine la couleur du texte.
+Automatische Ansichtsregeln verwenden	Utiliser les règles d’affichage automatiques
+Automatischer Wechsel	Changement automatique
+Bedingungen und Priorität ohne Textformat bearbeiten. Die erste passende Regel bestimmt die Ansicht.	Modifiez les conditions et la priorité dans des champs distincts. La première règle correspondante détermine la vue.
+Behalten	Conserver
+Bezeichnung	Nom
+Breite in Pixeln (40 bis 600)	Largeur en pixels (40 à 600)
+Cursor	Curseur
+Darstellung, Spaltensatz und Sortierung gemeinsam festlegen. Importierte Farben bleiben erhalten.	Définissez ensemble la vue, le jeu de colonnes et le tri. Les couleurs importées sont conservées.
+Darstellungsart	Type d’affichage
+Das erste Feld hat die höchste Priorität. Jedes Feld darf nur einmal vorkommen; Unsortiert steht allein.	Le premier champ est prioritaire. Chaque champ ne peut apparaître qu’une fois ; Sans tri doit rester seul.
+Datei anzeigen	Afficher le fichier
+Dateien und Aktion	Fichiers et action
+Dateimasken oder Auswahl / Cursor	Masques de fichiers ou Auswahl / Cursor
+Dateimasken, Programm und Argumente getrennt bearbeiten. Diese Zuordnung gilt nur innerhalb von Arco Commander.	Modifiez séparément les masques, le programme et les arguments. Cette association s’applique uniquement dans Arco Commander.
+Der Name bleibt beim Bearbeiten erhalten, damit Verweise auf diese Ansicht gültig bleiben.	Le nom est conservé pendant la modification pour maintenir les références vers cette vue.
+Details	Détails
+Die Namensspalte bleibt links bestehen. Plugin-Felder und TC-Ausdrücke behalten ihre Identität.	La colonne du nom reste à gauche. Les champs des plugins et les expressions TC conservent leur identité.
+Die erste passende Regel gewinnt. Änderungen an Einträgen und Reihenfolge werden erst mit Speichern übernommen.	La première règle correspondante s’applique. Les entrées et leur ordre ne sont modifiés qu’à l’enregistrement.
+Die erste passende Standardaktion gewinnt. Reihenfolge ändern oder Aktionen bearbeiten; Speichern startet kein Programm.	La première action par défaut correspondante s’applique. Réordonnez ou modifiez les actions ; enregistrer ne lance aucun programme.
+Diese Aktion ändert die gespeicherte Konfiguration. Fortfahren?	Cette action modifie la configuration enregistrée. Continuer ?
+Doppelklick/Enter: anwenden · F2: bearbeiten · Einfg: neu · Entf: entfernen	Double-clic/Entrée : appliquer · F2 : modifier · Inser : nouveau · Suppr : retirer
+Eigene Spaltensätze benötigen die Detailansicht. Importierte Ansichtsfarben bleiben erhalten.	Les jeux de colonnes personnalisés nécessitent la vue Détails. Les couleurs importées sont conservées.
+Eintrag aus dem Entwurf entfernen?	Retirer cette entrée du brouillon ?
+Enthält Dateien nach Maske (optional)	Contient des fichiers correspondant aux masques (facultatif)
+Enthält keine Dateien nach Maske (optional)	Ne contient aucun fichier correspondant aux masques (facultatif)
+Erweiterter TC-Regelausdruck	Expression de règle TC avancée
+Erweiterung	Extension
+Es gilt die erste passende Standardaktion in der Verwaltung. Diese Zuordnung gilt innerhalb von Arco Commander.	La première action par défaut correspondante du gestionnaire est utilisée. Cette association s’applique dans Arco Commander.
+Farbe im dunklen Schema (#RRGGBB)	Couleur du thème sombre (#RRGGBB)
+Farbe im hellen Schema (#RRGGBB)	Couleur du thème clair (#RRGGBB)
+Farben für helle und dunkle Darstellung getrennt festlegen. Leere Listen verwenden die Standardfarben.	Définissez séparément les couleurs des thèmes clair et sombre. Une liste vide utilise les couleurs par défaut.
+Farbreihenfolge	Priorité des couleurs
+Gewählter Eintrag	Entrée sélectionnée
+Im aktiven Tab anwenden	Appliquer à l’onglet actif
+Importierte TC-Bedingungen werden als vollständiger Ausdruck erhalten, einschließlich Verknüpfungen.	Les conditions TC importées sont conservées intégralement, y compris leurs opérateurs.
+Kommentare	Commentaires
+Kurz	Compact
+Laufwerke	Lecteurs
+Lokale Ordner	Dossiers locaux
+Maximale Anzahl Einträge:	Nombre maximal d’entrées :
+Mehrere Masken mit Semikolon trennen; hinter | stehen Ausschlüsse, z. B. *.txt;*.md | intern*.	Séparez les masques par un point-virgule ; les exclusions suivent |, par exemple *.txt;*.md | interne*.
+Meine Ansicht	Ma vue
+Meine Spalten	Mes colonnes
+Meine WFX-Spalten	Mes colonnes WFX
+Mindestanteil passender Dateien in % (optional)	Pourcentage minimal de fichiers correspondants (facultatif)
+Mindestens eine Bedingung genügt (ODER)	Une seule condition suffit (OU)
+Miniaturen	Miniatures
+Nicht gespeicherte Änderungen · Strg+S: speichern · Esc: abbrechen	Modifications non enregistrées · Ctrl+S : enregistrer · Échap : annuler
+Nicht verfügbares Sortierfeld	Champ de tri indisponible
+Noch keine Einträge. Mit Neu einen Eintrag hinzufügen.	Aucune entrée. Utilisez Nouveau pour en ajouter une.
+Pfadmaske (optional)	Masque de chemin (facultatif)
+Pfeile: auswählen · Enter/F2: Felder · Einfg: neu · Alt+↑/↓: Reihenfolge · Entf: entfernen	Flèches : sélectionner · Entrée/F2 : champs · Inser : nouveau · Alt+↑/↓ : ordre · Suppr : retirer
+Platzhalter stehen jeweils als eigenes Argument. Ohne {{datei}} oder {{name}} wird der Dateipfad automatisch angehängt. Speichern startet kein Programm.	Chaque variable est un argument distinct. Sans {{datei}} ou {{name}}, le chemin est ajouté automatiquement. Enregistrer ne lance aucun programme.
+Regel	Règle
+Regelpriorität	Priorité des règles
+Sortierfeld	Champ de tri
+Sortierfelder	champs de tri
+Sortierfelder in Prioritätsreihenfolge anordnen. Leere Listen verwenden die Standardsortierung.	Classez les champs de tri par priorité. Une liste vide utilise le tri par défaut.
+Sortierpriorität	Priorité du tri
+Sortierrichtung	Sens du tri
+Spalten einzeln bearbeiten und sortieren. Plugin-Felder und importierte Ausdrücke bleiben vollständig erhalten.	Modifiez et réordonnez les colonnes. Les champs des plugins et les expressions importées sont intégralement conservés.
+Spaltenfeld	Champ de colonne
+Spaltenreihenfolge	Ordre des colonnes
+Spaltensatz	Jeu de colonnes
+Spaltentitel	Titre de colonne
+Standardspalten	Colonnes standard
+Suchergebnisse	Résultats de recherche
+TC-Regelausdruck	Expression de règle TC
+TC-Spaltenausdruck	Expression de colonne TC
+Tab: nächstes Feld · Umschalt+Tab: zurück · Strg+S: speichern	Tab : champ suivant · Maj+Tab : précédent · Ctrl+S : enregistrer
+UNC / Netzwerk	UNC / réseau
+Beim Entfernen eines Ansichtsmodus werden auch seine automatischen Regeln entfernt.	Supprimer un mode d’affichage supprime également ses règles automatiques.
+Beim Entfernen eines Spaltensatzes werden zugehörige Ansichten auf Standardspalten zurückgesetzt.	Supprimer un jeu de colonnes rétablit les colonnes standard des vues associées.
+Standardaktion	Action par défaut
+Zusätzliche Aktion	Action supplémentaire
+Lege zuerst einen Ansichtsmodus an.	Créez d’abord un mode d’affichage.
+Spaltentitel benötigen höchstens 80 Zeichen ohne Steuerzeichen.	Les titres de colonnes acceptent au plus 80 caractères sans caractères de contrôle.
+Wähle ein gültiges Spaltenfeld.	Choisissez un champ de colonne valide.
+Wähle eine gültige Ausrichtung.	Choisissez un alignement valide.
+Wähle einen gültigen Geltungsbereich.	Choisissez une portée valide.
+Wähle Sortierfeld und Richtung.	Choisissez un champ et un sens de tri.
+Die Konfiguration hat sich geändert.	La configuration a changé.
+Die Konfiguration fehlt.	La configuration est introuvable.
+Unbekannte Bearbeitungsaktion.	Action de modification inconnue.
+Bei der Auswahl eines WFX-Feldes wird die Plugin-Sortierrichtung übernommen. Danach kannst du sie ausdrücklich ändern.	Choisir un champ WFX applique le sens de tri du plugin. Vous pouvez ensuite le modifier explicitement.
+Alles kopieren	Tout copier
+Archivendung ohne Punkt	Extension d’archive sans point
+Argumente – ein Argument je Zeile	Arguments – un argument par ligne
+Auftrag abgeschlossen	Tâche terminée
+Der Auftrag ist abgeschlossen.	La tâche est terminée.
+Der Auftrag wurde abgebrochen. Bereits abgeschlossene Schritte bleiben bestehen.	La tâche a été annulée. Les étapes terminées sont conservées.
+Der Vorgang konnte nicht abgeschlossen werden. Die Details enthalten die Fehlermeldung.	L’opération n’a pas pu être terminée. Les détails contiennent le message d’erreur.
+Details anzeigen	Afficher les détails
+Details ausblenden	Masquer les détails
+Details kopieren	Copier les détails
+Drucken …	Imprimer …
+Eine Regel je Zeile; ein abschließender Backslash gilt nur für Ordner. Aktivierung und Text werden zusammen gespeichert.	Une règle par ligne ; une barre oblique inverse finale concerne uniquement les dossiers. Les règles et leur activation sont enregistrées ensemble.
+Einfache Ersetzung (optional, Muster=>Ersatz)	Remplacement simple (facultatif, motif=>remplacement)
+Einige Einträge konnten nicht vollständig verarbeitet werden. Die Details enthalten die betroffenen Stellen.	Certaines entrées n’ont pas pu être traitées entièrement. Les détails indiquent les éléments concernés.
+Ersetzungsgruppen auswerten	Interpréter les groupes de remplacement
+Erweiterung getrennt umbenennen	Renommer l’extension séparément
+Erweiterung und Ersetzung	Extension et remplacement
+Externes Programm	Programme externe
+Groß-/Kleinschreibung beachten	Respecter la casse
+Hinweis mit Einschränkungen	Résultat avec limitations
+Ignorierliste verwenden	Utiliser la liste d’exclusion
+In die Zwischenablage kopiert.	Copié dans le presse-papiers.
+Information	Information
+Namensmaske, Erweiterung und Suchoptionen als Vorlage speichern. Dabei werden keine Dateien umbenannt.	Enregistrez le masque de nom, l’extension et les options de recherche comme modèle. Aucun fichier n’est renommé.
+Nur erstes Vorkommen	Première occurrence seulement
+Pfade und Dateimasken	Chemins et masques de fichiers
+Platzhalter	Caractères génériques
+Platzhalter: {{archive}} für das Ziel, {{sources}} für Quelldateien oder @{{list}} für eine Dateiliste.	Variables : {{archive}} pour la destination, {{sources}} pour les fichiers source ou @{{list}} pour une liste de fichiers.
+Profilname, Programm, Archivendung und Argumente getrennt bearbeiten.	Modifiez séparément le nom du profil, le programme, l’extension et les arguments.
+Regeln und Aktivierung gemeinsam bearbeiten. Änderungen gelten erst nach dem Speichern.	Modifiez ensemble les règles et leur activation. Les changements s’appliquent après l’enregistrement.
+Speichern führt den Packer nicht aus. Archiv und Quellen werden beim Packen als getrennte Argumente eingesetzt.	Enregistrer ne lance pas le logiciel d’archivage. L’archive et les sources sont transmises comme arguments distincts lors de la compression.
+Suchen nach	Rechercher
+Suchen und Ersetzen verwenden	Utiliser rechercher et remplacer
+Umbenennvorschau	Aperçu du renommage
+Vollständige Details	Détails complets
+Weitere Informationen stehen in den Details.	Des informations supplémentaires figurent dans les détails.
+Weitere Meldungen warten:	Autres messages en attente :
+Warnung	Avertissement
+Der Auftrag ist mit Fehlern abgeschlossen. Prüfe die betroffenen Einträge in den Details.	La tâche s’est terminée avec des erreurs. Consultez les entrées concernées dans les détails.
+Übersprungen	Ignoré
+Meldungen	Messages
+Letztes Ergebnis	Dernier résultat
+Meldungen und letztes Ergebnis	Messages et dernier résultat
+Laufwerk auswählen und öffnen	Sélectionner un lecteur et l’ouvrir
+Pfeile: auswählen · Doppelklick/Enter: öffnen · Laufwerksbuchstabe: direkt öffnen · Esc: abbrechen	Flèches : sélectionner · Double-clic/Entrée : ouvrir · Lettre du lecteur : ouvrir directement · Échap : annuler
+Vorschau nicht verfügbar	Aperçu indisponible
+Dateiverwaltung mit zwei Dateifenstern für Windows.	Gestion de fichiers à deux panneaux pour Windows.
+Es liegen keine weiteren Meldungen vor.	Il n’y a pas d’autres messages.
+Doppelklick/Enter: bearbeiten · F2: bearbeiten · Einfg: neu · Entf: entfernen	Double-clic/Entrée : modifier · F2 : modifier · Inser : nouveau · Suppr : retirer
+Doppelklick/Enter: Umbenennvorschau · F2: bearbeiten · Einfg: neu · Entf: entfernen	Double-clic/Entrée : aperçu du renommage · F2 : modifier · Inser : nouveau · Suppr : retirer
+Einlesen	Lire
+Dateipfad	Chemin du fichier
+Fehlerdetails	Détails de l’erreur

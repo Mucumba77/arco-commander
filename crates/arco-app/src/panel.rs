@@ -1730,6 +1730,40 @@ mod tests {
     }
 
     #[test]
+    fn marking_and_advancing_follows_visible_order_without_selecting_parent() {
+        let fixture = tempfile::tempdir().unwrap();
+        for name in ["a.txt", "b.bin", "c.txt"] {
+            std::fs::write(fixture.path().join(name), b"abc").unwrap();
+        }
+        let mut tab = Tab::new(fixture.path().to_path_buf());
+        tab.populate(
+            files::list(fixture.path()).unwrap().entries,
+            true,
+            String::new(),
+        );
+        tab.filter("*.txt".into(), true);
+        tab.select_row(0, false, false);
+        tab.cursor_step(1, true);
+        assert_eq!(tab.cursor, 1);
+        assert!(tab.selection.borrow().is_empty());
+        tab.cursor_step(1, true);
+        assert_eq!(tab.cursor, 2);
+        assert_eq!(tab.marked_paths(), [fixture.path().join("a.txt")]);
+        tab.cursor_step(1, true);
+        assert_eq!(tab.cursor, 2);
+        assert_eq!(
+            tab.marked_paths(),
+            [fixture.path().join("a.txt"), fixture.path().join("c.txt")]
+        );
+        assert_eq!(tab.selected_size, 6);
+        tab.cursor = 1;
+        tab.cursor_step(1, true);
+        assert_eq!(tab.marked_paths(), [fixture.path().join("c.txt")]);
+        assert_eq!(tab.cursor, 2);
+        assert_eq!(tab.selected_size, 3);
+    }
+
+    #[test]
     fn parent_row_stays_visible_and_outside_file_selections() {
         let fixture = tempfile::tempdir().unwrap();
         let first = fixture.path().join("Erster.TXT");

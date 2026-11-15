@@ -1,0 +1,295 @@
+import { ScrollView, TextEdit } from "std-widgets.slint";
+import { Colors, Button, CheckBox } from "dialog-theme.slint";
+import { DialogHeading, FieldLabel, FormSection, JobMetrics, OperationKind, ProgressMeter, ProgressMetrics } from "operation-dialogs.slint";
+
+export struct DiffData {
+    binary: bool,
+    left-path: string,
+    right-path: string,
+    left-range: string,
+    right-range: string,
+    left-text: string,
+    right-text: string,
+    summary: string,
+    editable-left: bool,
+    editable-right: bool,
+    has-previous: bool,
+    has-next: bool,
+    has-change: bool,
+    ignore-case: bool,
+    ignore-whitespace: bool,
+    ignore-line-endings: bool,
+    left-info: string,
+    right-info: string,
+    stale: bool,
+}
+
+component ComparisonPane inherits Rectangle {
+    in property <string> title;
+    in property <string> path;
+    in property <string> info;
+    in property <string> range;
+    in property <bool> binary;
+    in property <bool> editable;
+    in property <bool> dirty;
+    in property <bool> can-save;
+    in-out property <string> text;
+    callback save();
+    public function focus-content() { editor.focus(); }
+    background: Colors.background;
+    border-width: 1px;
+    border-color: root.dirty ? Colors.accent : Colors.edge;
+    border-radius: 10px;
+    horizontal-stretch: 1;
+    VerticalLayout {
+        padding: 12px; spacing: 7px;
+        HorizontalLayout {
+            spacing: 8px;
+            Image { source: @image-url("icons/file.svg"); width: 17px; height: 17px; colorize: Colors.accent; }
+            FieldLabel { text: root.title; horizontal-stretch: 1; }
+            Text { text: root.dirty ? @tr("Nicht gespeichert") : root.editable ? @tr("Bearbeitbar") : @tr("Nur lesen"); color: root.dirty ? Colors.accent : Colors.muted; font-size: 11px; }
+        }
+        Text { text: root.path; color: Colors.text; overflow: elide; Tooltip { text: @markdown("\{root.path}"); } }
+        Text { text: root.info; color: Colors.muted; font-size: 11px; overflow: elide; }
+        Rectangle { height: 1px; background: Colors.edge; }
+        Text { text: root.range; color: Colors.accent; font-size: 12px; overflow: elide; Tooltip { text: @markdown("\{root.range}"); } }
+        editor := TextEdit {
+            text <=> root.text;
+            read-only: !root.editable;
+            font-family: "Consolas";
+            font-size: 14px;
+            wrap: no-wrap;
+            vertical-stretch: 1;
+            accessible-label: root.title + " · " + root.path;
+        }
+        if !root.binary : Button {
+            text: @tr("Bearbeitung speichern"); icon: @image-url("icons/edit.svg");
+            enabled: root.can-save;
+            clicked => { root.save(); }
+        }
+    }
+}
+
+export component TextComparisonCard inherits Rectangle {
+    in property <int> focus-cycle;
+    in property <DiffData> data;
+    in property <int> revision;
+    in property <bool> busy;
+    in property <bool> cancelling;
+    in property <float> progress: -1;
+    in property <JobMetrics> metrics;
+    in property <string> notice;
+    callback navigate(int);
+    callback compare(bool, bool, bool);
+    callback save(int, bool, string);
+    callback cancel-job();
+    callback close();
+    property <int> requested-side: -1;
+    property <bool> requested-edit;
+    property <bool> ignore-case;
+    property <bool> ignore-whitespace;
+    property <bool> ignore-line-endings;
+    property <int> option-focus;
+    property <bool> scroll-prompt;
+    changed requested-side => { if (root.requested-side >= 0) { root.scroll-prompt = true; } }
+    changed pending-action => { if (root.pending-action != 0) { root.scroll-prompt = true; } }
+    Timer {
+        interval: 1ms;
+        running: root.scroll-prompt;
+        triggered => { body.viewport-y = min(0px, body.visible-height - content.height); root.scroll-prompt = false; }
+    }
+    // -1/1 navigate, 2 apply rules, 3 close. No action discards a draft silently.
+    property <int> pending-action;
+    property <bool> left-dirty: !root.data.stale && left.text != root.data.left-text;
+    property <bool> right-dirty: !root.data.stale && right.text != root.data.right-text;
+    property <bool> dirty: root.left-dirty || root.right-dirty;
+    property <bool> ready: !root.busy && root.requested-side < 0 && root.pending-action == 0;
+
+    function focus-first() {
+        if (root.data.binary) { left.focus-content(); }
+        else { root.option-focus += 1; }
+    }
+    function reset() {
+        left.text = root.data.left-text;
+        right.text = root.data.right-text;
+        root.ignore-case = root.data.ignore-case;
+        root.ignore-whitespace = root.data.ignore-whitespace;
+        root.ignore-line-endings = root.data.ignore-line-endings;
+        root.requested-side = -1;
+        root.pending-action = 0;
+        body.viewport-y = 0px;
+        root.focus-first();
+    }
+    function perform(action: int) {
+        root.pending-action = 0;
+        if (action == 3) { root.close(); }
+        else if (action == 2) { root.compare(root.ignore-case, root.ignore-whitespace, root.ignore-line-endings); }
+        else { root.navigate(action); }
+    }
+    function request(action: int) {
+        if (!root.ready) { return; }
+        if (root.dirty) { root.pending-action = action; }
+        else { root.perform(action); }
+    }
+    changed focus-cycle => {
+        if (root.ready) {
+            if (root.focus-cycle > 0) { root.focus-first(); }
+            else { close-button.focus(); }
+        }
+    }
+    changed revision => { root.reset(); }
+    changed busy => { if (root.busy) { body.viewport-y = 0px; } else { root.focus-first(); } }
+    init => { root.reset(); }
+    background: Colors.panel;
+    border-color: Colors.edge;
+    border-width: 1px;
+    border-radius: 16px;
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                if (root.busy) { if (!root.cancelling) { root.cancel-job(); } }
+                else if (root.requested-side >= 0 || root.pending-action != 0) { root.requested-side = -1; root.pending-action = 0; root.focus-first(); }
+                else { root.request(3); }
+                return accept;
+            }
+            if (event.text == Key.F7 && root.ready) {
+                let delta = event.modifiers.shift ? -1 : 1;
+                if ((delta < 0 && root.data.has-previous) || (delta > 0 && root.data.has-next)) { root.request(delta); }
+                return accept;
+            }
+            if (event.modifiers.control && (event.text == "r" || event.text == "R") && root.ready) { root.request(2); return accept; }
+            return reject;
+        }
+        VerticalLayout {
+            padding: 20px; spacing: 10px;
+            DialogHeading {
+                icon: @image-url("icons/compare.svg");
+                title: root.data.binary ? @tr("Binärvergleich") : @tr("Dateien nach Inhalt vergleichen");
+                subtitle: root.data.binary ? @tr("Byteabweichungen seitenweise prüfen. Die Dateien bleiben unverändert.") : @tr("Unterschiede abschnittsweise prüfen, bearbeiten oder in die andere Datei übernehmen.");
+            }
+            body := ScrollView {
+                vertical-stretch: 1;
+                content := VerticalLayout {
+                    padding: 0px; spacing: 10px;
+                    if !root.data.binary : FormSection {
+                        title: @tr("Vergleichsregeln");
+                        description: @tr("Geänderte Regeln mit Neu vergleichen anwenden.");
+                        HorizontalLayout {
+                            spacing: 12px;
+                            CheckBox {
+                                property <int> cycle: root.option-focus;
+                                changed cycle => { self.focus(); }
+                                init => { self.focus(); }
+                                checked <=> root.ignore-case;
+                                text: @tr("Groß-/Kleinschreibung ignorieren"); enabled: root.ready;
+                            }
+                            CheckBox { checked <=> root.ignore-whitespace; text: @tr("Leerraum ignorieren"); enabled: root.ready; }
+                            CheckBox { checked <=> root.ignore-line-endings; text: @tr("Zeilenenden ignorieren"); enabled: root.ready; }
+                            Rectangle { horizontal-stretch: 1; }
+                            recompare := Button { property <string> hint: @tr("Neu vergleichen · Strg+R"); text: @tr("Neu vergleichen"); icon: @image-url("icons/refresh.svg"); enabled: root.ready; clicked => { root.request(2); } Tooltip { text: @markdown("\{recompare.hint}"); } }
+                        }
+                    }
+                    if root.notice != "" : FormSection {
+                        title: root.data.stale ? @tr("Änderung gespeichert") : @tr("Hinweis zum Vergleich");
+                        Text { text: root.notice; color: Colors.archive; wrap: word-wrap; }
+                    }
+                    if root.busy : FormSection {
+                        title: root.cancelling ? @tr("Abbruch angefordert …") : root.metrics.phase;
+                        ProgressMeter { label: root.metrics.items != "" ? @tr("Arbeitsschritte") : root.metrics.bytes != "" ? @tr("Suchbereich geprüft") : @tr("Aktivität"); progress: root.progress; paused: root.cancelling; }
+                        ProgressMetrics { kind: OperationKind.compare; data: root.metrics; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text { text: root.metrics.bytes; color: Colors.muted; horizontal-stretch: 1; }
+                            cancel-button := Button {
+                                property <int> cycle: root.focus-cycle;
+                                changed cycle => { self.focus(); }
+                                init => { self.focus(); }
+                                text: @tr("Abbrechen"); destructive: true; enabled: !root.cancelling;
+                                clicked => { root.cancel-job(); }
+                            }
+                        }
+                    }
+                    summary := Text { text: root.data.stale ? @tr("Vorschau veraltet") : root.data.summary; color: root.data.has-change || root.data.binary ? Colors.accent : Colors.text; font-weight: 600; overflow: elide; Tooltip { text: @markdown("\{summary.text}"); } }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        height: max(260px, root.height - (root.data.binary ? 270px : 360px));
+                        left := ComparisonPane {
+                            title: @tr("Links"); path: root.data.left-path; info: root.data.left-info; range: root.data.left-range;
+                            binary: root.data.binary;
+                            editable: root.data.editable-left && root.ready && !root.right-dirty;
+                            dirty: root.left-dirty;
+                            can-save: root.data.editable-left && root.left-dirty && root.ready;
+                            save => { root.requested-side = 0; root.requested-edit = true; }
+                        }
+                        right := ComparisonPane {
+                            title: @tr("Rechts"); path: root.data.right-path; info: root.data.right-info; range: root.data.right-range;
+                            binary: root.data.binary;
+                            editable: root.data.editable-right && root.ready && !root.left-dirty;
+                            dirty: root.right-dirty;
+                            can-save: root.data.editable-right && root.right-dirty && root.ready;
+                            save => { root.requested-side = 1; root.requested-edit = true; }
+                        }
+                    }
+                    Text {
+                        text: root.data.binary ? @tr("Nur Abweichungen · bis zu 128 Positionen pro Seite · — bedeutet fehlendes Byte") : @tr("Nur abweichende Abschnitte · Text bis 4 MiB / 200.000 Zeilen pro Datei · gekürzte Vorschauen sind schreibgeschützt");
+                        color: Colors.muted; font-size: 11px; wrap: word-wrap;
+                    }
+                    if root.requested-side >= 0 : FormSection {
+                        title: root.requested-side == 0 ? @tr("Änderung in die linke Datei schreiben?") : @tr("Änderung in die rechte Datei schreiben?");
+                        write-target := Text { text: root.requested-side == 0 ? root.data.left-path : root.data.right-path; color: Colors.text; overflow: elide; Tooltip { text: @markdown("\{write-target.text}"); } }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text { text: root.requested-edit ? @tr("Nur die Bearbeitung dieses Abschnitts wird gespeichert.") : @tr("Der Originalabschnitt der anderen Datei ersetzt diesen Abschnitt."); color: Colors.muted; wrap: word-wrap; horizontal-stretch: 1; }
+                            back := Button {
+                                property <int> cycle: root.focus-cycle;
+                                changed cycle => { if (self.cycle > 0) { self.focus(); } }
+                                init => { self.focus(); }
+                                text: @tr("Zurück"); clicked => { root.requested-side = -1; root.focus-first(); }
+                            }
+                            write := Button {
+                                property <int> cycle: root.focus-cycle;
+                                changed cycle => { if (self.cycle < 0) { self.focus(); } }
+                                text: @tr("Änderung speichern"); primary: true; enabled: !root.busy;
+                                clicked => { root.save(root.requested-side, root.requested-edit, root.requested-side == 0 ? left.text : right.text); root.requested-side = -1; }
+                            }
+                        }
+                    }
+                    if root.pending-action != 0 : FormSection {
+                        title: @tr("Nicht gespeicherte Bearbeitung verwerfen?");
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text { text: @tr("Deine Bearbeitung bleibt erhalten, wenn du hier zurückgehst."); color: Colors.muted; wrap: word-wrap; horizontal-stretch: 1; }
+                            keep := Button {
+                                property <int> cycle: root.focus-cycle;
+                                changed cycle => { if (self.cycle > 0) { self.focus(); } }
+                                init => { self.focus(); }
+                                text: @tr("Zurück"); clicked => { root.pending-action = 0; root.focus-first(); }
+                            }
+                            discard := Button {
+                                property <int> cycle: root.focus-cycle;
+                                changed cycle => { if (self.cycle < 0) { self.focus(); } }
+                                text: @tr("Verwerfen und fortfahren"); destructive: true;
+                                clicked => {
+                                    left.text = root.data.left-text; right.text = root.data.right-text;
+                                    root.perform(root.pending-action);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Rectangle { height: 1px; background: Colors.edge; }
+            HorizontalLayout {
+                spacing: 7px;
+                previous := Button { property <string> hint: @tr("Vorheriger Unterschied · Umschalt+F7"); text: @tr("Zurück"); icon: @image-url("icons/back.svg"); enabled: root.data.has-previous && root.ready; clicked => { root.request(-1); } Tooltip { text: @markdown("\{previous.hint}"); } }
+                next := Button { property <string> hint: @tr("Nächster Unterschied · F7"); text: @tr("Weiter"); icon: @image-url("icons/forward.svg"); enabled: root.data.has-next && root.ready; clicked => { root.request(1); } Tooltip { text: @markdown("\{next.hint}"); } }
+                Rectangle { horizontal-stretch: 1; }
+                if !root.data.binary : Button { text: @tr("← Nach links übernehmen"); enabled: root.data.has-change && !root.dirty && root.ready; clicked => { root.requested-side = 0; root.requested-edit = false; } }
+                if !root.data.binary : Button { text: @tr("Nach rechts übernehmen →"); enabled: root.data.has-change && !root.dirty && root.ready; clicked => { root.requested-side = 1; root.requested-edit = false; } }
+                if root.data.binary : Button { text: @tr("Neu vergleichen"); icon: @image-url("icons/refresh.svg"); enabled: root.ready; clicked => { root.request(2); } }
+                close-button := Button { text: @tr("Schließen"); enabled: root.ready; clicked => { root.request(3); } }
+            }
+            Text { text: root.data.binary ? @tr("F7 Weiter · Umschalt+F7 Zurück · Strg+R Neu vergleichen · Esc Schließen oder Abbrechen") : @tr("F7 Weiter · Umschalt+F7 Zurück · Strg+R Neu vergleichen · Esc Zurück oder Schließen"); color: Colors.muted; font-size: 11px; wrap: word-wrap; }
+        }
+    }
+}

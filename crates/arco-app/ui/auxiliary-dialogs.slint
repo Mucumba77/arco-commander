@@ -1,0 +1,159 @@
+import { LineEdit, TextEdit, ScrollView, ComboBox } from "std-widgets.slint";
+import { Colors, Button, CheckBox } from "dialog-theme.slint";
+import { DialogHeading, FieldLabel, FormSection } from "operation-dialogs.slint";
+
+export enum MessageLevel { information, success, warning, error }
+export struct MessageStat { label: string, value: string }
+export struct MessageData { level: MessageLevel, title: string, summary: string, details: string, details-lines: int, wide: bool, copy-text: string, stats: [MessageStat], expanded: bool, confirm: string, destructive: bool, options: [string], options-label: string }
+
+export component MessageCard inherits Rectangle {
+    in property <MessageData> data;
+    in property <string> feedback;
+    in property <int> focus-cycle;
+    in property <int> revision;
+    in property <int> waiting;
+    in-out property <bool> expanded;
+    property <color> tone: root.data.level == MessageLevel.error ? Colors.archive : root.data.level == MessageLevel.warning ? Colors.folder : Colors.accent;
+    property <int> choice;
+    callback copy(bool);
+    callback confirm(int);
+    callback close();
+    init => { root.expanded = root.data.expanded; close-button.focus(); }
+    changed revision => { root.expanded = root.data.expanded; root.choice = 0; close-button.focus(); }
+    changed focus-cycle => { if (root.focus-cycle > 0) { copy-button.focus(); } else if (root.data.confirm == "") { close-button.focus(); } }
+    background: Colors.panel; border-radius: 16px; border-color: Colors.edge; border-width: 1px;
+    FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) { root.close(); return accept; }
+            return reject;
+        }
+        VerticalLayout {
+            padding: 20px; spacing: 12px;
+            DialogHeading { title: root.data.title; subtitle: root.data.level == MessageLevel.error ? @tr("Fehler") : root.data.level == MessageLevel.warning ? @tr("Warnung") : root.data.level == MessageLevel.success ? @tr("Abgeschlossen") : @tr("Information"); icon: root.data.level == MessageLevel.error ? @image-url("icons/close.svg") : root.data.level == MessageLevel.warning ? @image-url("icons/warning.svg") : root.data.level == MessageLevel.success ? @image-url("icons/check.svg") : @image-url("icons/info.svg"); }
+            Rectangle { height: 3px; border-radius: 2px; background: root.tone; }
+            Text { text: root.data.summary; color: Colors.text; wrap: word-wrap; font-size: 14px; }
+            if root.data.stats.length > 0 : HorizontalLayout { spacing: 8px;
+                for stat in root.data.stats : Rectangle {
+                    background: Colors.background; border-radius: 9px; min-height: 68px;
+                    VerticalLayout { padding: 12px; spacing: 5px;
+                        Text { text: stat.label; color: Colors.muted; font-size: 11px; wrap: word-wrap; }
+                        Text { text: stat.value; color: root.tone; font-size: 18px; font-weight: 600; }
+                    }
+                }
+            }
+            if root.data.details != "" : HorizontalLayout { spacing: 8px;
+                Button { text: root.expanded ? @tr("Details ausblenden") : @tr("Details anzeigen"); icon: @image-url("icons/eye.svg"); clicked => { root.expanded = !root.expanded; } }
+                if root.expanded : Button { text: @tr("Details kopieren"); icon: @image-url("icons/copy.svg"); clicked => { root.copy(false); } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            if root.data.options.length > 0 : VerticalLayout { spacing: 5px; FieldLabel { text: root.data.options-label; } ComboBox { model: root.data.options; current-index <=> root.choice; accessible-label: root.data.options-label; } }
+            if root.expanded && root.data.details != "" : TextEdit { text: root.data.details; read-only: true; vertical-stretch: 1; min-height: 100px; wrap: no-wrap; font-family: "Consolas"; accessible-label: @tr("Vollständige Details"); }
+            if !root.expanded : Rectangle { vertical-stretch: 1; }
+            if root.feedback != "" : Text { text: root.feedback; color: root.tone; wrap: word-wrap; }
+            if root.waiting > 0 : Text { text: @tr("Weitere Meldungen warten:") + " " + root.waiting; color: Colors.muted; font-size: 11px; }
+            Rectangle { height: 1px; background: Colors.edge; }
+            HorizontalLayout { spacing: 8px;
+                copy-button := Button { text: @tr("Alles kopieren"); icon: @image-url("icons/copy.svg"); clicked => { root.copy(true); } }
+                Rectangle { horizontal-stretch: 1; }
+                close-button := Button { text: root.data.confirm != "" ? @tr("Abbrechen") : @tr("Schließen"); primary: root.data.confirm == ""; clicked => { root.close(); } }
+                if root.data.confirm != "" : Button { property <int> cycle: root.focus-cycle; changed cycle => { if (self.cycle < 0) { self.focus(); } } text: root.data.confirm; primary: !root.data.destructive; destructive: root.data.destructive; clicked => { root.confirm(root.choice); } }
+            }
+        }
+    }
+}
+
+export enum TextDraftKind { text, ignore, packer, rename }
+export struct TextDraftForm { name: string, program: string, extension: string, body: string, second: string, enabled: bool, option: int, separate: bool, search: bool, find: string, replace: string, regex: bool, wildcards: bool, match-case: bool, first-only: bool, include-extension: bool, substitute: bool }
+export struct TextDraftData { kind: TextDraftKind, title: string, description: string, label: string, second-label: string, options: [string], options-label: string, initial: TextDraftForm }
+
+export component TextDraftCard inherits Rectangle {
+    in property <TextDraftData> data;
+    in property <int> revision;
+    in property <int> focus-cycle;
+    in property <string> notice;
+    property <TextDraftForm> form;
+    property <bool> discard;
+    property <bool> dirty: root.form != root.data.initial;
+    callback apply(TextDraftForm);
+    callback close();
+    callback file(bool, string) -> string;
+    init => { root.form = root.data.initial; }
+    changed revision => { root.form = root.data.initial; root.discard = false; }
+    changed focus-cycle => { if (root.focus-cycle < 0) { if (!root.discard) { save.focus(); } else { cancel.focus(); } } }
+    function request-close() { if (root.dirty) { root.discard = true; } else { root.close(); } }
+    background: Colors.panel; border-radius: 16px; border-color: Colors.edge; border-width: 1px;
+    FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) { if (root.discard) { root.discard = false; } else { root.request-close(); } return accept; }
+            if (event.modifiers.control && (event.text == "s" || event.text == "S")) { if (!root.discard) { root.apply(root.form); } return accept; }
+            return reject;
+        }
+        VerticalLayout { padding: 20px; spacing: 12px;
+            DialogHeading { icon: @image-url("icons/edit.svg"); title: root.data.title; subtitle: root.data.description; }
+            if root.notice != "" : Text { text: root.notice; color: Colors.archive; wrap: word-wrap; }
+            ScrollView { vertical-stretch: 1;
+                VerticalLayout { padding: 0px; spacing: 12px;
+                    if root.data.kind == TextDraftKind.ignore : CheckBox { property <int> cycle: root.focus-cycle; init => { self.focus(); } changed cycle => { if (root.focus-cycle > 0) { self.focus(); } } text: @tr("Ignorierliste verwenden"); checked <=> root.form.enabled; }
+                    if root.data.kind == TextDraftKind.packer || root.data.kind == TextDraftKind.rename : FormSection {
+                        title: @tr("Bezeichnung");
+                        LineEdit { property <int> cycle: root.focus-cycle; init => { self.focus(); } changed cycle => { if (root.focus-cycle > 0) { self.focus(); } } text <=> root.form.name; accessible-label: @tr("Name"); }
+                    }
+                    if root.data.kind == TextDraftKind.packer : FormSection {
+                        title: @tr("Externes Programm");
+                        FieldLabel { text: @tr("Absoluter EXE-Pfad"); }
+                        HorizontalLayout { spacing: 8px;
+                            LineEdit { text <=> root.form.program; accessible-label: @tr("Absoluter EXE-Pfad"); }
+                            Button { text: @tr("Datei wählen …"); clicked => { let path = root.file(false, root.form.program); if (path != "") { root.form.program = path; } } }
+                        }
+                        FieldLabel { text: @tr("Archivendung ohne Punkt"); }
+                        LineEdit { text <=> root.form.extension; accessible-label: @tr("Archivendung ohne Punkt"); }
+                        Text { text: @tr("Speichern führt den Packer nicht aus. Archiv und Quellen werden beim Packen als getrennte Argumente eingesetzt."); color: Colors.muted; font-size: 11px; wrap: word-wrap; }
+                    }
+                    FormSection {
+                        title: root.data.kind == TextDraftKind.packer ? @tr("Argumente – ein Argument je Zeile") : root.data.kind == TextDraftKind.ignore ? @tr("Pfade und Dateimasken") : root.data.kind == TextDraftKind.rename ? @tr("Namensmaske") : root.data.label;
+                        TextEdit { property <int> cycle: root.focus-cycle; changed cycle => { if (root.focus-cycle > 0 && root.data.kind == TextDraftKind.text) { self.focus(); } } init => { if (root.data.kind == TextDraftKind.text) { self.focus(); } } text <=> root.form.body; height: root.data.kind == TextDraftKind.rename ? 65px : 240px; font-family: root.data.kind == TextDraftKind.ignore || root.data.kind == TextDraftKind.packer ? "Consolas" : "Segoe UI"; accessible-label: root.data.label; }
+                        if root.data.kind == TextDraftKind.ignore : Text { text: @tr("Eine Regel je Zeile; ein abschließender Backslash gilt nur für Ordner. Aktivierung und Text werden zusammen gespeichert."); color: Colors.muted; wrap: word-wrap; font-size: 11px; }
+                        if root.data.kind == TextDraftKind.packer : Text { text: @tr("Platzhalter: {{archive}} für das Ziel, {{sources}} für Quelldateien oder @{{list}} für eine Dateiliste."); color: Colors.muted; wrap: word-wrap; font-size: 11px; }
+                    }
+                    if root.data.kind == TextDraftKind.rename : FormSection {
+                        title: @tr("Erweiterung und Ersetzung");
+                        CheckBox { text: @tr("Erweiterung getrennt umbenennen"); checked <=> root.form.separate; }
+                        if root.form.separate : LineEdit { text <=> root.form.extension; accessible-label: @tr("Erweiterungsmaske"); }
+                        CheckBox { text: @tr("Suchen und Ersetzen verwenden"); checked <=> root.form.search; }
+                        if root.form.search : VerticalLayout { spacing: 6px;
+                            FieldLabel { text: @tr("Suchen nach"); }
+                            LineEdit { text <=> root.form.find; accessible-label: @tr("Suchen nach"); }
+                            FieldLabel { text: @tr("Ersetzen durch"); }
+                            LineEdit { text <=> root.form.replace; accessible-label: @tr("Ersetzen durch"); }
+                            CheckBox { text: @tr("Regulärer Ausdruck"); checked <=> root.form.regex; }
+                            CheckBox { text: @tr("Platzhalter"); checked <=> root.form.wildcards; }
+                            CheckBox { text: @tr("Groß-/Kleinschreibung beachten"); checked <=> root.form.match-case; }
+                            CheckBox { text: @tr("Nur erstes Vorkommen"); checked <=> root.form.first-only; }
+                            CheckBox { text: @tr("Erweiterung einbeziehen"); checked <=> root.form.include-extension; }
+                            CheckBox { text: @tr("Ersetzungsgruppen auswerten"); checked <=> root.form.substitute; }
+                        }
+                        if !root.form.search : VerticalLayout { spacing: 6px;
+                            FieldLabel { text: @tr("Einfache Ersetzung (optional, Muster=>Ersatz)"); }
+                            LineEdit { text <=> root.form.second; accessible-label: @tr("Einfache Ersetzung (optional, Muster=>Ersatz)"); }
+                        }
+                    }
+                    if root.data.kind == TextDraftKind.text && root.data.second-label != "" : FormSection { title: root.data.second-label; LineEdit { text <=> root.form.second; accessible-label: root.data.second-label; } }
+                    if root.data.options.length > 0 : FormSection { title: root.data.options-label; ComboBox { model: root.data.options; current-index <=> root.form.option; accessible-label: root.data.options-label; } }
+                }
+            }
+            if root.discard : FormSection { title: @tr("Nicht gespeicherte Änderungen");
+                HorizontalLayout { spacing: 8px;
+                    Button { text: @tr("Weiter bearbeiten"); init => { self.focus(); } clicked => { root.discard = false; } }
+                    Button { text: @tr("Verwerfen"); destructive: true; clicked => { root.close(); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+            }
+            Rectangle { height: 1px; background: Colors.edge; }
+            HorizontalLayout { spacing: 8px;
+                Text { text: root.dirty ? @tr("Nicht gespeicherte Änderungen · Strg+S: speichern · Esc: abbrechen") : @tr("Tab: nächstes Feld · Umschalt+Tab: zurück · Strg+S: speichern"); color: root.dirty ? Colors.accent : Colors.muted; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; }
+                cancel := Button { text: @tr("Abbrechen"); clicked => { root.request-close(); } }
+                save := Button { text: @tr("Speichern"); primary: true; enabled: !root.discard; clicked => { root.apply(root.form); } }
+            }
+        }
+    }
+}

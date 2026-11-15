@@ -1,5 +1,6 @@
 use super::{invalid, publish_group, source_file};
 use crate::files;
+use crate::io_progress::{self, ObservedFile, Observer, Phase};
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -34,13 +35,15 @@ const CRC: [u16; 256] = {
     table
 };
 
-pub(super) fn decode(
+pub(super) fn decode_observed(
     source: &Path,
     directory: &Path,
     cancel: &AtomicBool,
+    observer: Observer<'_>,
 ) -> io::Result<Vec<PathBuf>> {
     let metadata = source_file(source)?;
-    let mut input = BufReader::new(File::open(source)?.take(metadata.len()));
+    let mut input =
+        BufReader::new(ObservedFile::open(source, cancel, observer)?.take(metadata.len()));
     let mut line_start = true;
     let mut found = false;
     for index in 0..64 * 1024 {
@@ -103,6 +106,7 @@ pub(super) fn decode(
     }
     files::ensure_unchanged(source, &metadata)?;
     staged.push((directory.join(&*name), file));
+    io_progress::phase(source, Phase::Publishing, observer);
     publish_group(staged, cancel)
 }
 
@@ -246,6 +250,11 @@ impl<R: Read> Read for HqxReader<'_, R> {
         }
         Ok(())
     }
+}
+
+#[cfg(test)]
+fn decode(source: &Path, directory: &Path, cancel: &AtomicBool) -> io::Result<Vec<PathBuf>> {
+    decode_observed(source, directory, cancel, &|_| {})
 }
 
 #[cfg(test)]

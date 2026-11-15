@@ -70,8 +70,10 @@ pub fn wdx_order(a: Option<&WdxValue>, b: Option<&WdxValue>, descending: bool) -
     }
 }
 
+#[derive(Clone)]
 pub struct WdxMatcher(Matcher);
 
+#[derive(Clone)]
 enum Matcher {
     Contains(String),
     Regex(Regex),

@@ -28,7 +28,9 @@ mod advanced_search;
 pub(crate) use advanced_search::run_search_worker;
 mod archive_actions;
 mod associations;
+mod auxiliary;
 mod buttonbars;
+mod configuration;
 mod directory_tree;
 mod favorites;
 mod folder_actions;
@@ -46,10 +48,13 @@ pub(crate) use settings::SettingsPage;
 mod lister;
 pub(crate) mod menu;
 mod metadata_actions;
+mod metadata_edit;
+mod navigation;
 mod packer_profiles;
 mod plugin_files;
 mod plugins;
 mod print_actions;
+pub(crate) mod properties;
 mod rename_setup;
 mod selection_tools;
 mod shell_panel;
@@ -58,6 +63,7 @@ mod tabs;
 mod text_compare;
 mod thumbnails;
 mod transfer_queue;
+pub(crate) mod utilities;
 mod view_setup;
 mod wdx;
 mod wfx_panel;
@@ -98,6 +104,10 @@ pub enum Navigation {
 }
 
 pub enum Outcome {
+    UtilityReady(utilities::Task),
+    UtilityReport(utilities::Report),
+    Properties(Box<properties::Sheet>),
+    MetadataEdited(&'static str, TransferReport),
     Notice(String),
     Text(String, String),
     SearchReview(Box<AdvancedSearchReview>),
@@ -170,6 +180,7 @@ pub enum Outcome {
     ViewerPage(Viewer, arco_core::tools::Preview),
     ViewerNotice(String),
     TextCompared(Arc<arco_core::text_compare::Session>, usize, bool),
+    ComparisonSaved(String),
     BinaryCompared(
         Arc<arco_core::tools::BinaryComparison>,
         arco_core::tools::BinaryPage,
@@ -530,6 +541,8 @@ pub struct App {
     profile_path: PathBuf,
     save_profile: bool,
     pub pending: Option<Pending>,
+    notices: RefCell<auxiliary::Notices>,
+    deferred_results: std::collections::VecDeque<Outcome>,
     plugin_prompts: std::collections::VecDeque<PromptTicket>,
     wdx_pending: Option<wdx::Running>,
     wdx_sort_request: Option<wdx::SortRequest>,
@@ -545,6 +558,8 @@ pub struct App {
     pub staged_preview: Option<StagedPreview>,
     listers: Vec<crate::ListerWindow>,
     buttonbar_edit_path: Vec<usize>,
+    pub(crate) navigation_rows: Vec<crate::NavigationRow>,
+    pub(crate) configuration_draft: Option<configuration::Draft>,
     buttonbar_switches: [Vec<Vec<arco_core::profile::ButtonbarButton>>; 2],
     separate_search: Option<advanced_search::SeparateSearch>,
     pub(crate) preview_image_path: Option<PathBuf>,
@@ -617,6 +632,8 @@ pub fn run(
         profile_path,
         save_profile: profile_error.is_none(),
         pending: None,
+        notices: Default::default(),
+        deferred_results: Default::default(),
         plugin_prompts: Default::default(),
         wdx_pending: None,
         wdx_sort_request: None,
@@ -632,6 +649,8 @@ pub fn run(
         staged_preview: None,
         listers: Vec::new(),
         buttonbar_edit_path: Vec::new(),
+        navigation_rows: Vec::new(),
+        configuration_draft: None,
         buttonbar_switches: Default::default(),
         separate_search: None,
         preview_image_path: None,
@@ -976,6 +995,110 @@ pub fn run(
             app.borrow_mut().navigate_comparison(delta);
         }
     });
+    let weak = Rc::downgrade(&app);
+    window.on_properties_action(move |action| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut().properties_action(action);
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_copy_property(move |value| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut()
+                .report(arco_windows::copy_text(value.as_str()));
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_metadata_apply(move |form| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut().submit_metadata_form(form);
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_configuration_edit(move |action, index, form, item| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut()
+                .edit_configuration(action, index, form, item);
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_configuration_apply(move |form, item| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut().submit_configuration(form, item);
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_navigation_apply(move |form| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut().submit_navigation_form(form);
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_navigation_action(move |action, choice| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut().navigation_action(action, choice);
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_navigation_file(move |saving, initial| -> SharedString {
+        #[cfg(windows)]
+        match arco_windows::sfx::file(
+            crate::locale::tr("Datei auswählen"),
+            saving,
+            initial.as_str(),
+        ) {
+            Ok(Some(path)) => return display_path(&path).into(),
+            Ok(None) => (),
+            Err(error) => {
+                if let Some(app) = weak.upgrade() {
+                    app.borrow()
+                        .ui()
+                        .set_navigation_notice(error.to_string().into());
+                }
+            }
+        }
+        String::new().into()
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_navigation_filter(move |query| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow().filter_navigation(query.as_str());
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_copy_message(move |all| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow().copy_message(all);
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_text_draft_apply(move |form| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut().submit_text_draft(form);
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_utility_apply(move |form| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut().submit_utility(form);
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_utility_action(move |action| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow().utility_action(action);
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_permissions_apply(move |mode| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut().submit_ftp_permissions(mode.as_str());
+        }
+    });
+    window.on_permission_parse(|value| {
+        metadata_edit::parse_mode(value.as_str()).map_or(-1, i32::from)
+    });
+    window.on_permission_format(|value| format!("{:03o}", value.clamp(0, 0o7777)).into());
     let weak = Rc::downgrade(&app);
     window.on_diff_options(move |ignore_case, ignore_whitespace, ignore_line_endings| {
         if let Some(app) = weak.upgrade() {
@@ -1919,6 +2042,27 @@ impl App {
                     }
                     match outcome {
                         Ok(outcome) => self.completed(outcome),
+                        Err(error) if ui.get_job_kind() == crate::OperationKind::Utility => {
+                            if ui.get_dialog_kind() == "utility" {
+                                ui.set_utility_state(crate::UtilityState {
+                                    notice: crate::locale::tr(&error).into(),
+                                    ..Default::default()
+                                });
+                            } else if ui.get_job_cancelling() {
+                                self.status(error);
+                            } else {
+                                self.error("Dateiwerkzeug", &error);
+                            }
+                        }
+                        Err(error) if ui.get_job_kind() == crate::OperationKind::Compare => {
+                            if ui.get_dialog_kind() == "text-comparison" {
+                                ui.set_diff_notice(crate::locale::tr(&error).into());
+                            } else if ui.get_job_cancelling() {
+                                self.status(error);
+                            } else {
+                                self.error("Vergleich fehlgeschlagen", &error);
+                            }
+                        }
                         Err(error) if ui.get_dialog_kind() == "viewer" => {
                             ui.set_viewer_notice(crate::locale::tr(&error).into());
                         }
@@ -1935,9 +2079,10 @@ impl App {
                             ) && ui.get_dialog_kind().is_empty()
                                 && !ui.get_job_cancelling() =>
                         {
-                            self.text("Auftrag fehlgeschlagen", &error)
+                            self.error("Auftrag fehlgeschlagen", &error)
                         }
-                        Err(error) => self.status(error),
+                        Err(error) if ui.get_job_cancelling() => self.status(error),
+                        Err(error) => self.error("Auftrag fehlgeschlagen", &error),
                     }
                     self.finish_wdx_sort_attempt();
                     if ui.get_dialog_kind() == "transfer-manager" {
@@ -1955,8 +2100,23 @@ impl App {
             if let Some(feed) = &self.progress_feed {
                 if let Ok(mut latest) = feed.lock() {
                     if let Some(sample) = latest.take() {
-                        ui.set_job_progress(-1.0);
-                        self.job_progress.update(sample);
+                        if !ui.get_job_cancelling() {
+                            if ui.get_job_kind() == crate::OperationKind::Utility {
+                                ui.set_job_progress(
+                                    sample
+                                        .total
+                                        .filter(|&total| total > 0)
+                                        .map_or(-1.0, |total| {
+                                            (sample.completed.min(total) as f64 / total as f64)
+                                                as f32
+                                        }),
+                                );
+                                self.job_progress.update_source(sample);
+                            } else {
+                                ui.set_job_progress(-1.0);
+                                self.job_progress.update(sample);
+                            }
+                        }
                     }
                 }
             }
@@ -2005,6 +2165,8 @@ impl App {
             }
         }
         self.update_wdx_sort();
+        self.flush_notices();
+        self.flush_deferred_results();
     }
 
     fn create_dropped_shortcuts(&mut self, paths: Vec<PathBuf>, target: PathBuf) {
@@ -2336,18 +2498,30 @@ impl App {
     }
 
     fn completed(&mut self, outcome: Outcome) {
+        if self.defer_result_dialog(&outcome) {
+            self.deferred_results.push_back(outcome);
+            self.ui().set_pending_result_count(self.deferred_results.len().min(i32::MAX as usize) as i32);
+            return;
+        }
         match outcome {
+            Outcome::UtilityReady(task) => self.open_utility(task),
+            Outcome::UtilityReport(report) => self.show_utility_report(report),
+            Outcome::Properties(sheet) => self.show_properties(*sheet),
+            Outcome::MetadataEdited(title, report) => self.finish_metadata_edit(title, report),
             Outcome::SearchReview(review) => self.show_search_review(review),
             Outcome::FileComment(path, comment) => self.show_comment(path, comment),
             Outcome::PrintPreview(title, body) => self.show_print_preview(title, body),
             Outcome::TransferFinished(report) => self.complete_transfer(report),
-            Outcome::Notice(message) => self.status(message),
+            Outcome::Notice(message) => {
+                self.remember_success(&message);
+                self.status(message);
+            }
             Outcome::ViewerNotice(message) if self.ui().get_dialog_kind() == "viewer" => {
                 self.ui()
                     .set_viewer_notice(crate::locale::tr(&message).into());
             }
             Outcome::ViewerNotice(message) => self.status(message),
-            Outcome::Text(title, body) => self.text(&title, &body),
+            Outcome::Text(title, body) => self.remember_information(&title, &body),
             Outcome::ClipboardText(body) => self.report(arco_windows::copy_text(&body)),
             Outcome::Entries {
                 side,
@@ -2382,7 +2556,7 @@ impl App {
                     );
                     self.publish(side);
                     if !entries.errors.is_empty() {
-                        self.text("Lesefehler bei der Suche", &entries.errors.join("\n"));
+                        self.warning("Lesefehler bei der Suche", &entries.errors.join("\n"));
                     }
                 } else {
                     self.status("Ansicht hat sich während der Suche geändert.");
@@ -2402,11 +2576,8 @@ impl App {
                 if report.cancelled {
                     summary.push_str(" · abgebrochen");
                 }
-                if report.errors.is_empty() {
-                    self.status(summary);
-                } else {
-                    self.text(&summary, &report.errors.join("\n"));
-                }
+                self.status(summary);
+                self.remember_result(&label, &report);
             }
             Outcome::RenamePreview(plan) => self.rename_review(plan),
             Outcome::RenameNameList(list, directory) => self.show_rename_names(list, directory),
@@ -2506,6 +2677,7 @@ impl App {
                     self.show_text_comparison(session, index);
                 }
             }
+            Outcome::ComparisonSaved(error) => self.comparison_saved_without_refresh(&error),
             Outcome::BinaryCompared(session, page, must_be_open) => {
                 if !must_be_open || matches!(self.pending, Some(Pending::BinaryCompare(_, _))) {
                     self.show_binary_comparison(session, page);
@@ -2541,14 +2713,7 @@ impl App {
     }
 
     pub fn text(&mut self, title: &str, body: &str) {
-        self.pending = None;
-        let ui = self.ui();
-        ui.set_dialog_kind("text".into());
-        ui.set_dialog_title(crate::locale::tr(title).into());
-        ui.set_dialog_description("".into());
-        ui.set_dialog_options(strings(std::iter::empty::<&str>()));
-        ui.set_dialog_content_lines(crate::commands::content_lines(body));
-        ui.set_dialog_value(body.into());
+        self.enqueue_notice(auxiliary::Notice::info(title, body));
     }
 
     pub fn new_tab(&mut self) {

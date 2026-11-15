@@ -5,11 +5,13 @@ use arco_core::{
 };
 use std::{fmt::Write as _, fs::Metadata, path::PathBuf};
 
+#[derive(Clone)]
 pub struct EditTarget {
     entry: Registration,
     files: Vec<(PathBuf, Metadata)>,
 }
 
+#[derive(Clone)]
 pub enum EditInput {
     Text(String),
     Plugin(usize),
