@@ -1,0 +1,257 @@
+import { LineEdit, TextEdit, ComboBox, ScrollView, ListView } from "std-widgets.slint";
+import { Colors, Button, CheckBox } from "dialog-theme.slint";
+import { DialogHeading, FieldLabel, FormSection } from "operation-dialogs.slint";
+import { NavigationRow } from "navigation-dialogs.slint";
+
+export enum ConfigurationKind { columns, mode, rules, association, sort, colors }
+export struct ConfigurationForm { name: string, view: int, column: int, automatic: bool, program: string, args: bool, arguments: string, default-open: bool }
+export struct ConfigurationItem {
+    field: int, title: string, expression: string, width: string, alignment: int,
+    mode: int, scope: int, path: string, contains: string, excludes: string,
+    minimum: string, any: bool, tc: bool, direction: int, light: string, dark: string
+}
+export struct ConfigurationData {
+    kind: ConfigurationKind, title: string, description: string,
+    form: ConfigurationForm, item: ConfigurationItem, rows: [NavigationRow], selected: int,
+    fields: [string], sets: [string], modes: [string], read-only-name: bool, dirty: bool, notice: string, revision: int
+}
+
+export component ConfigurationCard inherits Rectangle {
+    in property <ConfigurationData> data;
+    in property <int> focus-cycle;
+    property <ConfigurationForm> form;
+    property <ConfigurationItem> item;
+    property <bool> discard;
+    property <bool> remove;
+    property <bool> dirty: root.data.dirty || root.form != root.data.form || root.item != root.data.item;
+    property <bool> association: root.data.kind == ConfigurationKind.association;
+    property <bool> rules: root.data.kind == ConfigurationKind.rules;
+    property <bool> columns: root.data.kind == ConfigurationKind.columns;
+    property <bool> sorting: root.data.kind == ConfigurationKind.sort || root.data.kind == ConfigurationKind.mode;
+    property <bool> colors: root.data.kind == ConfigurationKind.colors;
+    callback edit(int, int, ConfigurationForm, ConfigurationItem);
+    callback apply(ConfigurationForm, ConfigurationItem);
+    callback close();
+    callback file(bool, string) -> string;
+    changed data => { root.form = root.data.form; root.item = root.data.item; root.remove = false; root.discard = false; }
+    init => { root.form = root.data.form; root.item = root.data.item; }
+    changed focus-cycle => { if (root.focus-cycle < 0) { if (save.enabled) { save.focus(); } else { cancel.focus(); } } }
+    function change(action: int, index: int) { root.edit(action, index, root.form, root.item); }
+    function select(index: int) {
+        if (root.data.rows.length > 0) { root.change(0, clamp(index, 0, root.data.rows.length - 1)); }
+    }
+    function request-close() { root.remove = false; if (root.dirty) { root.discard = true; } else { root.close(); } }
+    background: Colors.panel; border-radius: 16px; border-width: 1px; border-color: Colors.edge;
+    FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) { if (root.remove) { root.remove = false; } else if (root.discard) { root.discard = false; } else { root.request-close(); } return accept; }
+            if (event.modifiers.control && (event.text == "s" || event.text == "S")) { if (!root.discard && !root.remove) { root.apply(root.form, root.item); } return accept; }
+            return reject;
+        }
+        VerticalLayout {
+            padding: 20px; spacing: 12px;
+            DialogHeading { icon: root.association ? @image-url("icons/link.svg") : @image-url("icons/settings.svg"); title: root.data.title; subtitle: root.data.description; }
+            if root.data.notice != "" : Text { text: root.data.notice; color: Colors.archive; wrap: word-wrap; }
+            ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout { padding: 0px; spacing: 12px;
+                    if root.columns || root.association || root.data.kind == ConfigurationKind.mode : FormSection {
+                        title: @tr("Bezeichnung");
+                        LineEdit {
+                            property <int> cycle: root.focus-cycle;
+                            init => { self.focus(); }
+                            changed cycle => { if (root.focus-cycle > 0) { self.focus(); } }
+                            text <=> root.form.name; read-only: root.data.read-only-name; accessible-label: @tr("Name");
+                        }
+                        if root.data.read-only-name : Text { text: @tr("Der Name bleibt beim Bearbeiten erhalten, damit Verweise auf diese Ansicht gültig bleiben."); color: Colors.muted; wrap: word-wrap; font-size: 11px; }
+                    }
+                    if root.rules : FormSection {
+                        title: @tr("Automatischer Wechsel");
+                        CheckBox {
+                            property <int> cycle: root.focus-cycle;
+                            init => { self.focus(); }
+                            changed cycle => { if (root.focus-cycle > 0) { self.focus(); } }
+                            text: @tr("Automatische Ansichtsregeln verwenden"); checked <=> root.form.automatic;
+                        }
+                        Text { text: @tr("Die erste passende Regel gewinnt. Änderungen an Einträgen und Reihenfolge werden erst mit Speichern übernommen."); color: Colors.muted; wrap: word-wrap; }
+                    }
+                    if root.data.kind == ConfigurationKind.mode : FormSection {
+                        title: @tr("Ansicht und Spalten");
+                        FieldLabel { text: @tr("Darstellungsart"); }
+                        ComboBox { model: [@tr("Details"), @tr("Kurz"), @tr("Miniaturen"), @tr("Kommentare"), @tr("Ansicht beibehalten")]; current-index <=> root.form.view; accessible-label: @tr("Darstellungsart"); }
+                        FieldLabel { text: @tr("Spaltensatz"); }
+                        ComboBox { model: root.data.sets; current-index <=> root.form.column; accessible-label: @tr("Spaltensatz"); }
+                        Text { text: @tr("Eigene Spaltensätze benötigen die Detailansicht. Importierte Ansichtsfarben bleiben erhalten."); color: Colors.muted; wrap: word-wrap; font-size: 11px; }
+                    }
+                    if root.association : FormSection {
+                        title: @tr("Dateien und Aktion");
+                        FieldLabel { text: @tr("Dateimasken"); }
+                        LineEdit { text <=> root.item.contains; accessible-label: @tr("Dateimasken"); }
+                        Text { text: @tr("Mehrere Masken mit Semikolon trennen; hinter | stehen Ausschlüsse, z. B. *.txt;*.md | intern*."); color: Colors.muted; wrap: word-wrap; font-size: 11px; }
+                        FieldLabel { text: @tr("Absoluter EXE-Pfad"); }
+                        HorizontalLayout { spacing: 8px;
+                            LineEdit { text <=> root.form.program; accessible-label: @tr("Absoluter EXE-Pfad"); }
+                            Button { text: @tr("Datei wählen …"); clicked => { let path = root.file(false, root.form.program); if (path != "") { root.form.program = path; } } }
+                        }
+                        CheckBox { text: @tr("Als Standardaktion für passende Dateien verwenden"); checked <=> root.form.default-open; }
+                        Text { text: @tr("Es gilt die erste passende Standardaktion in der Verwaltung. Diese Zuordnung gilt innerhalb von Arco Commander."); color: Colors.muted; wrap: word-wrap; font-size: 11px; }
+                    }
+                    if root.association : FormSection {
+                        title: @tr("Argumente");
+                        CheckBox { text: @tr("Argumente übergeben (ein Argument je Zeile)"); checked <=> root.form.args; }
+                        if root.form.args : TextEdit { height: 130px; text <=> root.form.arguments; accessible-label: @tr("Argumente, ein Argument je Zeile"); }
+                        HorizontalLayout { spacing: 6px;
+                            Button { text: "{datei}"; clicked => { root.form.arguments = root.form.args ? root.form.arguments + "\n{datei}" : "{datei}"; root.form.args = true; } }
+                            Button { text: "{ordner}"; clicked => { root.form.arguments = root.form.args ? root.form.arguments + "\n{ordner}" : "{ordner}"; root.form.args = true; } }
+                            Button { text: "{name}"; clicked => { root.form.arguments = root.form.args ? root.form.arguments + "\n{name}" : "{name}"; root.form.args = true; } }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                        Text { text: @tr("Platzhalter stehen jeweils als eigenes Argument. Ohne {{datei}} oder {{name}} wird der Dateipfad automatisch angehängt. Speichern startet kein Programm."); color: Colors.muted; wrap: word-wrap; font-size: 11px; }
+                    }
+                    if !root.association : HorizontalLayout {
+                        spacing: 12px;
+                        VerticalLayout {
+                            width: 290px; spacing: 8px;
+                            FieldLabel { text: root.columns ? @tr("Spaltenreihenfolge") : root.rules ? @tr("Regelpriorität") : root.colors ? @tr("Farbreihenfolge") : @tr("Sortierpriorität"); }
+                            HorizontalLayout { spacing: 5px;
+                                Button { text: @tr("Neu"); icon: @image-url("icons/plus.svg"); clicked => { root.change(1, 0); } }
+                                Button { text: "↑"; accessible-label: @tr("Nach oben verschieben"); enabled: root.data.selected > 0; clicked => { root.change(3, 0); } }
+                                Button { text: "↓"; accessible-label: @tr("Nach unten verschieben"); enabled: root.data.selected >= 0 && root.data.selected + 1 < root.data.rows.length; clicked => { root.change(4, 0); } }
+                            }
+                            row-frame := Rectangle {
+                                height: 280px; background: Colors.background; border-radius: 9px; border-width: 1px; border-color: rows-keys.has-focus ? Colors.accent : Colors.edge;
+                                forward-focus: rows-keys;
+                                list := ListView {
+                                    x: 1px; y: 1px; width: parent.width - 2px; height: parent.height - 2px;
+                                    property <int> selected: root.data.selected;
+                                    changed selected => {
+                                        if (self.selected * 62px < -self.viewport-y) { self.viewport-y = -self.selected * 62px; }
+                                        else if ((self.selected + 1) * 62px > -self.viewport-y + self.visible-height) { self.viewport-y = self.visible-height - (self.selected + 1) * 62px; }
+                                    }
+                                    for row[i] in root.data.rows : Rectangle {
+                                        height: 62px; background: i == root.data.selected ? Colors.cursor : Math.mod(i, 2) == 0 ? Colors.background : Colors.panel;
+                                        accessible-role: list-item; accessible-label: row.label + " · " + row.detail;
+                                        VerticalLayout { padding: 10px; spacing: 4px;
+                                            Text { text: row.label; color: Colors.text; overflow: elide; Tooltip { text: @markdown("\{row.label}"); } }
+                                            Text { text: row.detail; color: Colors.muted; font-size: 11px; overflow: elide; Tooltip { text: @markdown("\{row.detail}"); } }
+                                        }
+                                        TouchArea { clicked => { root.select(i); rows-keys.focus(); } double-clicked => { root.select(i); root.focus-editor(); } }
+                                    }
+                                }
+                                if root.data.rows.length == 0 : Text { text: @tr("Noch keine Einträge. Mit Neu einen Eintrag hinzufügen."); wrap: word-wrap; color: Colors.muted; x: 12px; y: 12px; width: parent.width - 24px; }
+                                rows-keys := FocusScope {
+                                    property <int> cycle: root.focus-cycle;
+                                    init => { if (root.data.kind == ConfigurationKind.sort || root.colors) { self.focus(); } }
+                                    changed cycle => { if (root.focus-cycle > 0 && (root.data.kind == ConfigurationKind.sort || root.colors)) { self.focus(); } }
+                                    key-pressed(event) => {
+                                        if (event.modifiers.alt && event.text == Key.UpArrow) { root.change(3, 0); return accept; }
+                                        if (event.modifiers.alt && event.text == Key.DownArrow) { root.change(4, 0); return accept; }
+                                        if (event.text == Key.UpArrow) { root.select(root.data.selected - 1); return accept; }
+                                        if (event.text == Key.DownArrow) { root.select(root.data.selected + 1); return accept; }
+                                        if (event.text == Key.Home) { root.select(0); return accept; }
+                                        if (event.text == Key.End) { root.select(root.data.rows.length - 1); return accept; }
+                                        if (event.text == Key.PageUp) { root.select(root.data.selected - 4); return accept; }
+                                        if (event.text == Key.PageDown) { root.select(root.data.selected + 4); return accept; }
+                                        if (event.text == Key.Insert) { root.change(1, 0); return accept; }
+                                        if (event.text == Key.Delete && root.data.selected >= 0) { root.remove = true; return accept; }
+                                        if (event.text == Key.Return || event.text == Key.F2) { root.focus-editor(); return accept; }
+                                        return reject;
+                                    }
+                                }
+                            }
+                            Button { text: @tr("Entfernen"); destructive: true; enabled: root.data.selected >= 0; clicked => { root.remove = true; } }
+                            Text { text: @tr("Pfeile: auswählen · Enter/F2: Felder · Einfg: neu · Alt+↑/↓: Reihenfolge · Entf: entfernen"); color: Colors.muted; wrap: word-wrap; font-size: 11px; }
+                        }
+                        if root.data.selected >= 0 : FormSection {
+                            title: @tr("Gewählter Eintrag");
+                            if root.columns : VerticalLayout { spacing: 7px;
+                                FieldLabel { text: @tr("Spaltenfeld"); }
+                                ComboBox { property <int> editor-focus: root.editor-focus; changed editor-focus => { self.focus(); } model: root.data.fields; current-index <=> root.item.field; accessible-label: @tr("Spaltenfeld"); }
+                                if root.item.field == root.data.fields.length - 1 : VerticalLayout { spacing: 5px;
+                                    FieldLabel { text: @tr("TC-Spaltenausdruck"); }
+                                    LineEdit { text <=> root.item.expression; accessible-label: @tr("TC-Spaltenausdruck"); }
+                                }
+                                FieldLabel { text: @tr("Spaltentitel"); }
+                                LineEdit { text <=> root.item.title; accessible-label: @tr("Spaltentitel"); }
+                                FieldLabel { text: @tr("Breite in Pixeln (40 bis 600)"); }
+                                LineEdit { text <=> root.item.width; accessible-label: @tr("Breite in Pixeln (40 bis 600)"); }
+                                FieldLabel { text: @tr("Ausrichtung"); }
+                                ComboBox { model: [@tr("Automatisch"), @tr("Links"), @tr("Rechts")]; current-index <=> root.item.alignment; accessible-label: @tr("Ausrichtung"); }
+                                Text { text: @tr("Die Namensspalte bleibt links bestehen. Plugin-Felder und TC-Ausdrücke behalten ihre Identität."); color: Colors.muted; wrap: word-wrap; font-size: 11px; }
+                            }
+                            if root.rules : VerticalLayout { spacing: 7px;
+                                FieldLabel { text: @tr("Ansichtsmodus"); }
+                                ComboBox { property <int> editor-focus: root.editor-focus; changed editor-focus => { self.focus(); } model: root.data.modes; current-index <=> root.item.mode; accessible-label: @tr("Ansichtsmodus"); }
+                                CheckBox { text: @tr("Erweiterter TC-Regelausdruck"); checked <=> root.item.tc; }
+                                if root.item.tc : VerticalLayout { spacing: 5px;
+                                    FieldLabel { text: @tr("TC-Regelausdruck"); }
+                                    TextEdit { text <=> root.item.expression; height: 100px; accessible-label: @tr("TC-Regelausdruck"); }
+                                    Text { text: @tr("Importierte TC-Bedingungen werden als vollständiger Ausdruck erhalten, einschließlich Verknüpfungen."); color: Colors.muted; wrap: word-wrap; font-size: 11px; }
+                                }
+                                if !root.item.tc : VerticalLayout { spacing: 7px;
+                                    FieldLabel { text: @tr("Geltungsbereich"); }
+                                    ComboBox { model: [@tr("Alle"), @tr("Lokale Ordner"), @tr("Laufwerke"), @tr("UNC / Netzwerk"), @tr("Archive"), "FTP", "WFX", @tr("Windows-Shell"), @tr("Suchergebnisse"), @tr("Zweigansicht")]; current-index <=> root.item.scope; accessible-label: @tr("Geltungsbereich"); }
+                                    FieldLabel { text: @tr("Pfadmaske (optional)"); }
+                                    LineEdit { text <=> root.item.path; accessible-label: @tr("Pfadmaske (optional)"); }
+                                    FieldLabel { text: @tr("Enthält Dateien nach Maske (optional)"); }
+                                    LineEdit { text <=> root.item.contains; accessible-label: @tr("Enthält Dateien nach Maske (optional)"); }
+                                    FieldLabel { text: @tr("Enthält keine Dateien nach Maske (optional)"); }
+                                    LineEdit { text <=> root.item.excludes; accessible-label: @tr("Enthält keine Dateien nach Maske (optional)"); }
+                                    CheckBox { text: @tr("Mindestens eine Bedingung genügt (ODER)"); checked <=> root.item.any; }
+                                    FieldLabel { text: @tr("Mindestanteil passender Dateien in % (optional)"); }
+                                    LineEdit { text <=> root.item.minimum; accessible-label: @tr("Mindestanteil passender Dateien in % (optional)"); }
+                                }
+                            }
+                            if root.sorting : VerticalLayout { spacing: 7px;
+                                FieldLabel { text: @tr("Sortierfeld"); }
+                                ComboBox { property <int> editor-focus: root.editor-focus; changed editor-focus => { self.focus(); } model: root.data.fields; current-index <=> root.item.field; accessible-label: @tr("Sortierfeld"); selected(value) => { root.change(5, self.current-index); } }
+                                FieldLabel { text: @tr("Sortierrichtung"); }
+                                ComboBox { model: [@tr("Aufsteigend"), @tr("Absteigend")]; current-index <=> root.item.direction; accessible-label: @tr("Sortierrichtung"); }
+                                Text { text: @tr("Das erste Feld hat die höchste Priorität. Jedes Feld darf nur einmal vorkommen; Unsortiert steht allein."); color: Colors.muted; wrap: word-wrap; }
+                                Text { text: @tr("Bei der Auswahl eines WFX-Feldes wird die Plugin-Sortierrichtung übernommen. Danach kannst du sie ausdrücklich ändern."); color: Colors.muted; wrap: word-wrap; font-size: 11px; }
+                            }
+                            if root.colors : VerticalLayout { spacing: 7px;
+                                FieldLabel { text: @tr("Dateimasken oder Auswahl / Cursor"); }
+                                LineEdit { property <int> editor-focus: root.editor-focus; changed editor-focus => { self.focus(); } text <=> root.item.contains; accessible-label: @tr("Dateimasken oder Auswahl / Cursor"); }
+                                HorizontalLayout { spacing: 6px;
+                                    Button { text: @tr("Auswahl"); clicked => { root.item.contains = "Auswahl"; } }
+                                    Button { text: @tr("Cursor"); clicked => { root.item.contains = "Cursor"; } }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                FieldLabel { text: @tr("Farbe im hellen Schema (#RRGGBB)"); }
+                                LineEdit { text <=> root.item.light; accessible-label: @tr("Farbe im hellen Schema (#RRGGBB)"); }
+                                FieldLabel { text: @tr("Farbe im dunklen Schema (#RRGGBB)"); }
+                                LineEdit { text <=> root.item.dark; accessible-label: @tr("Farbe im dunklen Schema (#RRGGBB)"); }
+                                Text { text: @tr("Auswahl und Cursor legen Hintergründe fest. Sonst bestimmt die erste passende Dateimaske die Schriftfarbe."); color: Colors.muted; wrap: word-wrap; }
+                            }
+                        }
+                    }
+                }
+            }
+            if root.remove : FormSection {
+                title: @tr("Eintrag aus dem Entwurf entfernen?");
+                HorizontalLayout { spacing: 8px;
+                    Button { text: @tr("Behalten"); init => { self.focus(); } clicked => { root.remove = false; } }
+                    Button { text: @tr("Entfernen"); destructive: true; clicked => { root.change(2, 0); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+            }
+            if root.discard : FormSection {
+                title: @tr("Nicht gespeicherte Änderungen");
+                HorizontalLayout { spacing: 8px;
+                    Button { text: @tr("Weiter bearbeiten"); init => { self.focus(); } clicked => { root.discard = false; } }
+                    Button { text: @tr("Verwerfen"); destructive: true; clicked => { root.close(); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+            }
+            Rectangle { height: 1px; background: Colors.edge; }
+            HorizontalLayout { spacing: 8px;
+                Text { text: root.dirty ? @tr("Nicht gespeicherte Änderungen · Strg+S: speichern · Esc: abbrechen") : @tr("Tab: nächstes Feld · Umschalt+Tab: zurück · Strg+S: speichern"); color: root.dirty ? Colors.accent : Colors.muted; wrap: word-wrap; font-size: 11px; horizontal-stretch: 1; }
+                cancel := Button { text: @tr("Abbrechen"); clicked => { root.request-close(); } }
+                save := Button { text: @tr("Speichern"); primary: true; enabled: !root.discard && !root.remove; clicked => { root.apply(root.form, root.item); } }
+            }
+        }
+    }
+    property <int> editor-focus;
+    function focus-editor() { root.editor-focus += 1; }
+}

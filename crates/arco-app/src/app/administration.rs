@@ -6,6 +6,7 @@ use arco_windows::{LocalShare, ShareAccess, Volume};
 use std::io;
 use std::path::PathBuf;
 
+#[derive(Clone)]
 pub(crate) enum Setup {
     Shares(Vec<LocalShare>),
     Create(PathBuf),

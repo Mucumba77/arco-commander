@@ -1,0 +1,257 @@
+import { ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
+import { Colors, Button, CheckBox } from "dialog-theme.slint";
+import { DialogHeading, FieldLabel, FormSection, ProgressMeter, ProgressMetrics, JobMetrics, OperationKind, ReviewRow, ReviewTable } from "operation-dialogs.slint";
+
+export struct MetadataForm {
+    readonly: int, hidden: int, system: int, archive: int,
+    modified-enabled: bool, modified: string,
+    created-enabled: bool, created: string,
+    accessed-enabled: bool, accessed: string,
+    recursive: bool,
+}
+
+export struct MutationData { notice: string, result: string, errors: [ReviewRow], error-field: int }
+export struct PropertiesData { title: string, path: string, summary: string, rows: [ReviewRow], local: bool, native: bool, ftp-permissions: bool, notice: string }
+
+component MutationFeedback inherits VerticalLayout {
+    in property <MutationData> data;
+    in property <bool> busy;
+    in property <bool> cancelling;
+    in property <JobMetrics> metrics;
+    in property <float> progress: -1;
+    in property <int> focus-cycle;
+    callback cancel();
+    spacing: 10px;
+    if root.busy : FormSection {
+        title: root.cancelling ? @tr("Abbruch angefordert …") : root.metrics.phase;
+        ProgressMeter { label: root.metrics.items == "" ? @tr("Auswahl erfassen") : @tr("Einträge bearbeiten"); progress: root.progress; paused: root.cancelling; }
+        ProgressMetrics { kind: OperationKind.metadata; data: root.metrics; }
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: root.metrics.source; color: Colors.muted; overflow: elide; horizontal-stretch: 1; Tooltip { text: @markdown("\{root.metrics.source}"); } }
+            stop := Button {
+                property <int> cycle: root.focus-cycle;
+                changed cycle => { self.focus(); }
+                init => { self.focus(); }
+                text: @tr("Abbrechen"); destructive: true; enabled: !root.cancelling;
+                clicked => { root.cancel(); }
+            }
+        }
+    }
+    if root.data.result != "" : FormSection {
+        title: @tr("Ergebnis");
+        Text { text: root.data.result; color: Colors.text; wrap: word-wrap; }
+        if root.data.errors.length > 0 : VerticalLayout {
+            spacing: 8px;
+            errors := ReviewTable {
+                height: 180px;
+                rows: root.data.errors; primary-label: @tr("Eintrag"); secondary-label: @tr("Fehler");
+                copy(text) => { root.copy(text); }
+            }
+            Button { text: @tr("Zeile kopieren"); icon: @image-url("icons/copy.svg"); clicked => { errors.copy-current(); } }
+        }
+    }
+    callback copy(string);
+}
+
+export component MetadataCard inherits Rectangle {
+    in property <MetadataForm> initial;
+    in property <int> revision;
+    in property <string> selection;
+    in property <MutationData> state;
+    in property <bool> busy;
+    in property <bool> cancelling;
+    in property <float> progress;
+    in property <JobMetrics> metrics;
+    in property <int> focus-cycle;
+    property <MetadataForm> form;
+    property <bool> has-changes: root.form.readonly != 0 || root.form.hidden != 0 || root.form.system != 0 || root.form.archive != 0 || root.form.modified-enabled || root.form.created-enabled || root.form.accessed-enabled;
+    callback apply(MetadataForm);
+    callback close();
+    callback cancel();
+    callback copy(string);
+    function focus-first() { readonly.focus(); }
+    changed revision => { root.form = root.initial; root.focus-first(); }
+    changed state => {
+        if (root.state.error-field == 1) { modified.focus(); }
+        else if (root.state.error-field == 2) { created.focus(); }
+        else if (root.state.error-field == 3) { accessed.focus(); }
+    }
+    changed focus-cycle => { if (!root.busy) { if (root.focus-cycle > 0) { root.focus-first(); } else if (apply-button.enabled) { apply-button.focus(); } else { close-button.focus(); } } }
+    changed busy => { if (!root.busy) { close-button.focus(); } }
+    init => { root.form = root.initial; root.focus-first(); }
+    background: Colors.panel; border-radius: 16px; border-width: 1px; border-color: Colors.edge;
+    FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) { if (root.busy) { root.cancel(); } else { root.close(); } return accept; }
+            return reject;
+        }
+        VerticalLayout {
+            padding: 20px; spacing: 12px;
+            DialogHeading { icon: @image-url("icons/settings.svg"); title: @tr("Attribute und Zeitstempel ändern"); subtitle: root.selection; }
+            if root.state.notice != "" : Text { text: root.state.notice; color: Colors.archive; wrap: word-wrap; }
+            ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    padding: 0px; spacing: 12px;
+                    MutationFeedback { data: root.state; busy: root.busy; cancelling: root.cancelling; progress: root.progress; metrics: root.metrics; focus-cycle: root.focus-cycle; cancel => { root.cancel(); } copy(value) => { root.copy(value); } }
+                    FormSection {
+                        title: @tr("Dateiattribute"); description: @tr("Unverändert lässt das jeweilige Attribut jedes Eintrags bestehen.");
+                        HorizontalLayout {
+                            spacing: 12px;
+                            VerticalLayout { spacing: 5px; FieldLabel { text: @tr("Schreibgeschützt (R)"); } readonly := ComboBox { model: [@tr("Unverändert"), @tr("Setzen"), @tr("Entfernen")]; current-index <=> root.form.readonly; enabled: !root.busy; accessible-label: @tr("Schreibgeschützt (R)"); } }
+                            VerticalLayout { spacing: 5px; FieldLabel { text: @tr("Versteckt (H)"); } ComboBox { model: [@tr("Unverändert"), @tr("Setzen"), @tr("Entfernen")]; current-index <=> root.form.hidden; enabled: !root.busy; accessible-label: @tr("Versteckt (H)"); } }
+                        }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            VerticalLayout { spacing: 5px; FieldLabel { text: @tr("System (S)"); } ComboBox { model: [@tr("Unverändert"), @tr("Setzen"), @tr("Entfernen")]; current-index <=> root.form.system; enabled: !root.busy; accessible-label: @tr("System (S)"); } }
+                            VerticalLayout { spacing: 5px; FieldLabel { text: @tr("Archiv (A)"); } ComboBox { model: [@tr("Unverändert"), @tr("Setzen"), @tr("Entfernen")]; current-index <=> root.form.archive; enabled: !root.busy; accessible-label: @tr("Archiv (A)"); } }
+                        }
+                    }
+                    FormSection {
+                        title: @tr("Zeitstempel"); description: @tr("Nur aktivierte Zeitstempel ändern. Format: JJJJ-MM-TT HH:MM:SS, Ortszeit.");
+                        HorizontalLayout { spacing: 10px; CheckBox { text: @tr("Geändert"); width: 145px; checked <=> root.form.modified-enabled; enabled: !root.busy; } modified := LineEdit { text <=> root.form.modified; placeholder-text: "2026-11-15 12:30:00"; accessible-label: @tr("Änderungsdatum"); enabled: root.form.modified-enabled && !root.busy; } }
+                        HorizontalLayout { spacing: 10px; CheckBox { text: @tr("Erstellt"); width: 145px; checked <=> root.form.created-enabled; enabled: !root.busy; } created := LineEdit { text <=> root.form.created; placeholder-text: "2026-11-15 12:30:00"; accessible-label: @tr("Erstellungsdatum"); enabled: root.form.created-enabled && !root.busy; } }
+                        HorizontalLayout { spacing: 10px; CheckBox { text: @tr("Letzter Zugriff"); width: 145px; checked <=> root.form.accessed-enabled; enabled: !root.busy; } accessed := LineEdit { text <=> root.form.accessed; placeholder-text: "2026-11-15 12:30:00"; accessible-label: @tr("Zugriffsdatum"); enabled: root.form.accessed-enabled && !root.busy; } }
+                    }
+                    FormSection {
+                        title: @tr("Geltungsbereich");
+                        CheckBox { text: @tr("Unterordner und enthaltene Dateien einbeziehen"); checked <=> root.form.recursive; enabled: !root.busy; }
+                        Text { text: @tr("Die Ignorierliste gilt auch hier. Verknüpfungen werden nicht verfolgt. Bereits angewendete Änderungen bleiben bei Abbruch bestehen."); color: Colors.muted; wrap: word-wrap; font-size: 12px; }
+                    }
+                }
+            }
+            Rectangle { height: 1px; background: Colors.edge; }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: root.has-changes ? @tr("Änderungen für die gezeigte Auswahl übernehmen.") : @tr("Wähle mindestens eine Änderung."); color: Colors.muted; wrap: word-wrap; horizontal-stretch: 1; }
+                close-button := Button { text: @tr("Schließen"); enabled: !root.busy; clicked => { root.close(); } }
+                apply-button := Button { text: @tr("Übernehmen"); primary: true; enabled: root.has-changes && !root.busy; clicked => { root.apply(root.form); } }
+            }
+        }
+    }
+}
+
+export component PropertiesCard inherits Rectangle {
+    in property <PropertiesData> data;
+    in property <bool> busy;
+    in property <int> focus-cycle;
+    callback action(int);
+    callback copy(string);
+    callback close();
+    changed focus-cycle => { if (root.focus-cycle > 0) { fields.focus(); } else { close-button.focus(); } }
+    init => { fields.focus(); }
+    background: Colors.panel; border-radius: 16px; border-width: 1px; border-color: Colors.edge;
+    VerticalLayout {
+        padding: 20px; spacing: 12px;
+        DialogHeading { icon: @image-url("icons/file.svg"); title: root.data.title; subtitle: root.data.summary; }
+        if root.data.notice != "" : Text { text: root.data.notice; color: Colors.archive; wrap: word-wrap; }
+        Text { text: root.data.path; color: Colors.muted; overflow: elide; Tooltip { text: @markdown("\{root.data.path}"); } }
+        fields := ReviewTable { vertical-stretch: 1; rows: root.data.rows; primary-label: @tr("Eigenschaft"); secondary-label: @tr("Wert"); copy(value) => { root.copy(value); } }
+        if root.data.local : FormSection {
+            title: @tr("Windows-Berechtigungen");
+            Text { text: root.data.native ? @tr("Besitzer, Vererbung und Zugriffsrechte im Windows-Eigenschaftendialog unter Sicherheit bearbeiten.") : @tr("Für Windows-Eigenschaften und Zugriffsrechte einen einzelnen Eintrag auswählen."); color: Colors.muted; wrap: word-wrap; font-size: 12px; }
+            HorizontalLayout {
+                spacing: 8px;
+                Button { text: @tr("Attribute und Zeitstempel …"); icon: @image-url("icons/settings.svg"); enabled: !root.busy; clicked => { root.action(1); } }
+                Button { text: @tr("Windows-Eigenschaften …"); enabled: root.data.native; clicked => { root.action(2); } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            Button { text: @tr("Zeile kopieren"); icon: @image-url("icons/copy.svg"); enabled: root.data.rows.length > 0; clicked => { fields.copy-current(); } }
+            Button { text: @tr("Text kopieren"); icon: @image-url("icons/copy.svg"); clicked => { root.action(0); } }
+            if root.data.local : Button { text: @tr("Neu laden"); icon: @image-url("icons/refresh.svg"); enabled: !root.busy; clicked => { root.action(4); } }
+            if root.data.ftp-permissions : Button { text: @tr("Unix-Rechte ändern …"); icon: @image-url("icons/settings.svg"); enabled: !root.busy; clicked => { root.action(3); } }
+            Rectangle { horizontal-stretch: 1; }
+            close-button := Button { text: @tr("Schließen"); clicked => { root.close(); } }
+        }
+    }
+}
+
+export component PermissionsCard inherits Rectangle {
+    in property <string> selection;
+    in property <MutationData> state;
+    in property <bool> busy;
+    in property <bool> cancelling;
+    in property <float> progress;
+    in property <JobMetrics> metrics;
+    in property <int> focus-cycle;
+    property <bool> valid;
+    pure callback parse-mode(string) -> int;
+    pure callback format-mode(int) -> string;
+    callback apply(string);
+    callback close();
+    callback cancel();
+    callback copy(string);
+    function bit(value: int, flag: int) -> bool { return Math.mod(floor(value / flag), 2) == 1; }
+    function set-flags(value: int) {
+        ur.checked = root.bit(value, 256); uw.checked = root.bit(value, 128); ux.checked = root.bit(value, 64);
+        gr.checked = root.bit(value, 32); gw.checked = root.bit(value, 16); gx.checked = root.bit(value, 8);
+        ar.checked = root.bit(value, 4); aw.checked = root.bit(value, 2); ax.checked = root.bit(value, 1);
+        suid.checked = root.bit(value, 2048); sgid.checked = root.bit(value, 1024); sticky.checked = root.bit(value, 512);
+    }
+    function update-mode() {
+        let value = (ur.checked ? 256 : 0) + (uw.checked ? 128 : 0) + (ux.checked ? 64 : 0) + (gr.checked ? 32 : 0) + (gw.checked ? 16 : 0) + (gx.checked ? 8 : 0) + (ar.checked ? 4 : 0) + (aw.checked ? 2 : 0) + (ax.checked ? 1 : 0) + (suid.checked ? 2048 : 0) + (sgid.checked ? 1024 : 0) + (sticky.checked ? 512 : 0);
+        mode.text = root.format-mode(value); root.valid = true; presets.current-index = 0;
+    }
+    function read-mode() {
+        let value = root.parse-mode(mode.text);
+        root.valid = value >= 0;
+        if (root.valid) { root.set-flags(value); }
+    }
+    init => { mode.focus(); }
+    changed focus-cycle => { if (!root.busy) { if (root.focus-cycle > 0) { mode.focus(); } else if (apply-button.enabled) { apply-button.focus(); } else { close-button.focus(); } } }
+    changed busy => { if (!root.busy) { close-button.focus(); } }
+    background: Colors.panel; border-radius: 16px; border-width: 1px; border-color: Colors.edge;
+    FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) { if (root.busy) { root.cancel(); } else { root.close(); } return accept; }
+            return reject;
+        }
+        VerticalLayout {
+            padding: 20px; spacing: 12px;
+            DialogHeading { icon: @image-url("icons/settings.svg"); title: @tr("FTP-Unix-Rechte ändern"); subtitle: root.selection; }
+            if root.state.notice != "" : Text { text: root.state.notice; color: Colors.archive; wrap: word-wrap; }
+            ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    padding: 0px; spacing: 12px;
+                    MutationFeedback { data: root.state; busy: root.busy; cancelling: root.cancelling; progress: root.progress; metrics: root.metrics; focus-cycle: root.focus-cycle; cancel => { root.cancel(); } copy(value) => { root.copy(value); } }
+                    FormSection {
+                        title: @tr("Neuer Zugriffsmodus"); description: @tr("Alle ausgewählten Einträge erhalten diese Rechte. Der Server muss SITE CHMOD unterstützen; vorhandene Rechte werden nicht automatisch abgeleitet.");
+                        HorizontalLayout {
+                            spacing: 12px;
+                            mode := LineEdit { placeholder-text: @tr("Oktal, z. B. 644 oder 755"); accessible-label: @tr("Unix-Rechte als Oktalwert"); enabled: !root.busy; edited => { presets.current-index = 0; root.read-mode(); } }
+                            presets := ComboBox {
+                                model: [@tr("Vorlage wählen"), "644 · rw-r--r--", "755 · rwxr-xr-x", "600 · rw-------", "700 · rwx------"];
+                                enabled: !root.busy; accessible-label: @tr("Rechtevorlage");
+                                selected => { if (self.current-index > 0) { mode.text = self.current-index == 1 ? "644" : self.current-index == 2 ? "755" : self.current-index == 3 ? "600" : "700"; root.read-mode(); } }
+                            }
+                        }
+                        if mode.text != "" && !root.valid : Text { text: @tr("Drei oder vier Oktalziffern von 0 bis 7 eingeben."); color: Colors.archive; }
+                    }
+                    FormSection {
+                        title: @tr("Rechtematrix");
+                        HorizontalLayout { spacing: 12px; FieldLabel { text: @tr("Besitzer"); width: 110px; } ur := CheckBox { text: @tr("Lesen"); accessible-label: @tr("Besitzer") + " · " + @tr("Lesen"); enabled: !root.busy; toggled => { root.update-mode(); } } uw := CheckBox { text: @tr("Schreiben"); accessible-label: @tr("Besitzer") + " · " + @tr("Schreiben"); enabled: !root.busy; toggled => { root.update-mode(); } } ux := CheckBox { text: @tr("Ausführen"); accessible-label: @tr("Besitzer") + " · " + @tr("Ausführen"); enabled: !root.busy; toggled => { root.update-mode(); } } }
+                        HorizontalLayout { spacing: 12px; FieldLabel { text: @tr("Gruppe"); width: 110px; } gr := CheckBox { text: @tr("Lesen"); accessible-label: @tr("Gruppe") + " · " + @tr("Lesen"); enabled: !root.busy; toggled => { root.update-mode(); } } gw := CheckBox { text: @tr("Schreiben"); accessible-label: @tr("Gruppe") + " · " + @tr("Schreiben"); enabled: !root.busy; toggled => { root.update-mode(); } } gx := CheckBox { text: @tr("Ausführen"); accessible-label: @tr("Gruppe") + " · " + @tr("Ausführen"); enabled: !root.busy; toggled => { root.update-mode(); } } }
+                        HorizontalLayout { spacing: 12px; FieldLabel { text: @tr("Andere"); width: 110px; } ar := CheckBox { text: @tr("Lesen"); accessible-label: @tr("Andere") + " · " + @tr("Lesen"); enabled: !root.busy; toggled => { root.update-mode(); } } aw := CheckBox { text: @tr("Schreiben"); accessible-label: @tr("Andere") + " · " + @tr("Schreiben"); enabled: !root.busy; toggled => { root.update-mode(); } } ax := CheckBox { text: @tr("Ausführen"); accessible-label: @tr("Andere") + " · " + @tr("Ausführen"); enabled: !root.busy; toggled => { root.update-mode(); } } }
+                    }
+                    FormSection {
+                        title: @tr("Spezielle Modusbits");
+                        HorizontalLayout { spacing: 12px; suid := CheckBox { text: "SetUID"; enabled: !root.busy; toggled => { root.update-mode(); } } sgid := CheckBox { text: "SetGID"; enabled: !root.busy; toggled => { root.update-mode(); } } sticky := CheckBox { text: "Sticky"; enabled: !root.busy; toggled => { root.update-mode(); } } }
+                        Text { text: @tr("Bei Abbruch bleiben bereits gesetzte Rechte bestehen. Ordnerinhalte werden nicht rekursiv geändert."); color: Colors.muted; wrap: word-wrap; font-size: 12px; }
+                    }
+                }
+            }
+            Rectangle { height: 1px; background: Colors.edge; }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: root.valid ? @tr("Der neue Modus gilt für die gesamte Auswahl.") : @tr("Oktalwert eingeben oder Rechte auswählen."); color: Colors.muted; wrap: word-wrap; horizontal-stretch: 1; }
+                close-button := Button { text: @tr("Schließen"); enabled: !root.busy; clicked => { root.close(); } }
+                apply-button := Button { text: @tr("Rechte übernehmen"); primary: true; enabled: root.valid && !root.busy; clicked => { root.apply(mode.text); } }
+            }
+        }
+    }
+}

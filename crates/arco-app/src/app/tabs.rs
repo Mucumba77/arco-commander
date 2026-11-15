@@ -225,6 +225,9 @@ impl App {
     }
 
     pub(crate) fn read_tab_import(&mut self, path: &str, name: &str) -> io::Result<()> {
+        if self.job.is_some() {
+            return Err(io::Error::other("Ein Auftrag läuft bereits."));
+        }
         let path = PathBuf::from(path.trim().trim_matches('"'));
         if !path.is_absolute()
             || !path.extension().is_some_and(|ext| {
@@ -252,16 +255,31 @@ impl App {
             .map(|panel| panel.current().path.clone());
         let source = self.active;
         let layouts = self.profile.views.tc_columns.clone();
-        self.start_job("Lese gespeicherte Ordner-Tabs …", false, move |_| {
-            let tabs = profile::read_tc_tabs_with_columns(
-                &path,
-                [&bases[0], &bases[1]],
-                source,
-                super::favorites::tc_path_variables(&path),
-                &layouts,
-            )?;
-            Ok(Outcome::ImportedTabs(name, Box::new(tabs)))
-        });
+        self.start_operation_job(
+            "Lese gespeicherte Ordner-Tabs …",
+            false,
+            super::JobDescription::new(
+                crate::OperationKind::Task,
+                display_path(&path),
+                String::new(),
+            ),
+            move |job| {
+                if job.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, ""));
+                }
+                let tabs = profile::read_tc_tabs_with_columns(
+                    &path,
+                    [&bases[0], &bases[1]],
+                    source,
+                    super::favorites::tc_path_variables(&path),
+                    &layouts,
+                )?;
+                if job.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, ""));
+                }
+                Ok(Outcome::ImportedTabs(name, Box::new(tabs)))
+            },
+        );
         Ok(())
     }
 
@@ -284,6 +302,9 @@ impl App {
         value: &str,
         option: usize,
     ) -> io::Result<()> {
+        if self.job.is_some() {
+            return Err(io::Error::other("Ein Auftrag läuft bereits."));
+        }
         let mut panels = if let Some(group) = group {
             self.profile
                 .tab_groups
@@ -305,6 +326,22 @@ impl App {
             _ => self.active,
         };
         let path = PathBuf::from(value.trim().trim_matches('"'));
+        if !path.is_absolute()
+            || !path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("tab"))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Gib einen absoluten Zielpfad mit der Endung .tab ein.",
+            ));
+        }
+        if path.try_exists()? {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Wähle einen neuen Dateinamen. Vorhandene Tab-Dateien werden nicht überschrieben.",
+            ));
+        }
         self.start_tab_export(path, panels, source);
         Ok(())
     }
@@ -312,13 +349,25 @@ impl App {
     fn start_tab_export(&mut self, path: PathBuf, panels: [profile::SavedPanel; 2], source: usize) {
         let layouts = self.profile.views.tc_columns.clone();
         let columns = self.profile.views.columns.clone();
-        self.start_job("Exportiere Ordner-Tabs …", false, move |_| {
-            profile::write_tc_tabs_with_views(&path, &panels, source, &layouts, &columns)?;
-            Ok(Outcome::Notice(format!(
-                "Tab-Datei gespeichert · {}",
-                display_path(&path)
-            )))
-        });
+        self.start_operation_job(
+            "Exportiere Ordner-Tabs …",
+            false,
+            super::JobDescription::new(
+                crate::OperationKind::Task,
+                String::new(),
+                display_path(&path),
+            ),
+            move |job| {
+                if job.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Err(io::Error::new(io::ErrorKind::Interrupted, ""));
+                }
+                profile::write_tc_tabs_with_views(&path, &panels, source, &layouts, &columns)?;
+                Ok(Outcome::Notice(format!(
+                    "Tab-Datei gespeichert · {}",
+                    display_path(&path)
+                )))
+            },
+        );
     }
 
     pub(crate) fn tc_tab_command(&mut self, verb: &str, file: &str) -> bool {
@@ -377,7 +426,7 @@ impl App {
     pub(super) fn apply_tab_file(&mut self, mut import: TcTabs, replace: bool) {
         let embedded = import.embedded_column_count();
         if let Err(error) = import.install_embedded_columns(&mut self.profile.views.columns) {
-            self.text("Tab-Datei konnte nicht geöffnet werden", &error.to_string());
+            self.error("Tab-Datei konnte nicht geöffnet werden", &error.to_string());
             return;
         }
         self.apply_saved_tabs(import.panels, replace);

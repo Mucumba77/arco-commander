@@ -3,12 +3,9 @@ use crate::commands::{Dialog, Pending};
 use crate::display_path;
 use arco_core::{advanced_search, descriptions, files};
 use arco_windows::MetadataEdit;
-use chrono::{Local, NaiveDateTime, TimeZone};
-use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 
 pub(super) fn apply_description_attributes(
     file: &fs::File,
@@ -139,12 +136,7 @@ impl App {
             self.status("Wähle lokale Dateien oder Ordner.");
             return;
         }
-        self.dialog("multiline", Pending::EditMetadata(paths), Dialog {
-            title: "Attribute und Zeitstempel ändern",
-            description: "Attribute wie +r -ha setzen oder entfernen r (schreibgeschützt), h (versteckt), s (System) und a (Archiv). Zeitstempel verwenden Ortszeit als JJJJ-MM-TT HH:MM:SS. Leere Felder werden übersprungen.",
-            value: "Attribute=\nGeändert=\nErstellt=\nZugriff=\nRekursiv=nein",
-            ..Default::default()
-        });
+        self.open_metadata_paths(paths);
     }
 
     pub(crate) fn apply_metadata_edit(
@@ -160,74 +152,7 @@ impl App {
         {
             return Err(io::Error::other("Gib mindestens eine Änderung an."));
         }
-        let ignore = self.ignore_list();
-        self.start_job("Ändere Attribute und Zeitstempel …", true, move |job| {
-            let mut report = files::TransferReport::default();
-            let mut stack = roots;
-            let mut paths = Vec::new();
-            let mut seen = BTreeSet::new();
-            while let Some(path) = stack.pop() {
-                if job.cancel.load(Ordering::Relaxed) {
-                    report.cancelled = true;
-                    return Ok(Outcome::Report("Attribute ändern".into(), report));
-                }
-                match files::regular_metadata(&path)
-                    .and_then(|metadata| Ok((fs::canonicalize(&path)?, metadata)))
-                {
-                    Ok((canonical, metadata)) if seen.insert(canonical.clone()) => {
-                        if ignore
-                            .as_ref()
-                            .is_some_and(|ignore| ignore.local(&path, metadata.is_dir()))
-                        {
-                            report.ignored += 1;
-                            continue;
-                        }
-                        paths.push((canonical, metadata));
-                        if recursive && paths.last().is_some_and(|(_, metadata)| metadata.is_dir())
-                        {
-                            match files::list_cancellable(&path, &job.cancel) {
-                                Ok(directory) => {
-                                    report.errors.extend(directory.errors);
-                                    stack.extend(
-                                        directory
-                                            .entries
-                                            .into_iter()
-                                            .filter(|entry| entry.kind != files::Kind::Link)
-                                            .map(|entry| entry.path),
-                                    );
-                                }
-                                Err(error) if error.kind() == io::ErrorKind::Interrupted => {
-                                    report.cancelled = true;
-                                    return Ok(Outcome::Report("Attribute ändern".into(), report));
-                                }
-                                Err(error) => report
-                                    .errors
-                                    .push(format!("{}: {error}", display_path(&path))),
-                            }
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(error) => report
-                        .errors
-                        .push(format!("{}: {error}", display_path(&path))),
-                }
-            }
-            for (path, metadata) in paths.into_iter().rev() {
-                if job.cancel.load(Ordering::Relaxed) {
-                    report.cancelled = true;
-                    break;
-                }
-                match files::ensure_unchanged(&path, &metadata)
-                    .and_then(|()| arco_windows::edit_metadata(&path, edit))
-                {
-                    Ok(()) => report.completed += 1,
-                    Err(error) => report
-                        .errors
-                        .push(format!("{}: {error}", display_path(&path))),
-                }
-            }
-            Ok(Outcome::Report("Attribute ändern".into(), report))
-        });
+        self.start_metadata_job(roots, edit, recursive);
         Ok(())
     }
 }
@@ -235,15 +160,8 @@ impl App {
 fn metadata_options(text: &str) -> io::Result<(MetadataEdit, bool)> {
     let mut edit = MetadataEdit::default();
     let mut recursive = false;
-    let parse_time = |value: &str| -> io::Result<_> {
-        let time = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
-            .map_err(|_| io::Error::other("Verwende JJJJ-MM-TT HH:MM:SS für Zeitstempel."))?;
-        let time = Local
-            .from_local_datetime(&time)
-            .single()
-            .ok_or_else(|| io::Error::other("Die Ortszeit ist nicht eindeutig."))?;
-        Ok(Some(time.into()))
-    };
+    let parse_time =
+        |value: &str| -> io::Result<_> { Ok(Some(super::metadata_edit::parse_time(value)?)) };
     for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
         let (key, value) = line.split_once('=').ok_or_else(|| {
             io::Error::other("Verwende eine Einstellung pro Zeile in der Form Name=Wert.")

@@ -9,6 +9,7 @@ use tempfile::NamedTempFile;
 
 const MAX_PARTS: usize = 9_999;
 
+#[derive(Clone)]
 pub struct Manifest {
     path: PathBuf,
     pub name: String,
@@ -21,6 +22,16 @@ pub fn split(
     target: &Path,
     part_size: u64,
     cancel: &AtomicBool,
+) -> io::Result<usize> {
+    split_observed(source, target, part_size, cancel, &|_| {})
+}
+
+pub fn split_observed(
+    source: &Path,
+    target: &Path,
+    part_size: u64,
+    cancel: &AtomicBool,
+    observer: crate::io_progress::Observer<'_>,
 ) -> io::Result<usize> {
     let meta = files::regular_metadata(source)?;
     if !meta.is_file() || part_size == 0 {
@@ -41,7 +52,7 @@ pub fn split(
             "Der Satz würde mehr als 9999 Teile benötigen.",
         ));
     }
-    let mut input = File::open(source)?;
+    let mut input = crate::io_progress::ObservedFile::open(source, cancel, observer)?;
     let working = tempfile::tempdir_in(target)?;
     let manifest = working.path().join(name).with_extension("crc");
     let mut parts = Vec::with_capacity(count as usize + 1);
@@ -91,6 +102,7 @@ pub fn split(
             target.join(manifest.file_name().expect("manifest name")),
         ),
     );
+    crate::io_progress::phase(source, crate::io_progress::Phase::Publishing, observer);
     tools::publish_parts(parts, cancel)?;
     Ok(count as usize)
 }
@@ -181,6 +193,15 @@ impl Manifest {
     }
 
     pub fn join(&self, target: &Path, cancel: &AtomicBool) -> io::Result<()> {
+        self.join_observed(target, cancel, &|_| {})
+    }
+
+    pub fn join_observed(
+        &self,
+        target: &Path,
+        cancel: &AtomicBool,
+        observer: crate::io_progress::Observer<'_>,
+    ) -> io::Result<()> {
         let parent = target
             .parent()
             .ok_or_else(|| io::Error::other("Zielordner fehlt."))?;
@@ -205,8 +226,11 @@ impl Manifest {
                     "Die Dateiteile überschreiten die erwartete Gesamtgröße.",
                 ));
             }
-            let size =
-                tools::copy_cancelled(File::open(&path)?.take(meta.len()), &mut output, cancel)?;
+            let size = tools::copy_cancelled(
+                crate::io_progress::ObservedFile::open(&path, cancel, observer)?.take(meta.len()),
+                &mut output,
+                cancel,
+            )?;
             files::ensure_unchanged(&path, &meta)?;
             if size != meta.len() {
                 return Err(io::Error::other("Ein Dateiteil wurde abgeschnitten."));
@@ -219,7 +243,9 @@ impl Manifest {
                 "Dateiteile fehlen oder die CRC-Prüfsumme stimmt nicht.",
             ));
         }
+        crate::io_progress::phase(target, crate::io_progress::Phase::Processing, observer);
         output.output.as_file().sync_all()?;
+        crate::io_progress::phase(target, crate::io_progress::Phase::Publishing, observer);
         files::check_cancel(cancel)?;
         output
             .output

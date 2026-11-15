@@ -6,8 +6,8 @@ use windows::{
             CoTaskMemFree, CoUninitialize,
         },
         UI::Shell::{
-            FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS, FileOpenDialog,
-            IFileOpenDialog, SIGDN_FILESYSPATH,
+            FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST, FOS_PICKFOLDERS,
+            FileOpenDialog, FileSaveDialog, IFileDialog, SIGDN_FILESYSPATH,
         },
     },
     core::{HRESULT, PCWSTR, w},
@@ -28,6 +28,16 @@ pub fn destination() -> io::Result<Option<PathBuf>> {
 }
 
 pub fn folder(title: &str) -> io::Result<Option<PathBuf>> {
+    select_path(title, 0, "")
+}
+
+/// Select a file without opening or writing it. Exporters retain their own
+/// create-new checks even when a user selects an existing name in this dialog.
+pub fn file(title: &str, saving: bool, initial: &str) -> io::Result<Option<PathBuf>> {
+    select_path(title, if saving { 2 } else { 1 }, initial)
+}
+
+fn select_path(title: &str, mode: u8, initial: &str) -> io::Result<Option<PathBuf>> {
     struct Com;
     impl Drop for Com {
         fn drop(&mut self) {
@@ -37,12 +47,26 @@ pub fn folder(title: &str) -> io::Result<Option<PathBuf>> {
     unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok() }.map_err(io::Error::other)?;
     let _com = Com;
     let result = (|| -> windows::core::Result<Option<PathBuf>> {
-        let dialog: IFileOpenDialog =
-            unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)? };
+        let dialog: IFileDialog = if mode == 2 {
+            unsafe { CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER)? }
+        } else {
+            unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)? }
+        };
         unsafe {
             dialog.SetOptions(
-                dialog.GetOptions()? | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST,
+                dialog.GetOptions()?
+                    | FOS_FORCEFILESYSTEM
+                    | FOS_PATHMUSTEXIST
+                    | match mode {
+                        0 => FOS_PICKFOLDERS,
+                        1 => FOS_FILEMUSTEXIST,
+                        _ => Default::default(),
+                    },
             )?;
+            if !initial.is_empty() {
+                let initial: Vec<u16> = initial.encode_utf16().chain(Some(0)).collect();
+                dialog.SetFileName(PCWSTR(initial.as_ptr()))?;
+            }
             let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
             dialog.SetTitle(PCWSTR(title.as_ptr()))?;
             let owner = windows_sys::Win32::UI::Input::KeyboardAndMouse::GetActiveWindow();

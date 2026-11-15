@@ -1,5 +1,25 @@
 # Änderungen
 
+## 1.2.0 · 15. November 2026
+
+### Dialoge und Bedienung
+
+- Einheitliche Datei- und Binärvergleiche mit Dateiinformationen, Unterschiedsnavigation, Fortschrittsphasen und Schutz ungespeicherter Bearbeitungen.
+- Einfg markiert den aktuellen Eintrag und springt zum nächsten; Leertaste markiert ohne Weitergehen. Eigene Tastenkürzel bleiben erhalten.
+- Gegliederte Dateieigenschaften, Attribute, Zeitstempel und FTP-Berechtigungen mit kopierbaren Angaben, Validierung und Fortschritt.
+- Gemeinsame Formulare und Ergebnisse für Prüfsummen, Teilen/Zusammenfügen und Kodieren/Dekodieren. Abbrüche und Veröffentlichungskollisionen schützen vorhandene Dateien.
+- Filterbare Verwaltung und strukturierte Editoren für Tabs, Favoriten, Buttonbars, Starter, Spaltensätze, Ansichtsregeln und Dateizuordnungen. Entwürfe bleiben bei korrigierbaren Fehlern erhalten; geänderte Eingaben werden vor dem Verwerfen geschützt.
+- Gemeinsame Hinweise, Fehler und Auftragsberichte mit Zählern und vollständigen kopierbaren Details. Das letzte Ergebnis ist über Statusleiste und Hilfemenü erneut erreichbar; Hintergrundmeldungen ersetzen keinen geöffneten Eingabedialog.
+- Überarbeitete Laufwerksauswahl, Kommentare, Ignorierliste, Packerprofile und Umbenennvorlagen. Feste Aktionsleisten, scrollbare Inhalte und ergänzte Fokusführung in Such-/Listerfenstern.
+- Ergänzte englische und französische Übersetzungen, Tastaturhinweise und Symbole.
+
+### Veröffentlichung und Prüfung
+
+- Portables Paket für Windows 10 22H2 und Windows 11 (x64), einschließlich x64-/x86-Plugin-Hosts, ZIP-SFX, Anleitung und Drittanbieterhinweisen.
+- 271 automatisierte Tests bestanden; 33 externe Referenzfälle übersprungen. Formatierung und statische UI-Kompilierung geprüft.
+- Paketierung mit `--no-app-run`: Arco Commander wird auch nicht für Versions-/Hilfsaufrufe gestartet. Eingebettete Version, PE-Architektur, Subsystem, ZIP-Integrität, beide Plugin-Hosts und ZIP-SFX werden separat geprüft.
+- Fenster-, DPI-, reine Maus-/Tastatur- und Windows-10-Prüfungen übernimmt der Projektinhaber anhand der erweiterten [UI-Prüfliste](docs/UI-PRUEFUNG.md). Der volle Funktionsumfang von Total Commander bleibt ein Entwicklungsziel; die offenen Matrixfälle sind unverändert ausgewiesen.
+
 ## 1.1.0 · 12. November 2026
 
 ### Oberfläche und Bedienung

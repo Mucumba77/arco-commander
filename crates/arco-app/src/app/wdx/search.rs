@@ -13,6 +13,7 @@ use std::sync::atomic::AtomicBool;
 
 const MAX_CONDITIONS: usize = 16;
 
+#[derive(Clone)]
 pub(crate) struct SearchTarget {
     side: usize,
     request: u64,
@@ -23,6 +24,7 @@ pub(crate) struct SearchTarget {
     name: Option<String>,
 }
 
+#[derive(Clone)]
 struct SearchCondition {
     plugin: Registration,
     field: WdxField,

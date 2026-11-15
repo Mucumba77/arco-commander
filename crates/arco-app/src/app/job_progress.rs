@@ -72,6 +72,14 @@ impl Default for Tracker {
 }
 
 impl Tracker {
+    pub fn update_source(&mut self, sample: Sample) {
+        if sample.source != self.sample.source || sample.phase != self.sample.phase {
+            self.history.clear();
+            self.sample.completed = sample.completed;
+        }
+        self.update(sample);
+    }
+
     pub fn update(&mut self, sample: Sample) {
         self.measured = true;
         let now = Instant::now();
@@ -227,6 +235,9 @@ impl Tracker {
                     OperationKind::Sync => "Verzeichnisse werden synchronisiert …",
                     OperationKind::Ftp => "FTP-Auftrag läuft …",
                     OperationKind::Plugin => "Plugin-Auftrag läuft …",
+                    OperationKind::Compare => "Dateien werden verglichen …",
+                    OperationKind::Metadata => "Einträge werden verarbeitet …",
+                    OperationKind::Utility => "Dateiwerkzeug läuft …",
                     OperationKind::Task => "Auftrag läuft",
                 }
             })

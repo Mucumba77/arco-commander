@@ -458,6 +458,7 @@ const MENU: &[Category] = &[
         icon: "file",
         primary: &[
             ("Tastatur und Befehle", "help"),
+            ("Meldungen und letztes Ergebnis", "show-messages"),
             ("Systeminformationen", "system-information"),
             ("Windows-Version", "windows-version"),
             ("Über Arco Commander", "about"),

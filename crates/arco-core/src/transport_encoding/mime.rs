@@ -1,10 +1,11 @@
 use super::{invalid, publish, publish_group, read_line, source_file};
+use crate::io_progress::{self, ObservedFile, Observer, Phase};
 use crate::{files, tools};
 use base64::{Engine, engine::general_purpose::STANDARD, read::DecoderReader};
 use mailparse::{MailHeaderMap, body::Body};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -21,17 +22,21 @@ struct Fragment {
     total: Option<usize>,
 }
 
-pub(super) fn decode_batch(
+pub(super) fn decode_batch_observed(
     sources: &[PathBuf],
     directory: &Path,
     cancel: &AtomicBool,
+    observer: Observer<'_>,
 ) -> Vec<(PathBuf, io::Result<Vec<PathBuf>>)> {
     let mut groups = BTreeMap::<String, Vec<Fragment>>::new();
     let mut output = Vec::new();
     for source in sources {
-        match inspect_fragment(source, cancel) {
+        match inspect_fragment(source, cancel, observer) {
             Ok(Some((id, fragment))) => groups.entry(id).or_default().push(fragment),
-            Ok(None) => output.push((source.clone(), decode(source, directory, cancel))),
+            Ok(None) => output.push((
+                source.clone(),
+                decode_observed(source, directory, cancel, observer),
+            )),
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {
                 output.push((source.clone(), Err(error)));
                 return output;
@@ -41,7 +46,7 @@ pub(super) fn decode_batch(
     }
     for (_, fragments) in groups {
         let label = fragments[0].source.clone();
-        let decoded = reassemble(fragments, directory, cancel);
+        let decoded = reassemble(fragments, directory, cancel, observer);
         let interrupted = decoded
             .as_ref()
             .is_err_and(|error| error.kind() == io::ErrorKind::Interrupted);
@@ -53,9 +58,13 @@ pub(super) fn decode_batch(
     output
 }
 
-fn inspect_fragment(source: &Path, cancel: &AtomicBool) -> io::Result<Option<(String, Fragment)>> {
+fn inspect_fragment(
+    source: &Path,
+    cancel: &AtomicBool,
+    observer: Observer<'_>,
+) -> io::Result<Option<(String, Fragment)>> {
     let metadata = source_file(source)?;
-    let mut reader = BufReader::new(File::open(source)?);
+    let mut reader = BufReader::new(ObservedFile::open(source, cancel, observer)?);
     let mut data = Vec::new();
     let mut line = Vec::new();
     loop {
@@ -122,6 +131,7 @@ fn reassemble(
     mut parts: Vec<Fragment>,
     directory: &Path,
     cancel: &AtomicBool,
+    observer: Observer<'_>,
 ) -> io::Result<Vec<PathBuf>> {
     files::check_cancel(cancel)?;
     parts.sort_by_key(|part| part.number);
@@ -149,24 +159,36 @@ fn reassemble(
                 "Zusammengefügte MIME-Nachrichten dürfen höchstens 64 MiB groß sein.",
             ));
         }
-        let mut file = File::open(&part.source)?;
+        let mut file = ObservedFile::open(&part.source, cancel, observer)?;
         file.seek(SeekFrom::Start(part.offset))?;
         if tools::copy_cancelled(file.take(size), &mut data, cancel)? != size {
             return Err(invalid("Die MIME-Teilgröße hat sich geändert."));
         }
     }
-    decode_message(&data, &parts[0].source, directory, cancel, || {
-        for part in &parts {
-            files::ensure_unchanged(&part.source, &part.metadata)?;
-        }
-        Ok(())
-    })
+    decode_message(
+        &data,
+        &parts[0].source,
+        directory,
+        cancel,
+        || {
+            for part in &parts {
+                files::ensure_unchanged(&part.source, &part.metadata)?;
+            }
+            Ok(())
+        },
+        observer,
+    )
 }
 
-pub(super) fn encode(source: &Path, directory: &Path, cancel: &AtomicBool) -> io::Result<PathBuf> {
+pub(super) fn encode_observed(
+    source: &Path,
+    directory: &Path,
+    cancel: &AtomicBool,
+    observer: Observer<'_>,
+) -> io::Result<PathBuf> {
     files::check_cancel(cancel)?;
     let metadata = source_file(source)?;
-    let mut input = BufReader::new(File::open(source)?);
+    let mut input = BufReader::new(ObservedFile::open(source, cancel, observer)?);
     let directory = fs::canonicalize(directory)?;
     let name = source
         .file_name()
@@ -209,27 +231,39 @@ pub(super) fn encode(source: &Path, directory: &Path, cancel: &AtomicBool) -> io
         output.flush()?;
     }
     files::ensure_unchanged(source, &metadata)?;
+    io_progress::phase(source, Phase::Publishing, observer);
     publish(staged, &target, cancel)?;
     Ok(target)
 }
 
-pub(super) fn decode(
+pub(super) fn decode_observed(
     source: &Path,
     directory: &Path,
     cancel: &AtomicBool,
+    observer: Observer<'_>,
 ) -> io::Result<Vec<PathBuf>> {
     let metadata = source_file(source)?;
     if metadata.len() > MAX_INPUT {
-        return decode_large_single(source, directory, &metadata, cancel).map(|path| vec![path]);
+        return decode_large_single(source, directory, &metadata, cancel, observer)
+            .map(|path| vec![path]);
     }
     let mut input = Vec::new();
-    tools::copy_cancelled(File::open(source)?.take(MAX_INPUT + 1), &mut input, cancel)?;
+    tools::copy_cancelled(
+        ObservedFile::open(source, cancel, observer)?.take(MAX_INPUT + 1),
+        &mut input,
+        cancel,
+    )?;
     if input.len() as u64 != metadata.len() {
         return Err(invalid("Die MIME-Dateigröße hat sich geändert."));
     }
-    decode_message(&input, source, directory, cancel, || {
-        files::ensure_unchanged(source, &metadata)
-    })
+    decode_message(
+        &input,
+        source,
+        directory,
+        cancel,
+        || files::ensure_unchanged(source, &metadata),
+        observer,
+    )
 }
 
 fn decode_message(
@@ -238,7 +272,10 @@ fn decode_message(
     directory: &Path,
     cancel: &AtomicBool,
     verify: impl FnOnce() -> io::Result<()>,
+    observer: Observer<'_>,
 ) -> io::Result<Vec<PathBuf>> {
+    io_progress::phase(source, Phase::Processing, observer);
+    files::check_cancel(cancel)?;
     let message = mailparse::parse_mail(input).map_err(io::Error::other)?;
     if message
         .ctype
@@ -324,6 +361,7 @@ fn decode_message(
         return Err(invalid("Keine dekodierbaren MIME-Anhänge gefunden."));
     }
     verify()?;
+    io_progress::phase(source, Phase::Publishing, observer);
     publish_group(staged, cancel)
 }
 
@@ -332,8 +370,10 @@ fn decode_large_single(
     directory: &Path,
     metadata: &fs::Metadata,
     cancel: &AtomicBool,
+    observer: Observer<'_>,
 ) -> io::Result<PathBuf> {
-    let mut reader = BufReader::new(File::open(source)?.take(metadata.len()));
+    let mut reader =
+        BufReader::new(ObservedFile::open(source, cancel, observer)?.take(metadata.len()));
     let mut headers = Vec::new();
     let mut line = Vec::new();
     loop {
@@ -377,6 +417,7 @@ fn decode_large_single(
     let mut staged = NamedTempFile::new_in(directory)?;
     decode_base64(reader, &mut staged, cancel)?;
     files::ensure_unchanged(source, metadata)?;
+    io_progress::phase(source, Phase::Publishing, observer);
     publish(staged, &target, cancel)?;
     Ok(target)
 }
@@ -409,6 +450,23 @@ impl<R: Read> Read for SkipWhitespace<'_, R> {
             }
         }
     }
+}
+
+#[cfg(test)]
+fn encode(source: &Path, directory: &Path, cancel: &AtomicBool) -> io::Result<PathBuf> {
+    encode_observed(source, directory, cancel, &|_| {})
+}
+#[cfg(test)]
+fn decode(source: &Path, directory: &Path, cancel: &AtomicBool) -> io::Result<Vec<PathBuf>> {
+    decode_observed(source, directory, cancel, &|_| {})
+}
+#[cfg(test)]
+fn decode_batch(
+    sources: &[PathBuf],
+    directory: &Path,
+    cancel: &AtomicBool,
+) -> Vec<(PathBuf, io::Result<Vec<PathBuf>>)> {
+    decode_batch_observed(sources, directory, cancel, &|_| {})
 }
 
 #[cfg(test)]
@@ -470,7 +528,7 @@ mod tests {
         assert_eq!(fs::read(&files[0]).unwrap(), data);
         fs::remove_file(&files[0]).unwrap();
         let metadata = fs::metadata(&encoded).unwrap();
-        let streamed = decode_large_single(&encoded, &output, &metadata, &cancel).unwrap();
+        let streamed = decode_large_single(&encoded, &output, &metadata, &cancel, &|_| {}).unwrap();
         assert_eq!(streamed.file_name(), source.file_name());
         assert_eq!(fs::read(streamed).unwrap(), data);
     }

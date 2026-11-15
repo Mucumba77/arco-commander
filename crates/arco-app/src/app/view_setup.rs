@@ -33,6 +33,7 @@ const SORT_KEYS: &[(&str, SortKey)] = &[
     ("unsortiert", SortKey::Unsorted),
 ];
 
+#[derive(Clone)]
 pub(crate) enum Setup {
     Choose {
         modes: bool,
@@ -259,7 +260,7 @@ impl App {
                 settings.automatic = !settings.automatic;
                 let enabled = settings.automatic;
                 if let Err(error) = self.save_view_settings(settings) {
-                    self.text("Automatische Ansichten", &error.to_string());
+                    self.error("Automatische Ansichten", &error.to_string());
                 } else {
                     self.status(if enabled {
                         "Automatische Ansichten aktiviert."
@@ -314,7 +315,7 @@ impl App {
         true
     }
 
-    fn choose_view(&mut self, modes: bool) {
+    pub(super) fn choose_view(&mut self, modes: bool) {
         let settings = &self.profile.views;
         let names: Vec<_> = if modes {
             settings.modes.keys().cloned().collect()
@@ -788,7 +789,7 @@ impl App {
         self.save();
     }
 
-    fn save_view_settings(&mut self, settings: Settings) -> io::Result<()> {
+    pub(super) fn save_view_settings(&mut self, settings: Settings) -> io::Result<()> {
         if !self.save_profile {
             return Err(io::Error::other("Das Arco-Profil ist nicht verfügbar."));
         }
@@ -913,7 +914,7 @@ fn parse_colors(value: &str, settings: &mut Settings) -> io::Result<()> {
     Ok(())
 }
 
-fn name_line(value: Option<&str>, existing: Option<&str>) -> io::Result<String> {
+pub(super) fn name_line(value: Option<&str>, existing: Option<&str>) -> io::Result<String> {
     let name = value.unwrap_or_default().trim();
     if name.is_empty()
         || name.chars().count() > 80

@@ -1,0 +1,293 @@
+import { LineEdit, TextEdit, ComboBox, ListView, ScrollView } from "std-widgets.slint";
+import { Colors, Button, CheckBox } from "dialog-theme.slint";
+import { DialogHeading, FieldLabel, FormSection } from "operation-dialogs.slint";
+
+export struct NavigationRow { label: string, detail: string, choice: int, kind: int }
+export struct NavigationForm {
+    name: string, groups: string, path: string, other: string,
+    icon: string, command: string, arguments: string, working: string,
+    action: int, window: int, tc: bool, prompt: bool, args: bool,
+    drop-children: bool, option: int
+}
+export struct NavigationData {
+    mode: int, manager: int, title: string, description: string, primary: string,
+    first-label: string, second-label: string, options: [string],
+    initial: NavigationForm, children: int, original-action: int, review: bool, file-mode: int,
+    entry-offset: int, can-import: bool, delete-note: string
+}
+
+export component NavigationListCard inherits Rectangle {
+    in property <NavigationData> data;
+    in property <[NavigationRow]> rows;
+    in property <string> notice;
+    in property <int> focus-cycle;
+    in property <int> revision;
+    in-out property <int> selection;
+    property <int> confirm-action: -1;
+    property <int> confirm-choice: -1;
+    property <bool> manager: root.data.manager == 1 || root.data.manager == 2 || root.data.manager == 8 || root.data.manager == 9 || root.data.manager == 10 || root.data.manager == 11;
+    property <bool> reorder: root.manager && root.data.manager != 8 && root.data.manager != 10 && root.data.manager != 11;
+    property <bool> editable: root.choice >= 0 && (root.data.manager != 8 || root.choice >= root.data.entry-offset);
+    property <int> choice: root.selection >= 0 && root.selection < root.rows.length ? root.rows[root.selection].choice : -1;
+    callback filter(string);
+    callback action(int, int);
+    callback close();
+    forward-focus: search;
+    init => { search.focus(); }
+    changed focus-cycle => { if (root.focus-cycle > 0 || !run.enabled) { search.focus(); } else { run.focus(); } }
+    changed revision => { root.confirm-action = -1; search.text = ""; search.focus(); }
+    changed rows => {
+        root.selection = clamp(root.selection, 0, max(0, root.rows.length - 1));
+        list.viewport-y = 0px;
+    }
+    changed selection => {
+        if (root.selection * 62px < -list.viewport-y) { list.viewport-y = -root.selection * 62px; }
+        else if ((root.selection + 1) * 62px > -list.viewport-y + list.visible-height) { list.viewport-y = list.visible-height - (root.selection + 1) * 62px; }
+    }
+    function select(index: int) {
+        root.selection = clamp(index, 0, max(0, root.rows.length - 1));
+        root.confirm-action = -1;
+        if (root.selection * 62px < -list.viewport-y) { list.viewport-y = -root.selection * 62px; }
+        else if ((root.selection + 1) * 62px > -list.viewport-y + list.visible-height) { list.viewport-y = list.visible-height - (root.selection + 1) * 62px; }
+    }
+    function invoke(action: int) {
+        if (action == 5 || (action == 0 && (root.data.manager == 5 || (root.data.manager == 12 && root.choice == root.data.entry-offset)))) {
+            root.confirm-action = action; root.confirm-choice = root.choice;
+        } else { root.action(action, root.choice); }
+    }
+    background: Colors.panel; border-radius: 16px; border-width: 1px; border-color: Colors.edge;
+    FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) { if (root.confirm-action >= 0) { root.confirm-action = -1; } else { root.close(); } return accept; }
+            if (event.modifiers.control && (event.text == "f" || event.text == "F")) { search.focus(); return accept; }
+            return reject;
+        }
+        VerticalLayout {
+            padding: 20px; spacing: 12px;
+            DialogHeading { icon: root.data.manager == 1 ? @image-url("icons/star.svg") : @image-url("icons/folder.svg"); title: root.data.title; subtitle: root.data.description; }
+            if root.notice != "" : Text { text: root.notice; color: Colors.archive; wrap: word-wrap; }
+            HorizontalLayout { spacing: 8px;
+            search := LineEdit {
+                placeholder-text: @tr("Nach Name, Pfad oder Befehl filtern …"); accessible-label: @tr("Liste filtern");
+                edited => { root.confirm-action = -1; root.filter(self.text); }
+                key-pressed(event) => {
+                    if (event.text == Key.DownArrow || event.text == Key.UpArrow) { keys.focus(); return accept; }
+                    if (event.text == Key.Return && root.rows.length > 0) { root.invoke(0); return accept; }
+                    return reject;
+                }
+            }
+            Button { text: @tr("Filter leeren"); enabled: search.text != ""; clicked => { search.text = ""; root.filter(""); search.focus(); } }
+            }
+            if root.manager || root.data.manager == 3 || root.data.manager == 4 : HorizontalLayout {
+                spacing: 6px;
+                Button { text: @tr("Neu"); icon: @image-url("icons/plus.svg"); clicked => { root.action(1, root.choice); } }
+                if root.manager : Button { text: @tr("Bearbeiten"); icon: @image-url("icons/edit.svg"); enabled: root.editable; clicked => { root.invoke(2); } }
+                if root.reorder : Button { text: "↑"; accessible-label: @tr("Nach oben verschieben"); enabled: root.choice >= 0; clicked => { root.invoke(3); } Tooltip { text: @markdown("Alt+↑"); } }
+                if root.reorder : Button { text: "↓"; accessible-label: @tr("Nach unten verschieben"); enabled: root.choice >= 0; clicked => { root.invoke(4); } Tooltip { text: @markdown("Alt+↓"); } }
+                if root.manager : Button { text: @tr("Entfernen"); destructive: true; enabled: root.editable; clicked => { root.invoke(5); } }
+                if root.data.manager == 2 : Button { text: @tr("Untermenü"); enabled: root.choice >= 0 && root.rows[root.selection].kind == 2; clicked => { root.invoke(6); } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            if root.data.manager == 2 || root.data.manager == 3 : HorizontalLayout {
+                spacing: 6px;
+                Button { text: @tr("Importieren …"); icon: @image-url("icons/archive.svg"); clicked => { root.action(8, root.choice); } }
+                Button { text: @tr("Exportieren …"); icon: @image-url("icons/archive-extract.svg"); clicked => { root.action(9, root.choice); } }
+                if root.data.manager == 2 : Button { text: @tr("Übergeordnete Leiste"); clicked => { root.action(7, root.choice); } }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            if root.data.manager == 6 : Button { text: @tr("Starter verwalten …"); icon: @image-url("icons/settings.svg"); clicked => { root.action(10, root.choice); } }
+            if root.data.manager == 7 : Button { text: @tr("Gewählten Tab verwalten …"); icon: @image-url("icons/settings.svg"); enabled: root.choice >= 0; clicked => { root.action(10, root.choice); } }
+            if root.data.can-import : Button { text: @tr("TC-Ansichten importieren …"); icon: @image-url("icons/archive.svg"); clicked => { root.action(8, root.choice); } }
+            table := Rectangle {
+                vertical-stretch: 1; min-height: 150px;
+                background: Colors.background; border-radius: 9px; border-width: 1px;
+                border-color: keys.has-focus ? Colors.accent : Colors.edge;
+                forward-focus: keys;
+                list := ListView {
+                    width: parent.width - 2px; height: parent.height - 2px; x: 1px; y: 1px;
+                    for row[i] in root.rows : Rectangle {
+                        height: 62px; background: i == root.selection ? Colors.cursor : Math.mod(i, 2) == 0 ? Colors.background : Colors.panel;
+                        accessible-role: list-item; accessible-label: row.label + " · " + row.detail;
+                        HorizontalLayout {
+                            padding: 12px; spacing: 12px;
+                            Image { source: row.kind == 2 ? @image-url("icons/folder.svg") : row.kind == 3 ? @image-url("icons/terminal.svg") : row.kind == 4 ? @image-url("icons/settings.svg") : row.kind == 5 ? @image-url("icons/lock.svg") : row.kind == 6 ? @image-url("icons/close.svg") : row.kind == 7 ? @image-url("icons/edit.svg") : row.kind == 8 ? @image-url("icons/copy.svg") : row.kind == 9 ? @image-url("icons/move.svg") : @image-url("icons/star.svg"); colorize: row.kind == 6 ? Colors.archive : Colors.accent; width: 20px; height: 20px; }
+                            VerticalLayout {
+                                spacing: 4px;
+                                Text { text: row.label; color: Colors.text; overflow: elide; Tooltip { text: @markdown("\{row.label}"); } }
+                                Text { text: row.detail; color: Colors.muted; font-size: 11px; overflow: elide; Tooltip { text: @markdown("\{row.detail}"); } }
+                            }
+                        }
+                        TouchArea {
+                            clicked => { root.select(i); keys.focus(); }
+                            double-clicked => { root.select(i); root.invoke(0); }
+                        }
+                    }
+                }
+                if root.rows.length == 0 : Text { text: root.data.review ? @tr("Prüfe den Hinweis oben und bestätige die Aktion ausdrücklich.") : @tr("Keine Einträge. Leere den Filter oder lege einen neuen Eintrag an."); color: Colors.muted; wrap: word-wrap; x: 20px; y: 20px; width: parent.width - 40px; }
+                keys := FocusScope {
+                    width: 0px; height: 0px;
+                    key-pressed(event) => {
+                        if (event.modifiers.alt && event.text == Key.UpArrow && root.reorder) { root.invoke(3); return accept; }
+                        if (event.modifiers.alt && event.text == Key.DownArrow && root.reorder) { root.invoke(4); return accept; }
+                        if (event.text == Key.UpArrow) { root.select(root.selection - 1); return accept; }
+                        if (event.text == Key.DownArrow) { root.select(root.selection + 1); return accept; }
+                        if (event.text == Key.Home) { root.select(0); return accept; }
+                        if (event.text == Key.End) { root.select(root.rows.length - 1); return accept; }
+                        if (event.text == Key.PageUp) { root.select(root.selection - max(1, floor(list.visible-height / 62px))); return accept; }
+                        if (event.text == Key.PageDown) { root.select(root.selection + max(1, floor(list.visible-height / 62px))); return accept; }
+                        if (event.text == Key.Return && root.rows.length > 0) { root.invoke(0); return accept; }
+                        if (event.text == Key.F2 && root.manager && root.editable) { root.invoke(2); return accept; }
+                        if (event.text == Key.Insert && (root.manager || root.data.manager == 3 || root.data.manager == 4)) { root.action(1, root.choice); return accept; }
+                        if (event.text == Key.Delete && root.manager && root.editable) { root.invoke(5); return accept; }
+                        return reject;
+                    }
+                }
+            }
+            if root.confirm-action >= 0 : FormSection {
+                title: @tr("Änderung bestätigen");
+                Text { text: root.choice >= 0 ? root.rows[root.selection].label : ""; color: Colors.text; overflow: elide; }
+                Text { text: root.confirm-action == 5 ? @tr("Den gewählten Eintrag aus der Konfiguration entfernen? Dateien und Programme bleiben erhalten.") : @tr("Diese Aktion ändert die gespeicherte Konfiguration. Fortfahren?"); color: Colors.text; wrap: word-wrap; }
+                if root.data.delete-note != "" : Text { text: root.data.delete-note; color: Colors.archive; wrap: word-wrap; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Button { text: @tr("Zurück"); clicked => { root.confirm-action = -1; keys.focus(); } }
+                    Button { text: @tr("Bestätigen"); destructive: true; init => { self.focus(); } clicked => { root.action(root.confirm-action, root.confirm-choice); root.confirm-action = -1; } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+            }
+            Rectangle { height: 1px; background: Colors.edge; }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: root.data.manager == 8 ? @tr("Doppelklick/Enter: anwenden · F2: bearbeiten · Einfg: neu · Entf: entfernen") : root.data.manager == 10 ? @tr("Doppelklick/Enter: bearbeiten · F2: bearbeiten · Einfg: neu · Entf: entfernen") : root.data.manager == 11 ? @tr("Doppelklick/Enter: Umbenennvorschau · F2: bearbeiten · Einfg: neu · Entf: entfernen") : root.manager ? @tr("Doppelklick/Enter: bearbeiten · F2: bearbeiten · Einfg: neu · Alt+↑/↓: Reihenfolge · Entf: entfernen") : @tr("Doppelklick oder Enter öffnet den Eintrag · Strg+F filtert · Esc schließt"); color: Colors.muted; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; }
+                Button { text: @tr("Schließen"); clicked => { root.close(); } }
+                run := Button { text: root.data.primary; primary: true; enabled: root.confirm-action < 0 && (root.data.review || root.rows.length > 0); clicked => { root.invoke(0); } }
+            }
+        }
+    }
+}
+
+export component NavigationEditorCard inherits Rectangle {
+    in property <NavigationData> data;
+    in property <string> notice;
+    in property <int> focus-cycle;
+    in property <int> revision;
+    property <NavigationForm> form;
+    property <bool> dirty: root.form != root.data.initial;
+    property <bool> discard;
+    property <bool> button: root.data.mode == 2;
+    property <bool> favorite: root.data.mode == 1;
+    callback apply(NavigationForm);
+    callback close();
+    callback browse() -> string;
+    callback file(bool, string) -> string;
+    init => { root.form = root.data.initial; first.focus(); }
+    changed revision => { root.form = root.data.initial; root.discard = false; first.focus(); }
+    changed focus-cycle => { if (root.focus-cycle > 0 || !save.enabled) { first.focus(); } else { save.focus(); } }
+    function request-close() { if (root.dirty) { root.discard = true; } else { root.close(); } }
+    background: Colors.panel; border-radius: 16px; border-width: 1px; border-color: Colors.edge;
+    FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) { if (root.discard) { root.discard = false; } else { root.request-close(); } return accept; }
+            if (event.modifiers.control && (event.text == "s" || event.text == "S")) { root.apply(root.form); return accept; }
+            return reject;
+        }
+        VerticalLayout {
+            padding: 20px; spacing: 12px;
+            DialogHeading { icon: root.button ? @image-url("icons/settings.svg") : @image-url("icons/star.svg"); title: root.data.title; subtitle: root.data.description; }
+            if root.notice != "" : Text { text: root.notice; color: Colors.archive; wrap: word-wrap; }
+            ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    padding: 0px; spacing: 12px;
+                    FormSection {
+                        title: root.button || root.favorite ? @tr("Darstellung") : @tr("Eingabe");
+                        FieldLabel { text: root.data.first-label; }
+                        HorizontalLayout { spacing: 8px;
+                            first := LineEdit { text <=> root.form.name; accessible-label: root.data.first-label; }
+                            if root.data.file-mode > 0 : Button { text: @tr("Datei wählen …"); clicked => { let path = root.file(root.data.file-mode == 2, root.form.name); if (path != "") { root.form.name = path; } } }
+                        }
+                        if root.favorite : VerticalLayout {
+                            spacing: 5px;
+                            FieldLabel { text: @tr("Gruppe (optional, Ebenen mit / trennen)"); }
+                            LineEdit { text <=> root.form.groups; accessible-label: @tr("Favoritengruppe"); }
+                        }
+                        if root.button : VerticalLayout {
+                            spacing: 5px;
+                            FieldLabel { text: @tr("Symbol"); }
+                            ComboBox { model: [@tr("Standardsymbol wählen …"), "ordner", "datei", "suche", "kopieren", "verschieben", "archiv", "netz", "terminal", "stern", "einstellungen"]; accessible-label: @tr("Standardsymbol wählen"); selected(value) => { if (self.current-index > 0) { root.form.icon = value; } } }
+                            LineEdit { text <=> root.form.icon; accessible-label: @tr("Symbolname, Bildpfad oder DLL-Ressource"); }
+                            Text { text: @tr("Standardsymbol oder eigener Bildpfad; DLL-Ressourcen mit Komma und Index, z. B. shell32.dll,3."); color: Colors.muted; wrap: word-wrap; font-size: 11px; }
+                        }
+                    }
+                    if root.favorite : FormSection {
+                        title: @tr("Ordner");
+                        FieldLabel { text: @tr("Ordner im aktiven Dateifenster"); }
+                        HorizontalLayout { spacing: 8px;
+                            LineEdit { text <=> root.form.path; accessible-label: @tr("Ordner im aktiven Dateifenster"); }
+                            Button { text: @tr("Wählen …"); clicked => { let path = root.browse(); if (path != "") { root.form.path = path; } } }
+                        }
+                        FieldLabel { text: @tr("Ordner im anderen Dateifenster (optional)"); }
+                        HorizontalLayout { spacing: 8px;
+                            LineEdit { text <=> root.form.other; accessible-label: @tr("Ordner im anderen Dateifenster (optional)"); }
+                            Button { text: @tr("Wählen …"); clicked => { let path = root.browse(); if (path != "") { root.form.other = path; } } }
+                        }
+                        Text { text: @tr("Absolute Ordnerpfade verwenden. Ein leeres Gegenverzeichnis lässt das andere Dateifenster unverändert."); color: Colors.muted; wrap: word-wrap; font-size: 11px; }
+                    }
+                    if root.button : FormSection {
+                        title: @tr("Aktion");
+                        FieldLabel { text: @tr("Aktionstyp"); }
+                        ComboBox { model: [@tr("Interner Befehl"), @tr("Programm starten"), @tr("Untermenü"), @tr("Leistenwechsel")]; current-index <=> root.form.action; accessible-label: @tr("Aktionstyp"); }
+                        if root.form.action <= 1 : VerticalLayout {
+                            spacing: 5px;
+                            FieldLabel { text: root.form.action == 0 ? @tr("Befehl") : @tr("Absoluter EXE-Pfad"); }
+                            if root.form.action == 0 : ComboBox { model: root.data.options; accessible-label: @tr("Internen Befehl wählen"); selected(value) => { if (self.current-index > 0) { root.form.command = value; } } }
+                            HorizontalLayout { spacing: 8px;
+                                LineEdit { text <=> root.form.command; accessible-label: root.form.action == 0 ? @tr("Befehl") : @tr("Absoluter EXE-Pfad"); }
+                                if root.form.action == 1 : Button { text: @tr("Datei wählen …"); clicked => { let path = root.file(false, root.form.command); if (path != "") { root.form.command = path; } } }
+                            }
+                        }
+                        if root.form.action >= 2 : Text { text: @tr("Einträge verwaltest du nach dem Speichern über die Aktion Untermenü. Vorhandene Einträge und importierte Leistenwechsel bleiben beim gleichen Aktionstyp erhalten."); color: Colors.muted; wrap: word-wrap; }
+                        if root.data.children > 0 && root.form.action != root.data.original-action : CheckBox { text: @tr("Vorhandene Untereinträge beim Typwechsel entfernen"); checked <=> root.form.drop-children; }
+                    }
+                    if root.button && root.form.action == 1 : FormSection {
+                        title: @tr("Programmoptionen");
+                        CheckBox { text: @tr("Argumente übergeben (ein Argument je Zeile)"); checked <=> root.form.args; }
+                        if root.form.args : TextEdit { text <=> root.form.arguments; height: 110px; accessible-label: @tr("Argumente, ein Argument je Zeile"); }
+                        FieldLabel { text: @tr("Arbeitsordner (optional)"); }
+                        HorizontalLayout { spacing: 8px;
+                            LineEdit { text <=> root.form.working; accessible-label: @tr("Arbeitsordner (optional)"); }
+                            Button { text: @tr("Wählen …"); clicked => { let path = root.browse(); if (path != "") { root.form.working = path; } } }
+                        }
+                        FieldLabel { text: @tr("Fensterzustand"); }
+                        ComboBox { model: [@tr("Normal"), @tr("Minimiert"), @tr("Maximiert")]; current-index <=> root.form.window; accessible-label: @tr("Fensterzustand"); }
+                        CheckBox { text: @tr("Total-Commander-Platzhalter auswerten"); checked <=> root.form.tc; }
+                        CheckBox { text: @tr("Argumente vor dem Start prüfen"); checked <=> root.form.prompt; }
+                        Text { text: @tr("Speichern startet kein Programm. Leere Argumentzeilen bleiben als leere Argumente erhalten. Die Argumentprüfung aktiviert die TC-Platzhalterauswertung."); color: Colors.muted; wrap: word-wrap; font-size: 11px; }
+                    }
+                    if !root.button && !root.favorite && root.data.second-label != "" : FormSection {
+                        title: root.data.second-label;
+                        LineEdit { text <=> root.form.other; accessible-label: root.data.second-label; }
+                    }
+                    if !root.button && !root.favorite && root.data.options.length > 0 : FormSection {
+                        title: @tr("Umfang");
+                        ComboBox { model: root.data.options; current-index <=> root.form.option; accessible-label: @tr("Umfang"); }
+                    }
+                }
+            }
+            if root.discard : FormSection {
+                title: @tr("Nicht gespeicherte Änderungen");
+                HorizontalLayout { spacing: 8px;
+                    Button { text: @tr("Weiter bearbeiten"); init => { self.focus(); } clicked => { root.discard = false; first.focus(); } }
+                    Button { text: @tr("Verwerfen"); destructive: true; clicked => { root.close(); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+            }
+            Rectangle { height: 1px; background: Colors.edge; }
+            HorizontalLayout { spacing: 8px;
+                Text { text: @tr("Tab: nächstes Feld · Umschalt+Tab: zurück · Strg+S: übernehmen · Esc: abbrechen"); color: Colors.muted; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; }
+                Button { text: @tr("Abbrechen"); clicked => { root.request-close(); } }
+                save := Button { text: root.data.primary; primary: true; enabled: !root.discard; clicked => { root.apply(root.form); } }
+            }
+        }
+    }
+}

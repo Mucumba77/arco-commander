@@ -9,6 +9,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[derive(Clone)]
 pub(crate) enum Setup {
     Choose,
     Manage(usize),
@@ -134,7 +135,7 @@ impl App {
         );
     }
 
-    fn choose_association(&mut self) {
+    pub(super) fn choose_association(&mut self) {
         let labels: Vec<_> = std::iter::once("Neue Zuordnung")
             .chain(
                 self.profile
@@ -241,14 +242,23 @@ impl App {
                     leaf.push(".lnk");
                     destination.set_file_name(files::leaf_name(&leaf)?);
                 }
-                self.start_job("Erstelle Verknüpfung …", true, move |job| {
-                    files::check_cancel(&job.cancel)?;
-                    arco_windows::create_shortcut(&source, &destination)?;
-                    Ok(Outcome::Notice(format!(
-                        "Verknüpfung erstellt · {}",
-                        display_path(&destination)
-                    )))
-                });
+                self.start_operation_job(
+                    "Erstelle Verknüpfung …",
+                    true,
+                    super::JobDescription::new(
+                        crate::OperationKind::Task,
+                        display_path(&source),
+                        display_path(&destination),
+                    ),
+                    move |job| {
+                        files::check_cancel(&job.cancel)?;
+                        arco_windows::create_shortcut(&source, &destination)?;
+                        Ok(Outcome::Notice(format!(
+                            "Verknüpfung erstellt · {}",
+                            display_path(&destination)
+                        )))
+                    },
+                );
             }
         }
         Ok(())
@@ -266,7 +276,7 @@ impl App {
     }
 }
 
-fn format_association(entry: &FileAssociation) -> String {
+pub(super) fn format_association(entry: &FileAssociation) -> String {
     let mut value = format!(
         "{}\n{}\n{}\n{}",
         entry.name,
@@ -278,10 +288,13 @@ fn format_association(entry: &FileAssociation) -> String {
         value.push('\n');
         value.push_str(arg);
     }
+    if !entry.arguments.is_empty() {
+        value.push('\n');
+    }
     value
 }
 
-fn parse_association(value: &str) -> io::Result<FileAssociation> {
+pub(super) fn parse_association(value: &str) -> io::Result<FileAssociation> {
     if value.len() > 8192 {
         return Err(io::Error::other("Die Zuordnung enthält zu viel Text."));
     }

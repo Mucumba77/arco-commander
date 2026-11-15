@@ -523,6 +523,12 @@ pub struct BinaryPage {
     pub has_next: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct BinaryProgress {
+    pub completed: u64,
+    pub total: u64,
+}
+
 impl BinaryComparison {
     pub fn open(paths: [PathBuf; 2]) -> io::Result<Self> {
         let metadata = [
@@ -538,13 +544,31 @@ impl BinaryComparison {
     }
 
     pub fn page(&self, cursor: u64, backward: bool, cancel: &AtomicBool) -> io::Result<BinaryPage> {
+        self.page_observed(cursor, backward, cancel, |_| {})
+    }
+
+    pub fn lengths(&self) -> [u64; 2] {
+        self.metadata.each_ref().map(fs::Metadata::len)
+    }
+
+    pub fn page_observed(
+        &self,
+        cursor: u64,
+        backward: bool,
+        cancel: &AtomicBool,
+        mut progress: impl FnMut(BinaryProgress),
+    ) -> io::Result<BinaryPage> {
         const PAGE: usize = 128;
         const BLOCK: u64 = 128 * 1024;
+        crate::files::check_cancel(cancel)?;
         self.verify()?;
         let mut files = [File::open(&self.paths[0])?, File::open(&self.paths[1])?];
         let mut buffers = [vec![0; BLOCK as usize], vec![0; BLOCK as usize]];
         let limit = self.metadata[0].len().max(self.metadata[1].len());
         let mut position = cursor.min(limit);
+        let total = if backward { position } else { limit - position };
+        let mut completed = 0;
+        progress(BinaryProgress { completed, total });
         let mut differences = Vec::with_capacity(PAGE + 1);
         while if backward {
             position > 0
@@ -565,6 +589,7 @@ impl BinaryComparison {
             }
             let left = &buffers[0][..read[0]];
             let right = &buffers[1][..read[1]];
+            let mut inspected = length;
             if left != right {
                 for index in 0..length {
                     let index = if backward { length - index - 1 } else { index };
@@ -572,16 +597,20 @@ impl BinaryComparison {
                     if bytes[0] != bytes[1] {
                         differences.push((start + index as u64, bytes));
                         if differences.len() > PAGE {
+                            inspected = if backward { length - index } else { index + 1 };
                             break;
                         }
                     }
                 }
             }
+            completed += inspected as u64;
+            progress(BinaryProgress { completed, total });
             if differences.len() > PAGE {
                 break;
             }
             position = if backward { start } else { end };
         }
+        crate::files::check_cancel(cancel)?;
         self.verify()?;
         let more = differences.len() > PAGE;
         differences.truncate(PAGE);
@@ -694,33 +723,46 @@ pub fn checksum(path: &Path, method: Hash, cancel: &AtomicBool) -> io::Result<St
 }
 
 pub fn checksum_file(input: File, method: Hash, cancel: &AtomicBool) -> io::Result<String> {
-    fn digest<D: Digest>(input: File, cancel: &AtomicBool) -> io::Result<String>
+    checksum_file_observed(input, method, cancel, &|_| {})
+}
+
+pub fn checksum_file_observed(
+    input: File,
+    method: Hash,
+    cancel: &AtomicBool,
+    observer: crate::io_progress::Observer<'_>,
+) -> io::Result<String> {
+    fn digest<D: Digest>(
+        input: File,
+        cancel: &AtomicBool,
+        observer: crate::io_progress::Observer<'_>,
+    ) -> io::Result<String>
     where
         sha2::digest::Output<D>: std::fmt::LowerHex,
     {
         let mut hash = D::new();
-        read_chunks(input, cancel, |chunk| hash.update(chunk))?;
+        read_chunks(input, cancel, observer, |chunk| hash.update(chunk))?;
         Ok(format!("{:x}", hash.finalize()))
     }
     match method {
         Hash::Crc32 => {
             let mut hash = crc32fast::Hasher::new();
-            read_chunks(input, cancel, |chunk| hash.update(chunk))?;
+            read_chunks(input, cancel, observer, |chunk| hash.update(chunk))?;
             Ok(format!("{:08x}", hash.finalize()))
         }
-        Hash::Md5 => digest::<md5::Md5>(input, cancel),
-        Hash::Sha1 => digest::<sha1::Sha1>(input, cancel),
-        Hash::Sha224 => digest::<sha2::Sha224>(input, cancel),
-        Hash::Sha256 => digest::<sha2::Sha256>(input, cancel),
-        Hash::Sha384 => digest::<sha2::Sha384>(input, cancel),
-        Hash::Sha512 => digest::<sha2::Sha512>(input, cancel),
-        Hash::Sha3_224 => digest::<sha3::Sha3_224>(input, cancel),
-        Hash::Sha3_256 => digest::<sha3::Sha3_256>(input, cancel),
-        Hash::Sha3_384 => digest::<sha3::Sha3_384>(input, cancel),
-        Hash::Sha3_512 => digest::<sha3::Sha3_512>(input, cancel),
+        Hash::Md5 => digest::<md5::Md5>(input, cancel, observer),
+        Hash::Sha1 => digest::<sha1::Sha1>(input, cancel, observer),
+        Hash::Sha224 => digest::<sha2::Sha224>(input, cancel, observer),
+        Hash::Sha256 => digest::<sha2::Sha256>(input, cancel, observer),
+        Hash::Sha384 => digest::<sha2::Sha384>(input, cancel, observer),
+        Hash::Sha512 => digest::<sha2::Sha512>(input, cancel, observer),
+        Hash::Sha3_224 => digest::<sha3::Sha3_224>(input, cancel, observer),
+        Hash::Sha3_256 => digest::<sha3::Sha3_256>(input, cancel, observer),
+        Hash::Sha3_384 => digest::<sha3::Sha3_384>(input, cancel, observer),
+        Hash::Sha3_512 => digest::<sha3::Sha3_512>(input, cancel, observer),
         Hash::Blake3 => {
             let mut hash = blake3::Hasher::new();
-            read_chunks(input, cancel, |chunk| {
+            read_chunks(input, cancel, observer, |chunk| {
                 hash.update(chunk);
             })?;
             Ok(hash.finalize().to_hex().to_string())
@@ -729,17 +771,33 @@ pub fn checksum_file(input: File, method: Hash, cancel: &AtomicBool) -> io::Resu
 }
 
 fn read_chunks(
-    mut input: File,
+    input: File,
     cancel: &AtomicBool,
+    observer: crate::io_progress::Observer<'_>,
     mut read: impl FnMut(&[u8]),
 ) -> io::Result<()> {
+    let before = input.metadata()?;
+    let final_handle = input.try_clone()?;
+    let mut input =
+        crate::io_progress::ObservedFile::from_file(input, Path::new(""), cancel, observer)?;
+    let mut completed = 0u64;
     let mut buffer = vec![0; 128 * 1024];
     loop {
         files::check_cancel(cancel)?;
         let count = input.read(&mut buffer)?;
         if count == 0 {
+            let after = final_handle.metadata()?;
+            if completed != before.len()
+                || before.len() != after.len()
+                || before.modified()? != after.modified()?
+            {
+                return Err(io::Error::other(
+                    "Die Quelldatei wurde während der Prüfsummenberechnung geändert.",
+                ));
+            }
             return Ok(());
         }
+        completed += count as u64;
         read(&buffer[..count]);
     }
 }
@@ -772,12 +830,27 @@ pub fn checksum_list(
 }
 
 pub fn verify_checksums(path: &Path, method: Hash, cancel: &AtomicBool) -> io::Result<String> {
+    verify_checksums_observed(path, method, cancel, &|_| {})
+}
+
+pub fn verify_checksums_observed(
+    path: &Path,
+    method: Hash,
+    cancel: &AtomicBool,
+    observer: crate::io_progress::Observer<'_>,
+) -> io::Result<String> {
+    let meta = files::regular_metadata(path)?;
+    if !meta.is_file() || meta.len() > 32 * 1024 * 1024 {
+        return Err(io::Error::other(
+            "Die Prüfsummendatei darf höchstens 32 MiB groß sein.",
+        ));
+    }
     let base = fs::canonicalize(
         path.parent()
             .ok_or_else(|| io::Error::other("manifest has no parent"))?,
     )?;
     let mut output = String::new();
-    for line in BufReader::new(File::open(path)?).lines() {
+    for line in BufReader::new(File::open(path)?.take(meta.len() + 1)).lines() {
         files::check_cancel(cancel)?;
         let line = line?;
         let line = line.trim_start_matches('\u{feff}');
@@ -794,6 +867,11 @@ pub fn verify_checksums(path: &Path, method: Hash, cancel: &AtomicBool) -> io::R
             writeln!(output, "Ungültige Zeile: {line}").unwrap();
             continue;
         };
+        if !method.matches_text(expected.trim()) {
+            writeln!(output, "Ungültige Zeile: {line}").unwrap();
+            continue;
+        }
+        let expected = expected.trim();
         let relative = Path::new(name);
         let target = (|| {
             if relative
@@ -806,17 +884,23 @@ pub fn verify_checksums(path: &Path, method: Hash, cancel: &AtomicBool) -> io::R
             if !target.starts_with(&base) {
                 return Err(io::Error::other("path is outside the manifest directory"));
             }
-            checksum(&target, method, cancel)
+            checksum_file_observed(File::open(&target)?, method, cancel, &|event| {
+                observer(crate::io_progress::Progress {
+                    source: &target,
+                    ..event
+                });
+            })
         })();
         match target {
             Ok(actual) if expected.eq_ignore_ascii_case(&actual) => {
                 writeln!(output, "OK       {name}").unwrap()
             }
-            Ok(_) => writeln!(output, "ABWEICHUNG {name}").unwrap(),
+            Ok(actual) => writeln!(output, "ABWEICHUNG {name} · {expected} ≠ {actual}").unwrap(),
             Err(error) if error.kind() == io::ErrorKind::Interrupted => return Err(error),
             Err(error) => writeln!(output, "FEHLER   {name}: {error}").unwrap(),
         }
     }
+    files::ensure_unchanged(path, &meta)?;
     Ok(output)
 }
 
@@ -914,6 +998,16 @@ pub fn split(
     part_size: u64,
     cancel: &AtomicBool,
 ) -> io::Result<Vec<PathBuf>> {
+    split_observed(path, target, part_size, cancel, &|_| {})
+}
+
+pub fn split_observed(
+    path: &Path,
+    target: &Path,
+    part_size: u64,
+    cancel: &AtomicBool,
+    observer: crate::io_progress::Observer<'_>,
+) -> io::Result<Vec<PathBuf>> {
     if part_size == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -923,8 +1017,11 @@ pub fn split(
     let name = path
         .file_name()
         .ok_or_else(|| io::Error::other("file name is missing"))?;
-    let mut input = File::open(path)?;
-    let mut remaining = input.metadata()?.len();
+    let metadata = files::regular_metadata(path)?;
+    let mut input = crate::io_progress::ObservedFile::open(path, cancel, observer)?;
+    let mut remaining = metadata.len();
+    let working = tempfile::tempdir_in(target)?;
+    let mut staged = Vec::new();
     let part_count = remaining.div_ceil(part_size).max(1);
     if part_count > 100_000 {
         return Err(io::Error::other("too many parts"));
@@ -935,21 +1032,36 @@ pub fn split(
         let mut name = name.to_os_string();
         name.push(format!(".{part:03}"));
         let path = target.join(name);
-        let mut temp = NamedTempFile::new_in(target)?;
+        let mut temp = NamedTempFile::new_in(working.path())?;
         let length = remaining.min(part_size);
         let actual = copy_cancelled((&mut input).take(length), &mut temp, cancel)?;
         if actual != length {
             return Err(io::Error::other("source size changed"));
         }
         temp.as_file().sync_all()?;
-        temp.persist_noclobber(&path).map_err(|error| error.error)?;
+        staged.push((
+            temp.into_temp_path().keep().map_err(|error| error.error)?,
+            path.clone(),
+        ));
         remaining -= actual;
         paths.push(path);
     }
+    files::ensure_unchanged(path, &metadata)?;
+    crate::io_progress::phase(path, crate::io_progress::Phase::Publishing, observer);
+    publish_parts(staged, cancel)?;
     Ok(paths)
 }
 
 pub fn join(parts: &[PathBuf], target: &Path, cancel: &AtomicBool) -> io::Result<()> {
+    join_observed(parts, target, cancel, &|_| {})
+}
+
+pub fn join_observed(
+    parts: &[PathBuf],
+    target: &Path,
+    cancel: &AtomicBool,
+    observer: crate::io_progress::Observer<'_>,
+) -> io::Result<()> {
     if parts.is_empty() {
         return Err(io::Error::other("no parts selected"));
     }
@@ -958,9 +1070,19 @@ pub fn join(parts: &[PathBuf], target: &Path, cancel: &AtomicBool) -> io::Result
         .ok_or_else(|| io::Error::other("missing target directory"))?;
     let mut temp = NamedTempFile::new_in(parent)?;
     for path in parts {
-        copy_cancelled(File::open(path)?, &mut temp, cancel)?;
+        let metadata = files::regular_metadata(path)?;
+        let count = copy_cancelled(
+            crate::io_progress::ObservedFile::open(path, cancel, observer)?,
+            &mut temp,
+            cancel,
+        )?;
+        files::ensure_unchanged(path, &metadata)?;
+        if count != metadata.len() {
+            return Err(io::Error::other("Die Dateiteilgröße hat sich geändert."));
+        }
     }
     temp.as_file().sync_all()?;
+    crate::io_progress::phase(target, crate::io_progress::Phase::Publishing, observer);
     files::check_cancel(cancel)?;
     temp.persist_noclobber(target)
         .map_err(|error| error.error)?;
@@ -1074,6 +1196,68 @@ mod tests {
         assert_eq!(back.differences, first.differences);
         fs::write(&paths[0], b"changed").unwrap();
         assert!(comparison.page(0, false, &cancel).is_err());
+    }
+
+    #[test]
+    fn binary_progress_tracks_inspected_ranges_and_observes_cancellation() {
+        use super::*;
+        use std::sync::atomic::Ordering;
+        let fixture = tempfile::tempdir().unwrap();
+        let paths = [fixture.path().join("left"), fixture.path().join("right")];
+        for path in &paths {
+            fs::write(path, vec![0; 512 * 1024]).unwrap();
+        }
+        let session = BinaryComparison::open(paths.clone()).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut samples = Vec::new();
+        let page = session
+            .page_observed(0, false, &cancel, |sample| samples.push(sample))
+            .unwrap();
+        assert!(page.differences.is_empty());
+        assert_eq!(samples.first().unwrap().completed, 0);
+        assert_eq!(samples.last().unwrap().completed, 512 * 1024);
+        assert!(
+            samples
+                .windows(2)
+                .all(|pair| pair[0].completed < pair[1].completed)
+        );
+        assert!(samples.iter().all(|sample| sample.total == 512 * 1024));
+        let cancelled = session.page_observed(0, false, &cancel, |sample| {
+            if sample.completed > 0 {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        });
+        assert_eq!(cancelled.err().unwrap().kind(), io::ErrorKind::Interrupted);
+        cancel.store(false, Ordering::Relaxed);
+        fs::write(&paths[1], vec![1; 512 * 1024]).unwrap();
+        let session = BinaryComparison::open(paths).unwrap();
+        samples.clear();
+        let page = session
+            .page_observed(0, false, &cancel, |sample| samples.push(sample))
+            .unwrap();
+        assert_eq!(page.differences.len(), 128);
+        assert!(page.has_next);
+        assert_eq!(samples.last().unwrap().completed, 129);
+        assert!(samples.last().unwrap().completed < samples.last().unwrap().total);
+    }
+
+    #[test]
+    fn binary_comparison_can_cancel_even_an_empty_range() {
+        use super::*;
+        let fixture = tempfile::tempdir().unwrap();
+        let paths = [fixture.path().join("left"), fixture.path().join("right")];
+        for path in &paths {
+            fs::write(path, b"").unwrap();
+        }
+        let session = BinaryComparison::open(paths).unwrap();
+        assert_eq!(
+            session
+                .page(0, false, &AtomicBool::new(true))
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::Interrupted
+        );
     }
 
     #[test]

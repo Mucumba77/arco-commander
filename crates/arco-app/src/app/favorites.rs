@@ -6,12 +6,14 @@ use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[derive(Clone)]
 pub(crate) enum Choice {
     Open(DirectoryFavorite),
     Group(Vec<String>),
     Edit,
 }
 
+#[derive(Clone)]
 pub(crate) enum Setup {
     Browse(Vec<Choice>),
     Manage(Vec<DirectoryFavorite>),
@@ -97,7 +99,7 @@ impl App {
         );
     }
 
-    fn manage_favorites(&mut self) {
+    pub(super) fn manage_favorites(&mut self) {
         let entries = self.favorites();
         let labels: Vec<_> = std::iter::once("Neuer Favorit".into())
             .chain(entries.iter().map(|entry| {
@@ -121,7 +123,7 @@ impl App {
         );
     }
 
-    fn edit_favorite(&mut self, entries: Vec<DirectoryFavorite>, index: Option<usize>) {
+    pub(super) fn edit_favorite(&mut self, entries: Vec<DirectoryFavorite>, index: Option<usize>) {
         let value = if let Some(entry) = index.and_then(|index| entries.get(index)) {
             format!(
                 "{}\n{}\n{}\n{}",

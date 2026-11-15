@@ -16,9 +16,22 @@ pub(crate) enum Setup {
     ExternalNames(NameList, tempfile::TempDir),
 }
 
+#[derive(Clone)]
 pub(crate) struct NameList {
     paths: Vec<PathBuf>,
     metadata: Vec<fs::Metadata>,
+}
+
+impl Setup {
+    pub(super) fn retry_clone(&self) -> Option<Self> {
+        Some(match self {
+            Self::Choose(names) => Self::Choose(names.clone()),
+            Self::Manage(name) => Self::Manage(name.clone()),
+            Self::Template(name) => Self::Template(name.clone()),
+            Self::Names(list) => Self::Names(list.clone()),
+            Self::ExternalNames(..) => return None,
+        })
+    }
 }
 
 impl NameList {

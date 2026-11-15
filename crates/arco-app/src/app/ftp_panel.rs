@@ -1,7 +1,7 @@
 use super::ftp_sync::{modified, scan};
 use super::{App, FtpEndpoint, LoadedDirectory, Navigation, Outcome, StagedPreview};
 use crate::panel::{FtpLocation, FtpTab, Location};
-use crate::{display_path, human_size, preview};
+use crate::{display_path, preview};
 use arco_core::archive_view::MAX_PREVIEW;
 use arco_core::files::{self, Directory, Kind, TransferReport};
 use arco_core::profile::TabLock;
@@ -205,26 +205,32 @@ impl App {
         let Some(ftp) = &tab.ftp else {
             return;
         };
-        let description = tab
-            .display_row(tab.cursor)
-            .and_then(|entry| ftp.entry(&entry.path))
-            .map_or_else(
-                || ftp.location.directory.to_string(),
-                |entry| {
-                    format!(
-                        "{}{}\n{}\n{}",
-                        ftp.location.directory,
-                        entry.name,
-                        entry.size.map(human_size).unwrap_or_default(),
-                        entry
-                            .modified
-                            .as_deref()
-                            .map(|time| format!("MLSD UTC {time}"))
-                            .unwrap_or_default()
-                    )
-                },
+        let entries = tab
+            .selected_paths()
+            .iter()
+            .filter_map(|path| ftp.entry(path).cloned())
+            .collect::<Vec<_>>();
+        let entry = tab.display_row(tab.cursor);
+        let path = entry
+            .map(|entry| format!("{}{}", ftp.location.directory, entry.name.to_string_lossy()))
+            .unwrap_or_else(|| ftp.location.directory.to_string());
+        let mut sheet = super::properties::Sheet::virtual_entry("FTP-Eigenschaften", path, entry);
+        sheet.field("Verzeichnisformat", format!("{:?}", ftp.listing.format));
+        sheet.field("Unix-Rechte", crate::locale::tr("Nicht ermittelt").into());
+        if let Some(remote) = entry.and_then(|entry| ftp.entry(&entry.path)) {
+            sheet.field(
+                "Server-Zeitstempel (UTC)",
+                remote
+                    .modified
+                    .clone()
+                    .unwrap_or_else(|| crate::locale::tr("Nicht verfügbar").into()),
             );
-        self.text("FTP-Eigenschaften", &description);
+        }
+        if ftp.listing.format == ftp::ListFormat::Mlsd && !entries.is_empty() {
+            sheet.field("Ausgewählte Einträge", entries.len().to_string());
+            sheet.ftp = Some((ftp.location.clone(), entries));
+        }
+        self.show_properties(sheet);
     }
 
     pub(crate) fn disconnect_ftp(&mut self) {
@@ -299,18 +305,9 @@ impl App {
     ) -> io::Result<()> {
         match edit {
             FtpEdit::Permissions(entries) => {
-                let mode = name.trim();
-                if !matches!(mode.len(), 3 | 4)
-                    || !mode.bytes().all(|byte| (b'0'..=b'7').contains(&byte))
-                {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Gib drei oder vier Oktalziffern ein, zum Beispiel 644.",
-                    ));
-                }
-                let permissions = u16::from_str_radix(mode, 8).map_err(io::Error::other)?;
+                let permissions = super::metadata_edit::parse_mode(name)?;
                 let description = super::JobDescription::new(
-                    crate::OperationKind::Ftp,
+                    crate::OperationKind::Metadata,
                     location.directory.to_string(),
                     String::new(),
                 );
@@ -337,8 +334,14 @@ impl App {
                             }
                             Err(error) => report.errors.push(format!("{}: {error}", entry.name)),
                         }
+                        job.entry_progress(
+                            entry.name.clone(),
+                            index + 1,
+                            total,
+                            "FTP-Dateirechte setzen …",
+                        );
                     }
-                    Ok(Outcome::Report("FTP-Dateirechte".into(), report))
+                    Ok(Outcome::MetadataEdited("FTP-Dateirechte", report))
                 });
             }
             FtpEdit::Delete(entries) => {

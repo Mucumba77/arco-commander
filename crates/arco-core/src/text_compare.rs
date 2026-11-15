@@ -129,23 +129,54 @@ pub struct Session {
     pub options: Options,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Stage {
+    ReadLeft,
+    ReadRight,
+    Prepare,
+    Compare,
+    Complete,
+}
+
+pub struct DocumentInfo {
+    pub bytes: u64,
+    pub lines: usize,
+    pub encoding: &'static str,
+}
+
 impl Session {
     pub fn load(paths: [&Path; 2], options: Options, cancel: &AtomicBool) -> io::Result<Self> {
-        let documents = [
-            Document::load(paths[0], cancel)?,
-            Document::load(paths[1], cancel)?,
-        ];
+        Self::load_observed(paths, options, cancel, |_| {})
+    }
+
+    pub fn load_observed(
+        paths: [&Path; 2],
+        options: Options,
+        cancel: &AtomicBool,
+        mut progress: impl FnMut(Stage),
+    ) -> io::Result<Self> {
+        progress(Stage::ReadLeft);
         files::check_cancel(cancel)?;
-        let normalized = documents.each_ref().map(|document| {
-            document
-                .text
-                .split_inclusive('\n')
-                .map(|line| normalize(line, options))
-                .collect::<Vec<_>>()
-        });
+        let left = Document::load(paths[0], cancel)?;
+        progress(Stage::ReadRight);
+        files::check_cancel(cancel)?;
+        let documents = [left, Document::load(paths[1], cancel)?];
+        progress(Stage::Prepare);
+        files::check_cancel(cancel)?;
+        let mut normalized = [Vec::new(), Vec::new()];
+        for (document, lines) in documents.iter().zip(&mut normalized) {
+            for (index, line) in document.text.split_inclusive('\n').enumerate() {
+                if index % 256 == 0 {
+                    files::check_cancel(cancel)?;
+                }
+                lines.push(normalize(line, options));
+            }
+        }
         let lines = normalized
             .each_ref()
             .map(|lines| lines.iter().map(String::as_str).collect::<Vec<_>>());
+        progress(Stage::Compare);
+        files::check_cancel(cancel)?;
         let diff = TextDiff::configure()
             .timeout(Duration::from_secs(2))
             .diff_slices(&lines[0], &lines[1]);
@@ -156,6 +187,7 @@ impl Session {
             .map(|op| [op.old_range(), op.new_range()])
             .collect();
         files::check_cancel(cancel)?;
+        progress(Stage::Complete);
         Ok(Self {
             documents,
             changes,
@@ -167,6 +199,15 @@ impl Session {
         self.documents
             .each_ref()
             .map(|document| document.path.as_path())
+    }
+
+    pub fn document_info(&self, side: usize) -> DocumentInfo {
+        let document = &self.documents[side];
+        DocumentInfo {
+            bytes: document.metadata.len(),
+            lines: document.offsets.len().saturating_sub(1),
+            encoding: document.encoding.name(),
+        }
     }
 
     pub fn change_text(&self, change: usize, side: usize) -> Option<&str> {
@@ -281,6 +322,62 @@ fn normalize(line: &str, options: Options) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observed_comparison_reports_stages_and_cancels_before_reading_the_next_file() {
+        use std::sync::atomic::Ordering;
+        let fixture = tempfile::tempdir().unwrap();
+        let left = fixture.path().join("left.txt");
+        let right = fixture.path().join("right.txt");
+        fs::write(&left, "links\ngleich\n").unwrap();
+        let cancel = AtomicBool::new(false);
+        let result =
+            Session::load_observed([&left, &right], Options::default(), &cancel, |stage| {
+                if stage == Stage::ReadRight {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            });
+        assert_eq!(result.err().unwrap().kind(), io::ErrorKind::Interrupted);
+        fs::write(&right, "rechts\ngleich\n").unwrap();
+        cancel.store(false, Ordering::Relaxed);
+        let mut stages = Vec::new();
+        let session =
+            Session::load_observed([&left, &right], Options::default(), &cancel, |stage| {
+                stages.push(stage)
+            })
+            .unwrap();
+        assert_eq!(
+            stages,
+            [
+                Stage::ReadLeft,
+                Stage::ReadRight,
+                Stage::Prepare,
+                Stage::Compare,
+                Stage::Complete
+            ]
+        );
+        assert_eq!(session.changes.len(), 1);
+        assert_eq!(session.document_info(0).lines, 2);
+        assert_eq!(session.document_info(0).bytes, 13);
+        assert_eq!(session.document_info(0).encoding, "UTF-8");
+    }
+
+    #[test]
+    fn cancellation_before_publication_preserves_both_originals() {
+        let fixture = tempfile::tempdir().unwrap();
+        let left = fixture.path().join("left.txt");
+        let right = fixture.path().join("right.txt");
+        fs::write(&left, "links\n").unwrap();
+        fs::write(&right, "rechts\n").unwrap();
+        let session =
+            Session::load([&left, &right], Options::default(), &AtomicBool::new(false)).unwrap();
+        let result = session.save_change(0, 0, None, &AtomicBool::new(true), |_, _, _| {
+            panic!("cancelled writes must not be published")
+        });
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted);
+        assert_eq!(fs::read_to_string(left).unwrap(), "links\n");
+        assert_eq!(fs::read_to_string(right).unwrap(), "rechts\n");
+    }
 
     #[test]
     fn merges_one_change_and_preserves_target_utf16_and_newlines() {

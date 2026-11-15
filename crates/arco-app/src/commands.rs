@@ -15,7 +15,7 @@ use arco_core::plugin::{self, Interface};
 use arco_core::profile::{self, TabView, TcImport};
 use arco_core::sync::MarkRule;
 use arco_core::tools::{Hash, Preview, PreviewMode};
-use arco_core::{rename, tc_split, tools, transport_encoding};
+use arco_core::{rename, tools};
 use arco_windows::ftp;
 use regex::Regex;
 use std::fmt::Write as _;
@@ -47,11 +47,11 @@ pub enum Pending {
     SelectionFile(PathBuf, Option<Vec<PathBuf>>),
     DuplicateSearch(PathBuf),
     DuplicateFields(PathBuf),
-    HashClipboard(PathBuf, String, Vec<Hash>),
     AdvancedSearch(crate::app::AdvancedSearchSetup),
     SearchReview(Box<crate::app::AdvancedSearchReview>),
     EditComment(PathBuf, Option<String>),
     EditMetadata(Vec<PathBuf>),
+    Properties(Box<crate::app::properties::Sheet>),
     PrintDirectory(PathBuf, Vec<PathBuf>),
     PrintText(String, String),
     TransferManager,
@@ -123,14 +123,7 @@ pub enum Pending {
     SyncSetup(SyncSetup),
     SyncProfilePicker(Vec<String>),
     SyncReview(Box<SyncReview>),
-    Hash(Vec<PathBuf>, PathBuf, bool),
-    Split(PathBuf, PathBuf),
-    Join(Vec<PathBuf>, PathBuf, Option<tc_split::Manifest>),
-    TransportEncoding {
-        paths: Vec<PathBuf>,
-        directory: PathBuf,
-        decode: bool,
-    },
+    Utility(Box<crate::app::utilities::Setup>),
     ZipPack(Vec<PathBuf>, PathBuf, PathBuf),
     PackerProfiles(Vec<String>),
     PackerProfileAction(String),
@@ -235,7 +228,7 @@ pub(crate) struct Dialog<'a> {
     pub(crate) second_secret: bool,
 }
 
-const HASHES: &[&str] = &[
+pub(crate) const HASHES: &[&str] = &[
     "SHA256", "BLAKE3", "CRC32", "MD5", "SHA1", "SHA224", "SHA384", "SHA512", "SHA3_224",
     "SHA3_256", "SHA3_384", "SHA3_512",
 ];
@@ -464,6 +457,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("Als anderer Benutzer starten", "run-other-user"),
     ("Windows-Verknüpfung erstellen", "create-shortcut"),
     ("Hilfe", "help"),
+    ("Meldungen und letztes Ergebnis", "show-messages"),
     ("Systeminformationen", "system-information"),
     ("Windows-Version", "windows-version"),
     ("Über Arco Commander", "about"),
@@ -503,7 +497,7 @@ impl App {
                 }
             };
             if let Err(error) = self.set_ignore_enabled(enabled) {
-                self.text("Ignorierliste", &error.to_string());
+                self.error("Ignorierliste", &error.to_string());
             }
             return true;
         }
@@ -546,7 +540,11 @@ impl App {
             .find(|(label, _)| *label == command)
             .map_or(command, |(_, id)| *id);
         if command == "about" {
-            self.text("Über Arco Commander", crate::VERSION);
+            self.text("Über Arco Commander", &format!("Arco Commander {}\n\n{}\n\nMIT-Lizenz\nhttps://github.com/Mucumba77/arco-commander",crate::VERSION,crate::locale::tr("Dateiverwaltung mit zwei Dateifenstern für Windows.")));
+            return;
+        }
+        if command == "show-messages" {
+            self.show_messages();
             return;
         }
         let settings_page = match command {
@@ -1015,16 +1013,12 @@ impl App {
             "properties" if ftp => self.ftp_panel_properties(),
             "properties" if self.current().archive.is_some() => {
                 let tab = self.current();
-                let description = tab.display_row(tab.cursor).map(|entry| {
-                    format!("{}\n{}", display_path(&entry.path), entry.size.map(human_size).unwrap_or_else(|| "Ordner".into()))
-                }).unwrap_or_else(|| tab.location().display());
-                self.text("Archiv-Eigenschaften", &description);
+                let entry = tab.display_row(tab.cursor);
+                let path = entry.map(|entry| format!("{} / {}", tab.location().display(), entry.name.to_string_lossy())).unwrap_or_else(|| tab.location().display());
+                let sheet = crate::app::properties::Sheet::virtual_entry("Archiv-Eigenschaften", path, entry);
+                self.show_properties(sheet);
             }
-            "properties" => {
-                let tab = self.current();
-                if tab.parent_row(tab.cursor) { self.report(arco_windows::properties(&tab.path)); }
-                else if let Some(entry) = tab.current() { self.report(arco_windows::properties(&entry.path)); }
-            }
+            "properties" => self.open_local_properties(),
             "explorer" => self.report(arco_windows::open(&self.current().path)),
             "terminal" => self.report(arco_windows::terminal(&self.current().path)),
             "copy-result" => self.report(arco_windows::copy_text(self.ui().get_dialog_value().as_str())),
@@ -1075,7 +1069,7 @@ impl App {
             "ignore-edit" => self.edit_ignore_list(),
             "ignore-import" => self.import_ignore_list(),
             "ignore-toggle" => {
-                if let Err(error) = self.toggle_ignore_list() { self.text("Ignorierliste", &error.to_string()); }
+                if let Err(error) = self.toggle_ignore_list() { self.error("Ignorierliste", &error.to_string()); }
             }
             "branch" | "branch-selected" => {
                 let path = self.current().path.clone();
@@ -1130,32 +1124,8 @@ impl App {
                     ..Default::default()
                 });
             }
-            "split" => self.with_file(|app, path| app.dialog("input", Pending::Split(path, app.target().to_path_buf()), Dialog {
-                title: "Datei teilen", description: "Im Total-Commander-Modus entsteht zusätzlich eine CRC-Begleitdatei mit Originalname und Prüfsumme.",
-                confirm_label: "Teilen",
-                value: "64", placeholder: "Teilgröße in MiB", options: &["Total Commander (.crc)", "Nur Dateiteile"], ..Default::default()
-            })),
-            "join" => {
-                let paths = self.current().paths();
-                if paths.is_empty() { self.status("Wähle die zu verbindenden Dateien."); }
-                else {
-                    match tc_split::selected_manifest(&paths) {
-                        Err(error) => self.status(error.to_string()),
-                        Ok(manifest) => {
-                            let name = manifest.as_ref().map(|file| file.name.clone()).unwrap_or_default();
-                            let description = if manifest.is_some() {
-                                "Verbindet den vollständigen Satz und prüft Größe und CRC32 vor dem Speichern."
-                            } else {
-                                "Verbindet die ausgewählten Dateien in lexikografischer Reihenfolge. Ausgabe im anderen Fenster."
-                            };
-                            self.dialog("input", Pending::Join(paths, self.target().to_path_buf(), manifest), Dialog {
-                                title: "Dateien verbinden", description, value: &name, confirm_label: "Verbinden",
-                                placeholder: "Name der Ausgabedatei", ..Default::default()
-                            });
-                        }
-                    }
-                }
-            }
+            "split" => self.with_file(|app, source| app.open_utility(crate::app::utilities::Task::Split { source, target: app.target().to_path_buf() })),
+            "join" => self.prepare_utility_join(self.current().paths(), self.target().to_path_buf()),
             "zip-open" => self.with_file(|app, path| {
                 if archive_view::is_openable(&path) { app.open_archive(path); }
                 else { app.status("Wähle ein unterstütztes Archiv."); }
@@ -1209,6 +1179,7 @@ impl App {
             "help" => self.text("Arco Commander · Tastatur", &self.keyboard_help()),
             "cancel-job" => self.cancel(),
             "rename-back" => self.restore_rename_draft(""),
+            "close-dialog" if self.job.is_some() && matches!(self.ui().get_dialog_kind().as_str(), "metadata" | "permissions" | "utility") => self.cancel(),
             "close-dialog" => {
                 if matches!(self.pending, Some(Pending::Rename(..) | Pending::ApplyRename(_))) {
                     self.rename_draft = None;
@@ -1251,11 +1222,17 @@ impl App {
     }
 
     pub(crate) fn dialog(&mut self, kind: &str, pending: Pending, data: Dialog<'_>) {
+        let kind = self
+            .present_configuration(&pending, &data)
+            .or_else(|| self.present_navigation(&pending, &data))
+            .or_else(|| self.present_auxiliary(kind, &pending, &data))
+            .unwrap_or(kind);
         self.pending = Some(pending);
         let ui = self.ui();
         ui.set_dialog_transfer_filters(Default::default());
         ui.set_dialog_transfer_filter(0);
         ui.set_dialog_title(crate::locale::tr(data.title).into());
+        ui.set_dialog_notice("".into());
         ui.set_dialog_description(crate::locale::tr(data.description).into());
         ui.set_dialog_content_lines(content_lines(data.value));
         ui.set_dialog_value(data.value.into());
@@ -1305,11 +1282,54 @@ impl App {
         ui.set_viewer_notice("".into());
         ui.set_file_conflict(Default::default());
         ui.set_diff_data(Default::default());
+        ui.set_diff_notice("".into());
+        ui.set_properties_data(Default::default());
+        ui.set_mutation_data(Default::default());
+        ui.set_utility_state(Default::default());
+        ui.set_utility_data(Default::default());
+        ui.set_navigation_data(Default::default());
+        ui.set_navigation_rows(Default::default());
+        ui.set_navigation_notice("".into());
+        self.navigation_rows.clear();
+        ui.set_configuration_data(Default::default());
+        ui.set_message_data(Default::default());
+        ui.set_message_feedback("".into());
+        ui.set_text_draft_data(Default::default());
+        ui.set_dialog_notice("".into());
+        self.configuration_draft = None;
         ui.set_sync_rows(Default::default());
         ui.invoke_focus_panels();
     }
 
     pub fn submit(&mut self, value: &str, second: &str, option: i32) {
+        if matches!(
+            self.ui().get_dialog_kind().as_str(),
+            "input" | "confirm" | "text-draft" | "message"
+        ) && let Some(retry) = self.clone_retry_pending()
+        {
+            let ui = self.ui();
+            let revision = ui.get_dialog_revision();
+            let filter = ui.get_dialog_transfer_filter().max(0) as usize;
+            let target = ui.get_dialog_operation_target();
+            match self.execute(
+                retry,
+                value,
+                second,
+                option.max(0) as usize,
+                filter,
+                &target,
+            ) {
+                Ok(()) if self.ui().get_dialog_revision() == revision => self.close_dialog(),
+                Err(error) => {
+                    let notice = crate::locale::tr(&error.to_string()).to_owned();
+                    self.ui().set_dialog_notice(notice.as_str().into());
+                    self.ui().set_message_feedback(notice.into());
+                }
+                _ => (),
+            }
+            self.publish(self.active);
+            return;
+        }
         let Some(pending) = self.pending.take() else {
             return;
         };
@@ -1324,12 +1344,12 @@ impl App {
             filter,
             &target_folder,
         ) {
-            self.text("Aktion konnte nicht ausgeführt werden", &error.to_string());
+            self.error("Aktion konnte nicht ausgeführt werden", &error.to_string());
         }
         self.publish(self.active);
     }
 
-    fn execute(
+    pub(crate) fn execute(
         &mut self,
         pending: Pending,
         value: &str,
@@ -1391,31 +1411,12 @@ impl App {
                 self.write_comment(path, previous, value.to_owned())
             }
             Pending::EditMetadata(paths) => self.apply_metadata_edit(paths, value)?,
+            Pending::Properties(_) => (),
             Pending::AdvancedSearch(_) => (),
             Pending::SearchReview(review) => self.use_search_results(*review, option),
             Pending::QuickFind => self.quick_find(value, option)?,
             Pending::SelectionFile(root, paths) => self.selection_file(root, paths, value)?,
-            Pending::HashClipboard(path, expected, methods) => {
-                let method = methods
-                    .get(option)
-                    .copied()
-                    .ok_or_else(|| io::Error::other("Wähle ein Prüfsummenverfahren."))?;
-                self.start_job("Prüfe Datei …", false, move |job| {
-                    let actual = tools::checksum(&path, method, &job.cancel)?;
-                    let title = if expected.eq_ignore_ascii_case(&actual) {
-                        "Prüfsumme stimmt"
-                    } else {
-                        "Prüfsumme weicht ab"
-                    };
-                    Ok(Outcome::Text(
-                        title.into(),
-                        format!(
-                            "{}\nErwartet  {expected}\nBerechnet {actual}",
-                            display_path(&path)
-                        ),
-                    ))
-                });
-            }
+            Pending::Utility(_) => (),
             Pending::DuplicateSearch(path) => {
                 use tools::DuplicateMode::*;
                 let Some(&mode) = [Content, Name, Size, NameAndSize, NameAndContent].get(option)
@@ -1799,175 +1800,6 @@ impl App {
                 if let Some(profile) = profiles.get(option) {
                     self.open_sync_profile(profile)?;
                 }
-            }
-            Pending::Hash(paths, base, verify) => {
-                let method = HASHES
-                    .get(option)
-                    .and_then(|name| Hash::parse(name))
-                    .ok_or_else(|| io::Error::other("unknown hash algorithm"))?;
-                let output = if verify || value.is_empty() {
-                    None
-                } else {
-                    Some(base.join(tools::output_name(value)?))
-                };
-                self.start_job("Berechne Prüfsummen …", output.is_some(), move |job| {
-                    let body = if verify {
-                        tools::verify_checksums(&paths[0], method, &job.cancel)?
-                    } else {
-                        tools::checksum_list(&paths, &base, method, &job.cancel)?
-                    };
-                    if let Some(path) = output {
-                        use std::io::Write;
-                        OpenOptions::new()
-                            .write(true)
-                            .create_new(true)
-                            .open(&path)?
-                            .write_all(body.as_bytes())?;
-                    }
-                    Ok(Outcome::Text("Prüfsummen".into(), body))
-                });
-            }
-            Pending::TransportEncoding {
-                paths,
-                directory,
-                decode,
-            } => {
-                use transport_encoding::Format;
-                let title = if decode {
-                    "Dateien dekodieren"
-                } else {
-                    "Dateien kodieren"
-                };
-                let selected = match (decode, option) {
-                    (true, 0) => None,
-                    (true, 2) | (false, 1) => Some(Format::Xxe),
-                    (true, 3) | (false, 2) => Some(Format::Mime),
-                    (true, 4) => Some(Format::BinHex),
-                    _ => Some(Format::Uue),
-                };
-                self.start_job(title, true, move |job| {
-                    let mut report = TransferReport::default();
-                    let mut mime = Vec::new();
-                    let mut armored = Vec::new();
-                    for path in paths {
-                        if job.cancel.load(Ordering::Relaxed) {
-                            report.cancelled = true;
-                            break;
-                        }
-                        job.progress(format!("{title} · {}", display_path(&path)));
-                        let format = selected.or_else(|| Format::from_path(&path));
-                        if decode && let Some(format @ (Format::Uue | Format::Xxe)) = format {
-                            armored.push((path, format));
-                            continue;
-                        }
-                        if decode && matches!(format, Some(Format::Mime)) {
-                            mime.push(path);
-                            continue;
-                        }
-                        let result = format
-                            .ok_or_else(|| {
-                                io::Error::other("Wähle die Kodierung für diese Dateiendung.")
-                            })
-                            .and_then(|format| {
-                                if decode {
-                                    transport_encoding::decode(
-                                        &path,
-                                        &directory,
-                                        format,
-                                        &job.cancel,
-                                    )
-                                    .map(|_| ())
-                                } else {
-                                    transport_encoding::encode(
-                                        &path,
-                                        &directory,
-                                        format,
-                                        &job.cancel,
-                                    )
-                                    .map(|_| ())
-                                }
-                            });
-                        match result {
-                            Ok(_) => report.completed += 1,
-                            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
-                                report.cancelled = true;
-                                break;
-                            }
-                            Err(error) => report
-                                .errors
-                                .push(format!("{}: {error}", display_path(&path))),
-                        }
-                    }
-                    if !report.cancelled && !armored.is_empty() {
-                        job.progress(format!("{title} · UUE- und XXE-Teildateien"));
-                        for (source, result) in transport_encoding::decode_armored_batch(
-                            &armored,
-                            &directory,
-                            &job.cancel,
-                        ) {
-                            match result {
-                                Ok(()) => report.completed += 1,
-                                Err(error) if error.kind() == io::ErrorKind::Interrupted => {
-                                    report.cancelled = true;
-                                    break;
-                                }
-                                Err(error) => report
-                                    .errors
-                                    .push(format!("{}: {error}", display_path(&source))),
-                            }
-                        }
-                    }
-                    if !report.cancelled && !mime.is_empty() {
-                        job.progress(format!("{title} · MIME-Nachrichten und Nachrichtenteile"));
-                        for (source, result) in
-                            transport_encoding::decode_mime_batch(&mime, &directory, &job.cancel)
-                        {
-                            match result {
-                                Ok(_) => report.completed += 1,
-                                Err(error) if error.kind() == io::ErrorKind::Interrupted => {
-                                    report.cancelled = true;
-                                    break;
-                                }
-                                Err(error) => report
-                                    .errors
-                                    .push(format!("{}: {error}", display_path(&source))),
-                            }
-                        }
-                    }
-                    Ok(Outcome::Report(title.into(), report))
-                });
-            }
-            Pending::Split(path, target) => {
-                let bytes = value
-                    .trim()
-                    .parse::<u64>()
-                    .ok()
-                    .and_then(|mib| mib.checked_mul(1024 * 1024))
-                    .filter(|value| *value > 0)
-                    .ok_or_else(|| io::Error::other("Teilgröße muss eine positive Zahl sein"))?;
-                self.start_job("Teile Datei …", true, move |job| {
-                    let parts = if option == 0 {
-                        tc_split::split(&path, &target, bytes, &job.cancel)?
-                    } else {
-                        tools::split(&path, &target, bytes, &job.cancel)?.len()
-                    };
-                    Ok(Outcome::Notice(format!("{parts} Teile geschrieben.")))
-                });
-            }
-            Pending::Join(mut parts, target, manifest) => {
-                let target = target.join(tools::output_name(value)?);
-                parts.sort();
-                self.start_job("Verbinde Dateien …", true, move |job| {
-                    if let Some(manifest) = manifest {
-                        manifest.join(&target, &job.cancel)?;
-                    } else {
-                        tools::join(&parts, &target, &job.cancel)?;
-                    }
-                    Ok(Outcome::Notice(format!(
-                        "Erstellt: {}",
-                        display_path(&target)
-                    )))
-                });
             }
             Pending::ZipPack(paths, base, destination) => {
                 let destination = extraction_target(target_folder, &destination)?;
@@ -2595,7 +2427,7 @@ impl App {
     pub(crate) fn report(&self, result: io::Result<()>) {
         match result {
             Ok(()) => self.status("Aktion ausgeführt."),
-            Err(error) => self.status(error.to_string()),
+            Err(error) => self.error("Aktion konnte nicht ausgeführt werden", &error.to_string()),
         }
     }
 
@@ -2690,45 +2522,11 @@ impl App {
             self.status("Warte, bis beide Dateifenster geladen sind.");
             return;
         }
-        let paths = self.current().paths();
-        if paths.is_empty() {
-            self.status("Wähle die Dateien für die Textkodierung.");
-            return;
-        }
-        let directory = self.target().to_path_buf();
-        let description = format!(
-            "{} Dateien · Zielordner {}",
-            paths.len(),
-            display_path(&directory)
-        );
-        self.dialog(
-            "confirm",
-            Pending::TransportEncoding {
-                paths,
-                directory,
-                decode,
-            },
-            Dialog {
-                title: if decode {
-                    "Dateien dekodieren"
-                } else {
-                    "Dateien kodieren"
-                },
-                description: &description,
-                options: if decode {
-                    &[
-                        "Automatisch nach Dateiendung",
-                        "UUE",
-                        "XXE",
-                        "MIME",
-                        "BinHex",
-                    ]
-                } else {
-                    &["UUE", "XXE", "MIME"]
-                },
-                ..Default::default()
-            },
-        );
+        self.open_utility(crate::app::utilities::Task::Codec {
+            paths: self.current().paths(),
+            target: self.target().to_path_buf(),
+            decode,
+        });
     }
 
     fn show_transfer(
@@ -3227,23 +3025,11 @@ impl App {
                 app.status("Die Zwischenablage enthält keine unterstützte Hex-Prüfsumme.");
                 return;
             }
-            let options: Vec<_> = choices.iter().map(|(name, _)| *name).collect();
-            app.dialog(
-                "confirm",
-                Pending::HashClipboard(
-                    path.clone(),
-                    expected.to_owned(),
-                    choices.iter().map(|(_, method)| *method).collect(),
-                ),
-                Dialog {
-                    title: "Prüfsumme aus Zwischenablage prüfen",
-                    description: &display_path(&path),
-                    options: &options,
-                    options_label: "Algorithmus",
-                    confirm_label: "Prüfen",
-                    ..Default::default()
-                },
-            );
+            app.open_utility(crate::app::utilities::Task::Expected {
+                path: path.clone(),
+                expected: expected.to_owned(),
+                methods: choices.iter().map(|(_, method)| *method).collect(),
+            });
         });
     }
 
@@ -3257,15 +3043,10 @@ impl App {
         } else {
             self.current().paths()
         };
-        if paths.is_empty() {
-            self.status("Wähle Dateien.");
-            return;
-        }
-        self.dialog(if verify { "confirm" } else { "input" }, Pending::Hash(paths, self.current().path.clone(), verify), Dialog {
-            title: if verify { "Prüfsummendatei prüfen" } else { "Prüfsummen erzeugen" },
-            description: if verify { "Wähle den Algorithmus der Datei." } else { "Optionaler Dateiname für die Ausgabe. Ohne Namen erscheint das Ergebnis nur in der Vorschau." },
-            placeholder: "Ausgabedatei (optional)", options: HASHES, options_label: "Algorithmus",
-            confirm_label: if verify { "Prüfen" } else { "Erzeugen" }, ..Default::default()
+        self.open_utility(crate::app::utilities::Task::Hash {
+            paths,
+            base: self.current().path.clone(),
+            verify,
         });
     }
 
@@ -3624,20 +3405,7 @@ impl App {
                 if entries.is_empty() {
                     return;
                 }
-                let description = format!(
-                    "Unix-Rechte für {} FTP-Einträge setzen. Der Server muss SITE CHMOD unterstützen.",
-                    entries.len()
-                );
-                self.dialog(
-                    "input",
-                    Pending::FtpPanelEdit(location, FtpEdit::Permissions(entries)),
-                    Dialog {
-                        title: "FTP-Unix-Rechte ändern",
-                        description: &description,
-                        placeholder: "Oktal, z. B. 644 oder 755",
-                        ..Dialog::default()
-                    },
-                );
+                self.open_ftp_permissions(location, entries);
             }
             "mkdir" => self.dialog(
                 "input",
