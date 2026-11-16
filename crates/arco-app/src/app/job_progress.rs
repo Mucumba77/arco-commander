@@ -213,7 +213,7 @@ impl Tracker {
                 .unwrap_or_default()
                 .into(),
             recovering: self.sample.recovering,
-            phase: tr(if waiting {
+            phase: crate::locale::message(if waiting {
                 "Warte auf Entscheidung"
             } else if paused {
                 if kind == OperationKind::Move {
@@ -241,6 +241,7 @@ impl Tracker {
                     OperationKind::Task => "Auftrag läuft",
                 }
             })
+            .as_ref()
             .into(),
             file_fraction: self.sample.file_fraction.unwrap_or(-1.0),
         })

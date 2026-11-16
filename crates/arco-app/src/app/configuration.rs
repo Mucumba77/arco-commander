@@ -17,7 +17,6 @@ use arco_core::{
 };
 use slint::{ModelRc, VecModel};
 use std::io;
-
 const SCOPES: [Scope; 10] = [
     Scope::Any,
     Scope::Local,
@@ -39,7 +38,6 @@ const SORTS: [(SortKey, &str); 7] = [
     (SortKey::Comment, "Kommentar"),
     (SortKey::Unsorted, "Unsortiert"),
 ];
-
 pub(crate) struct Draft {
     kind: ConfigurationKind,
     form: ConfigurationForm,
@@ -56,7 +54,6 @@ pub(crate) struct Draft {
     title: String,
     description: String,
 }
-
 fn text_row(label: impl Into<String>, detail: impl Into<String>, choice: usize) -> NavigationRow {
     NavigationRow {
         label: label.into().into(),
@@ -65,7 +62,6 @@ fn text_row(label: impl Into<String>, detail: impl Into<String>, choice: usize) 
         kind: 4,
     }
 }
-
 impl Draft {
     fn new(kind: ConfigurationKind, source: &Dialog<'_>, settings: &Settings) -> Self {
         Self {
@@ -192,6 +188,45 @@ impl Draft {
             _ => return Err(io::Error::other("Unbekannte Bearbeitungsaktion.")),
         }
         Ok(())
+    }
+    fn set_layout(&mut self, options: Option<&arco_core::view_settings::ColumnOptions>) {
+        self.form.auto_width = options
+            .and_then(|options| options.reference_width)
+            .unwrap_or(0)
+            .to_string()
+            .into();
+        self.form.name_width = options
+            .map_or(150, |options| options.name_width)
+            .to_string()
+            .into();
+        self.form.horizontal_scroll = options.is_none_or(|options| options.horizontal_scroll);
+    }
+    fn layout(&self) -> io::Result<arco_core::view_settings::ColumnOptions> {
+        let reference = self
+            .form
+            .auto_width
+            .trim()
+            .parse::<u16>()
+            .ok()
+            .filter(|width| *width <= 32767)
+            .ok_or_else(|| {
+                io::Error::other("Die Referenzbreite muss zwischen 0 und 32767 liegen.")
+            })?;
+        let name_width = self
+            .form
+            .name_width
+            .trim()
+            .parse::<u16>()
+            .ok()
+            .filter(|width| (40..=2000).contains(width))
+            .ok_or_else(|| {
+                io::Error::other("Die Namensbreite muss zwischen 40 und 2000 liegen.")
+            })?;
+        Ok(arco_core::view_settings::ColumnOptions {
+            reference_width: (reference > 0).then_some(reference),
+            name_width,
+            horizontal_scroll: self.form.horizontal_scroll,
+        })
     }
     fn set_columns(&mut self, columns: &[Column], fields: impl IntoIterator<Item = Field>) {
         for field in fields
@@ -342,7 +377,7 @@ impl Draft {
             modes: strings(self.modes.iter().cloned()),
             read_only_name: self.original_name.is_some(),
             dirty: self.dirty(),
-            notice: notice.into(),
+            notice: crate::locale::message(notice).as_ref().into(),
             revision,
         }
     }
@@ -500,7 +535,6 @@ impl Draft {
         Ok(rules)
     }
 }
-
 fn field_label(field: &Field) -> String {
     match field {
         Field::Wdx(column) => format!(
@@ -517,7 +551,12 @@ fn field_label(field: &Field) -> String {
     }
 }
 fn entry_error(i: usize, error: io::Error) -> io::Error {
-    io::Error::other(format!("{} {}: {error}", tr("Eintrag"), i + 1))
+    io::Error::other(format!(
+        "{} {}: {}",
+        tr("Eintrag"),
+        i + 1,
+        crate::locale::message(&error.to_string())
+    ))
 }
 fn one_line(value: &str) -> io::Result<()> {
     if value.chars().any(char::is_control) {
@@ -528,7 +567,6 @@ fn one_line(value: &str) -> io::Result<()> {
         Ok(())
     }
 }
-
 impl App {
     pub(crate) fn present_configuration(
         &mut self,
@@ -538,7 +576,7 @@ impl App {
         let settings = &self.profile.views;
         let mut list = NavigationData {
             title: tr(source.title).into(),
-            description: tr(source.description).into(),
+            description: crate::locale::message(source.description).as_ref().into(),
             primary: tr("Anwenden").into(),
             ..Default::default()
         };
@@ -710,6 +748,10 @@ impl App {
                     .cloned()
                     .unwrap_or_else(default_columns);
                 d.set_columns(&columns, fields.iter().cloned().map(Field::Wdx));
+                d.set_layout(
+                    name.as_ref()
+                        .and_then(|name| settings.column_options.get(name)),
+                );
                 d.description=tr("Spalten einzeln bearbeiten und sortieren. Plugin-Felder und importierte Ausdrücke bleiben vollständig erhalten.").into();
                 Some(d)
             }
@@ -722,7 +764,7 @@ impl App {
                     .into();
                 let columns = name
                     .as_ref()
-                    .and_then(|n| settings.wfx_columns.get(&plugin.path)?.sets.get(n))
+                    .and_then(|n| self.wfx_sets(&plugin.path)?.sets.get(n))
                     .cloned()
                     .unwrap_or_else(|| {
                         fields
@@ -738,6 +780,10 @@ impl App {
                             .unwrap_or_else(default_columns)
                     });
                 d.set_columns(&columns, fields.iter().cloned().map(Field::Wfx));
+                d.set_layout(
+                    name.as_ref()
+                        .and_then(|name| self.wfx_sets(&plugin.path)?.options.get(name)),
+                );
                 d.description = plugin.name.clone();
                 Some(d)
             }
@@ -753,6 +799,8 @@ impl App {
                     .and_then(|n| settings.modes.get(n))
                     .cloned()
                     .unwrap_or_default();
+                d.form.commands = mode.commands.clone().into();
+                d.form.icon = mode.icon.clone().into();
                 d.form.view = if mode.inherit_view {
                     4
                 } else {
@@ -850,16 +898,12 @@ impl App {
                     );
                 } else {
                     d.sort_keys
-                        .extend(
-                            self.active_wdx_columns(self.active)
-                                .iter()
-                                .map(|(i, f, _)| {
-                                    (
-                                        SortKey::Wdx(*i as u8),
-                                        format!("WDX · {}", f.selection.label()),
-                                    )
-                                }),
-                        );
+                        .extend(self.active_wdx_columns(self.active).iter().map(|(i, f)| {
+                            (
+                                SortKey::Wdx(*i as u8),
+                                format!("WDX · {}", f.selection.label()),
+                            )
+                        }));
                 }
                 d.set_sorts(self.current().current_sort_orders());
                 d.description=tr("Sortierfelder in Prioritätsreihenfolge anordnen. Leere Listen verwenden die Standardsortierung.").into();
@@ -900,7 +944,6 @@ impl App {
             Some("navigation-list")
         }
     }
-
     pub(crate) fn configuration_list_action(
         &mut self,
         action: i32,
@@ -1007,7 +1050,6 @@ impl App {
             other => self.execute(other, "", "", choice.unwrap_or(0), 0, ""),
         }
     }
-
     fn publish_configuration(&self, notice: &str) {
         if let Some(draft) = &self.configuration_draft {
             let revision = self.ui().get_configuration_data().revision.wrapping_add(1);
@@ -1058,14 +1100,21 @@ impl App {
                 let key = view_setup::name_line(Some(&d.form.name), name.as_deref())?;
                 let columns = d.columns()?;
                 let mut settings = self.profile.views.clone();
-                update_columns(&mut settings, name.as_deref(), key, columns)?;
+                update_columns(&mut settings, name.as_deref(), key.clone(), columns)?;
+                settings.column_options.insert(key, d.layout()?);
                 self.save_view_settings(settings)?;
                 self.choose_view(false);
             }
             Pending::ViewSetup(View::EditWfxColumns(plugin, name, _)) => {
                 let key = view_setup::name_line(Some(&d.form.name), name.as_deref())?;
                 let columns = d.columns()?;
-                self.save_wfx_column_values((*plugin).clone(), name, key, columns)?;
+                self.save_wfx_column_values(
+                    (*plugin).clone(),
+                    name,
+                    key,
+                    columns,
+                    Some(d.layout()?),
+                )?;
                 self.choose_wfx_columns(*plugin);
             }
             Pending::ViewSetup(View::EditMode(name)) => {
@@ -1144,7 +1193,6 @@ impl App {
         Ok(())
     }
 }
-
 fn default_columns() -> Vec<Column> {
     vec![
         Column {
@@ -1229,6 +1277,13 @@ fn update_columns(
 fn build_mode(d: &mut Draft, settings: &Settings, original: Option<&str>) -> io::Result<Mode> {
     let mut mode = mode_from_form(&d.form, &d.sets)?;
     mode.sort = d.sorts()?;
+    arco_core::view_settings::ViewCommands::parse(&d.form.commands)?;
+    one_line(&d.form.icon)?;
+    mode.commands = d.form.commands.to_string();
+    mode.icon = d.form.icon.to_string();
+    if let Some(previous) = original.and_then(|name| settings.modes.get(name)) {
+        mode.wfx_columns.clone_from(&previous.wfx_columns);
+    }
     mode.colors = original
         .and_then(|name| settings.modes.get(name))
         .and_then(|mode| mode.colors);
@@ -1281,17 +1336,14 @@ fn association_text(d: &Draft) -> io::Result<String> {
     associations::parse_association(&text)?;
     Ok(text)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use arco_core::plugin::{WdxColumn, WdxField, WfxField};
     use arco_core::view_settings::{ModeColors, TcColumnLayout};
-
     fn draft(kind: ConfigurationKind) -> Draft {
         Draft::new(kind, &Dialog::default(), &Settings::default())
     }
-
     #[test]
     fn typed_columns_keep_plugin_identity_expressions_and_alignment() {
         let wdx = Field::Wdx(WdxColumn {
@@ -1348,7 +1400,6 @@ mod tests {
             columns
         );
     }
-
     #[test]
     fn invalid_rows_remain_in_the_draft_and_navigate_to_the_error() {
         let columns = default_columns();
@@ -1368,7 +1419,6 @@ mod tests {
         d.change(3, 0).unwrap();
         assert!(!d.dirty());
     }
-
     #[test]
     fn column_layout_metadata_survives_cosmetic_edits_but_not_field_reordering() {
         let mut settings = Settings::default();
@@ -1401,7 +1451,6 @@ mod tests {
         assert!(settings.tc_columns.is_empty());
         assert!(update_columns(&mut settings, None, "Details".into(), columns).is_err());
     }
-
     #[test]
     fn rules_keep_mask_exclusions_and_complete_tc_boolean_expressions() {
         let mut d = draft(ConfigurationKind::Rules);
@@ -1438,7 +1487,6 @@ mod tests {
             Some(expression)
         );
     }
-
     #[test]
     fn mode_editing_keeps_imported_colors_and_rejects_incompatible_views() {
         let colors = ModeColors {
@@ -1470,7 +1518,6 @@ mod tests {
         assert!(build_mode(&mut d, &settings, Some("Fotos")).is_err());
         assert_eq!(d.form.column, 1);
     }
-
     #[test]
     fn sorting_keeps_missing_plugin_keys_and_rejects_duplicates_and_unsorted_mixes() {
         let mut d = draft(ConfigurationKind::Sort);
@@ -1495,7 +1542,6 @@ mod tests {
         ]);
         assert!(d.sorts().is_err());
     }
-
     #[test]
     fn association_forms_preserve_empty_arguments_and_reject_line_injection() {
         for arguments in [
@@ -1528,7 +1574,6 @@ mod tests {
             assert!(association_text(&d).is_err());
         }
     }
-
     #[test]
     fn choosing_wfx_sort_fields_applies_the_plugin_default_and_allows_an_override() {
         let mut d = draft(ConfigurationKind::Sort);
@@ -1545,7 +1590,6 @@ mod tests {
         d.merge(d.form.clone(), item);
         assert!(!d.sorts().unwrap()[0].descending);
     }
-
     #[test]
     fn color_editor_keeps_capacity_for_file_rules_and_both_background_rules() {
         let mut d = draft(ConfigurationKind::Colors);

@@ -42,12 +42,12 @@ impl App {
                 description: "Alle Felder müssen übereinstimmen. Beispiele [=tc.name:1-3] [=tc.ext] [=Plugin.Feld.Einheit]. Dateien mit fehlenden Feldwerten werden ausgelassen.",
                 placeholder: "Ein bis 16 Felder",
                 options: &[
-                    "Nur Felder",
-                    "Felder und Name",
-                    "Felder und Größe",
-                    "Felder und Inhalt",
-                    "Felder, Name und Größe",
-                    "Felder, Name und Inhalt",
+                    crate::locale::tr("Nur Felder"),
+                    crate::locale::tr("Felder und Name"),
+                    crate::locale::tr("Felder und Größe"),
+                    crate::locale::tr("Felder und Inhalt"),
+                    crate::locale::tr("Felder, Name und Größe"),
+                    crate::locale::tr("Felder, Name und Inhalt"),
                 ],
                 ..Default::default()
             },

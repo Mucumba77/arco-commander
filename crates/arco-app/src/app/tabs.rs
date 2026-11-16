@@ -160,10 +160,10 @@ impl App {
             Dialog {
                 title: name,
                 options: &[
-                    "Tabs anhängen",
-                    "Offene Tabs ersetzen …",
-                    "Gruppe löschen …",
-                    "Als .tab exportieren …",
+                    crate::locale::tr("Tabs anhängen"),
+                    crate::locale::tr("Offene Tabs ersetzen …"),
+                    crate::locale::tr("Gruppe löschen …"),
+                    crate::locale::tr("Als .tab exportieren …"),
                 ],
                 ..Dialog::default()
             },
@@ -255,6 +255,7 @@ impl App {
             .map(|panel| panel.current().path.clone());
         let source = self.active;
         let layouts = self.profile.views.tc_columns.clone();
+        let wfx = self.tab_wfx_definitions();
         self.start_operation_job(
             "Lese gespeicherte Ordner-Tabs …",
             false,
@@ -267,12 +268,13 @@ impl App {
                 if job.cancel.load(std::sync::atomic::Ordering::Relaxed) {
                     return Err(io::Error::new(io::ErrorKind::Interrupted, ""));
                 }
-                let tabs = profile::read_tc_tabs_with_columns(
+                let tabs = profile::read_tc_tabs_with_all_columns(
                     &path,
                     [&bases[0], &bases[1]],
                     source,
                     super::favorites::tc_path_variables(&path),
                     &layouts,
+                    &wfx,
                 )?;
                 if job.cancel.load(std::sync::atomic::Ordering::Relaxed) {
                     return Err(io::Error::new(io::ErrorKind::Interrupted, ""));
@@ -291,7 +293,7 @@ impl App {
             description: "Total Commander ordnet die aktive Seite der Datei seiner beim Import aktiven Seite zu. Wähle einen neuen Dateinamen.",
             value: &initial,
             placeholder: "Absoluter Zielpfad",
-            options: &["Beide Seiten", "Nur linke Seite", "Nur rechte Seite"],
+            options: &[crate::locale::tr("Beide Seiten"), crate::locale::tr("Nur linke Seite"), crate::locale::tr("Nur rechte Seite")],
             ..Dialog::default()
         });
     }
@@ -346,9 +348,25 @@ impl App {
         Ok(())
     }
 
+    fn tab_wfx_definitions(
+        &self,
+    ) -> std::collections::BTreeMap<String, arco_core::view_settings::WfxColumnSets> {
+        let mut wfx = self.profile.views.portable_wfx.clone();
+        for plugin in &self.profile.plugins {
+            if plugin.interface == arco_core::plugin::Interface::Wfx
+                && let Some(sets) = self.profile.views.wfx_columns.get(&plugin.path)
+            {
+                wfx.retain(|name, _| !name.eq_ignore_ascii_case(&plugin.name));
+                wfx.insert(plugin.name.clone(), sets.clone());
+            }
+        }
+        wfx
+    }
     fn start_tab_export(&mut self, path: PathBuf, panels: [profile::SavedPanel; 2], source: usize) {
         let layouts = self.profile.views.tc_columns.clone();
+        let wfx = self.tab_wfx_definitions();
         let columns = self.profile.views.columns.clone();
+        let column_options = self.profile.views.column_options.clone();
         self.start_operation_job(
             "Exportiere Ordner-Tabs …",
             false,
@@ -361,7 +379,15 @@ impl App {
                 if job.cancel.load(std::sync::atomic::Ordering::Relaxed) {
                     return Err(io::Error::new(io::ErrorKind::Interrupted, ""));
                 }
-                profile::write_tc_tabs_with_views(&path, &panels, source, &layouts, &columns)?;
+                profile::write_tc_tabs_with_portable_views(
+                    &path,
+                    &panels,
+                    source,
+                    &layouts,
+                    &columns,
+                    &column_options,
+                    &wfx,
+                )?;
                 Ok(Outcome::Notice(format!(
                     "Tab-Datei gespeichert · {}",
                     display_path(&path)
@@ -394,13 +420,15 @@ impl App {
                 .map(|panel| panel.current().path.clone());
             let replace = verb.starts_with("OPEN");
             let layouts = self.profile.views.tc_columns.clone();
+            let wfx = self.tab_wfx_definitions();
             self.start_job("Lese gespeicherte Ordner-Tabs …", false, move |_| {
-                let tabs = profile::read_tc_tabs_with_columns(
+                let tabs = profile::read_tc_tabs_with_all_columns(
                     &path,
                     [&bases[0], &bases[1]],
                     source,
                     super::favorites::tc_path_variables(&path),
                     &layouts,
+                    &wfx,
                 )?;
                 Ok(Outcome::TabFile(Box::new(tabs), replace))
             });
@@ -425,7 +453,7 @@ impl App {
 
     pub(super) fn apply_tab_file(&mut self, mut import: TcTabs, replace: bool) {
         let embedded = import.embedded_column_count();
-        if let Err(error) = import.install_embedded_columns(&mut self.profile.views.columns) {
+        if let Err(error) = import.install_embedded_views(&mut self.profile.views) {
             self.error("Tab-Datei konnte nicht geöffnet werden", &error.to_string());
             return;
         }
@@ -483,7 +511,7 @@ impl App {
     pub(crate) fn save_imported_tabs(&mut self, name: &str, mut import: TcTabs) -> io::Result<()> {
         self.validate_group_name(name)?;
         let mut profile = self.profile_snapshot();
-        import.install_embedded_columns(&mut profile.views.columns)?;
+        import.install_embedded_views(&mut profile.views)?;
         profile.tab_groups.insert(name.to_owned(), import.panels);
         self.commit_tab_group(profile)?;
         self.status(format!("Tab-Gruppe importiert · {name}"));
@@ -665,18 +693,18 @@ impl App {
                 title: "Aktiven Ordner-Tab verwalten",
                 description,
                 options: &[
-                    "Umbenennen …",
-                    "Im Vordergrund duplizieren",
-                    "Im Hintergrund duplizieren",
-                    "Ins andere Dateifenster kopieren",
-                    "Ins andere Dateifenster verschieben",
-                    "In der Leiste nach links",
-                    "In der Leiste nach rechts",
-                    "Ordner fest sperren",
-                    "Sperren, Ordnerwechsel erlauben",
-                    "Sperre aufheben",
-                    "Zum gespeicherten Stammordner",
-                    "Tab schließen",
+                    crate::locale::tr("Umbenennen …"),
+                    crate::locale::tr("Im Vordergrund duplizieren"),
+                    crate::locale::tr("Im Hintergrund duplizieren"),
+                    crate::locale::tr("Ins andere Dateifenster kopieren"),
+                    crate::locale::tr("Ins andere Dateifenster verschieben"),
+                    crate::locale::tr("In der Leiste nach links"),
+                    crate::locale::tr("In der Leiste nach rechts"),
+                    crate::locale::tr("Ordner fest sperren"),
+                    crate::locale::tr("Sperren, Ordnerwechsel erlauben"),
+                    crate::locale::tr("Sperre aufheben"),
+                    crate::locale::tr("Zum gespeicherten Stammordner"),
+                    crate::locale::tr("Tab schließen"),
                 ],
                 ..Dialog::default()
             },

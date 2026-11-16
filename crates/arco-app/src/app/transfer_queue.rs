@@ -982,7 +982,11 @@ impl App {
                 Dialog {
                     title: "Wartenden Auftrag bearbeiten",
                     description: &description,
-                    options: &["Weiter nach vorn", "Weiter nach hinten", "Entfernen"],
+                    options: &[
+                        crate::locale::tr("Weiter nach vorn"),
+                        crate::locale::tr("Weiter nach hinten"),
+                        crate::locale::tr("Entfernen"),
+                    ],
                     ..Default::default()
                 },
             );

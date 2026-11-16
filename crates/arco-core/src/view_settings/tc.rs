@@ -11,6 +11,8 @@ use std::{collections::BTreeMap, ffi::OsString, io, path::Path};
 #[derive(Clone)]
 pub struct TcViews {
     pub columns: BTreeMap<String, Vec<Column>>,
+    pub column_options: BTreeMap<String, super::ColumnOptions>,
+    pub wfx_columns: BTreeMap<String, super::WfxColumnSets>,
     pub column_layouts: BTreeMap<u16, TcColumnLayout>,
     pub modes: BTreeMap<String, Mode>,
     pub rules: Vec<Rule>,
@@ -24,17 +26,53 @@ pub fn read_tc_views(
     resolve_wdx: impl Fn(&str) -> Option<WdxColumn>,
 ) -> io::Result<TcViews> {
     let text = profile::read_tc_text(path)?;
-    let (column_sets, skipped) = read_columns(&text, resolve_wdx);
+    let (column_sets, skipped) = read_columns(&text, "customfields", &resolve_wdx);
     let mut mode_rows = BTreeMap::<u16, [&str; 4]>::new();
     let mut rule_rows = BTreeMap::<u16, [&str; 2]>::new();
     let mut result = TcViews {
         columns: BTreeMap::new(),
+        column_options: BTreeMap::new(),
+        wfx_columns: BTreeMap::new(),
         column_layouts: BTreeMap::new(),
         modes: BTreeMap::new(),
         rules: Vec::new(),
         automatic: None,
         skipped,
     };
+    let plugins: std::collections::BTreeSet<_> = profile::ini_entries(&text)
+        .filter_map(|(section, _, _)| section.strip_prefix("customfields_").map(str::to_owned))
+        .collect();
+    let mut wfx_mode_sets = BTreeMap::new();
+    for plugin in plugins {
+        let section = format!("customfields_{plugin}");
+        let (sets, skipped) = read_columns(&text, &section, &resolve_wdx);
+        result.skipped += skipped;
+        wfx_mode_sets.insert(plugin.clone(), sets.clone());
+        let auto = profile::ini_entries(&text)
+            .find(|(s, key, _)| s == &section && *key == "autoload")
+            .and_then(|(_, _, value)| value.parse::<u16>().ok());
+        let mut target = super::WfxColumnSets::default();
+        for (id, set) in sets {
+            target.tc_layouts.insert(
+                id,
+                TcColumnLayout {
+                    name: set.name.clone(),
+                    sort_keys: set.sort_keys.clone(),
+                },
+            );
+            if auto == Some(id) {
+                target.active = Some(set.name.clone());
+            }
+            if let Some(options) = set.options {
+                target.options.insert(set.name.clone(), options);
+            }
+            target.sets.insert(set.name, set.columns);
+        }
+        target.plugin_default = Some(false);
+        if !target.sets.is_empty() {
+            result.wfx_columns.insert(plugin, target);
+        }
+    }
     for (section, key, value) in profile::ini_entries(&text) {
         if section == "viewmodeswitch" && key == "enabled" {
             result.automatic = match value {
@@ -59,10 +97,34 @@ pub fn read_tc_views(
     }
     let mut names = BTreeMap::new();
     for (id, [name, options, icon, commands]) in mode_rows {
-        let Some((mode, partial)) = parse_mode(options, &column_sets) else {
+        let variants: BTreeMap<_, _> = wfx_mode_sets
+            .iter()
+            .filter_map(|(plugin, sets)| {
+                let (mode, _) = parse_mode(options, sets)?;
+                Some((
+                    plugin.clone(),
+                    super::ModeColumns {
+                        columns: mode.columns?,
+                        sort: mode.sort,
+                    },
+                ))
+            })
+            .collect();
+        let Some((mut mode, partial)) = parse_mode(options, &column_sets).or_else(|| {
+            (!variants.is_empty()).then(|| {
+                (
+                    Mode {
+                        inherit_view: true,
+                        ..Default::default()
+                    },
+                    true,
+                )
+            })
+        }) else {
             result.skipped += 1;
             continue;
         };
+        mode.wfx_columns = variants;
         let name = name.trim();
         if name.is_empty()
             || name.len() > 160
@@ -74,9 +136,12 @@ pub fn read_tc_views(
             result.skipped += 1;
             continue;
         }
-        if partial || !icon.is_empty() || !commands.is_empty() {
+        if partial || super::ViewCommands::parse(commands).is_err() {
             result.skipped += 1;
         }
+        mode.identity = name.into();
+        mode.commands = commands.into();
+        mode.icon = resolve_icon(icon, path, &resolve_variable).unwrap_or_else(|| icon.into());
         names.insert(id, name.to_owned());
         result.modes.insert(name.to_owned(), mode);
     }
@@ -98,6 +163,9 @@ pub fn read_tc_views(
         }
     }
     for (id, set) in column_sets {
+        if let Some(options) = set.options {
+            result.column_options.insert(set.name.clone(), options);
+        }
         result.columns.insert(set.name.clone(), set.columns);
         result.column_layouts.insert(
             id,
@@ -110,20 +178,55 @@ pub fn read_tc_views(
     Ok(result)
 }
 
+#[derive(Clone)]
 struct TcColumnSet {
     name: String,
     columns: Vec<Column>,
     sort_keys: Vec<Option<SortKey>>,
+    options: Option<super::ColumnOptions>,
+}
+
+fn resolve_icon(
+    value: &str,
+    ini: &Path,
+    resolve: &impl Fn(&str) -> Option<OsString>,
+) -> Option<String> {
+    if value.is_empty() {
+        return Some(String::new());
+    }
+    let (priority, value) = value
+        .strip_prefix('*')
+        .map_or(("", value), |value| ("*", value));
+    let (file, suffix) = value
+        .rsplit_once(',')
+        .filter(|(_, index)| index.trim().parse::<i32>().is_ok())
+        .map_or((value, String::new()), |(file, index)| {
+            (file, format!(",{index}"))
+        });
+    let file = std::path::PathBuf::from(profile::expand_tc_path(
+        file.trim().trim_matches('"'),
+        resolve,
+    )?);
+    let file = if file.is_absolute() {
+        file
+    } else {
+        resolve("COMMANDER_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| ini.parent().unwrap_or(Path::new("")).into())
+            .join(file)
+    };
+    Some(format!("{priority}{}{suffix}", file.to_str()?))
 }
 
 fn read_columns(
     text: &str,
+    selected_section: &str,
     resolve_wdx: impl Fn(&str) -> Option<WdxColumn>,
 ) -> (BTreeMap<u16, TcColumnSet>, usize) {
     let mut rows = BTreeMap::<u16, [&str; 4]>::new();
     let mut titles = Vec::new();
     for (section, key, value) in profile::ini_entries(text) {
-        if section != "customfields" {
+        if section != selected_section {
             continue;
         }
         if key == "titles" {
@@ -146,6 +249,7 @@ fn read_columns(
     let mut used = std::collections::BTreeSet::new();
     let mut skipped = 0;
     for (id, [headers, contents, widths, options]) in rows {
+        let layout_options = super::ColumnOptions::from_tc(widths, options);
         let title = titles
             .get(usize::from(id - 1))
             .map(|title| title.trim())
@@ -204,6 +308,24 @@ fn read_columns(
                 .and_then(|token| {
                     tc_field(token).or_else(|| {
                         let (plugin, _) = token.split_once('.')?;
+                        if selected_section != "customfields"
+                            && (plugin.eq_ignore_ascii_case("<fs>")
+                                || plugin.eq_ignore_ascii_case("fs"))
+                        {
+                            let (_, selection) = token.split_once('.')?;
+                            let (field, unit) = selection
+                                .split_once('.')
+                                .map_or((selection, None), |(field, unit)| {
+                                    (field, Some(unit.into()))
+                                });
+                            return Some(Field::Wfx(crate::plugin::WfxField {
+                                selection: crate::plugin::WdxField {
+                                    field: field.into(),
+                                    unit,
+                                },
+                                descending: false,
+                            }));
+                        }
                         (!plugin.eq_ignore_ascii_case("tc"))
                             .then(|| resolve_wdx(token))
                             .flatten()
@@ -226,9 +348,10 @@ fn read_columns(
                 Field::Modified => Some(SortKey::Modified),
                 Field::Attributes => Some(SortKey::Attributes),
                 Field::Comment => Some(SortKey::Comment),
-                Field::TcExpression(ref expression) => expression.sort_key(),
-                Field::Wfx(_) => None,
-                Field::Wdx(_) => {
+                Field::TcExpression(ref expression) if !expression.background() => {
+                    expression.sort_key()
+                }
+                Field::Wfx(_) | Field::Wdx(_) | Field::TcExpression(_) => {
                     let key = SortKey::Wdx(wdx_index);
                     wdx_index += 1;
                     Some(key)
@@ -258,6 +381,7 @@ fn read_columns(
                     name,
                     columns,
                     sort_keys,
+                    options: layout_options,
                 },
             );
         }
@@ -282,6 +406,13 @@ pub fn parse_wfx_default_view(
     view: &crate::plugin::WfxDefaultView,
     fields: &[crate::plugin::WfxField],
 ) -> Option<Vec<Column>> {
+    parse_wfx_view(view, fields).map(|view| view.columns)
+}
+
+pub fn parse_wfx_view(
+    view: &crate::plugin::WfxDefaultView,
+    fields: &[crate::plugin::WfxField],
+) -> Option<super::CustomView> {
     let widths: Vec<_> = view
         .widths
         .split(',')
@@ -327,7 +458,10 @@ pub fn parse_wfx_default_view(
     if columns.is_empty() || (columns.len() == base_columns && !view.contents.trim().is_empty()) {
         return None;
     }
-    Some(columns)
+    Some(super::CustomView {
+        columns,
+        options: super::ColumnOptions::from_tc(&view.widths, &view.options),
+    })
 }
 
 fn wfx_view_field(expression: &str, fields: &[crate::plugin::WfxField]) -> Option<Field> {
@@ -431,6 +565,7 @@ fn parse_mode(options: &str, column_sets: &BTreeMap<u16, TcColumnSet>) -> Option
             sort,
             colors,
             columns: set.map(|set| set.name.clone()),
+            ..Default::default()
         },
         partial,
     ))
@@ -639,6 +774,34 @@ mod tests {
     use std::{fs, path::PathBuf};
 
     #[test]
+    fn view_modes_resolve_independent_local_and_wfx_layouts_by_provider() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(file.path(), concat!(
+            "[CustomFields]\nTitles=Local\nHeaders1=Size\nContents1=[=tc.size]\nWidths1=200,0,100\n",
+            "[CustomFields_Remote]\nTitles=Remote fields\nHeaders1=Owner\nContents1=[=<fs>.Owner]\nWidths1=200,0,100\n",
+            "[ViewModes]\n1_name=Mode\n1_options=6|100|1\n1_commands=cm_100Percent|cm_50Percent\n"
+        )).unwrap();
+        let views = read_tc_views(file.path(), |_| None, |_| None).unwrap();
+        let local = &views.modes["Mode"];
+        assert_eq!(local.columns.as_deref(), Some("Local"));
+        assert_eq!(local.sort[0].key, SortKey::Size);
+        let remote = local.clone().for_wfx("REMOTE");
+        assert_eq!(remote.columns.as_deref(), Some("Remote fields"));
+        assert_eq!(
+            remote.sort[0],
+            SortOrder {
+                key: SortKey::Wdx(0),
+                descending: true
+            }
+        );
+        assert_eq!(remote.commands, "cm_100Percent|cm_50Percent");
+        assert_eq!(local.clone().for_wfx("Unknown"), *local);
+        let saved = serde_json::to_string(&remote).unwrap();
+        let restored: Mode = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored.wfx_columns, remote.wfx_columns);
+    }
+
+    #[test]
     fn applies_usb_and_external_disk_rules_only_to_lettered_local_locations() {
         let rule = parse_expression(r"L12|&+X:\Fotos\*").unwrap();
         assert!(rule.matches_with_drive(Scope::Local, r"X:\Fotos\Aktuell", &[], |_| Some(2)));
@@ -662,7 +825,7 @@ mod tests {
             concat!(
                 "[CustomFields]\nTitles=Media\n",
                 "Headers1=Anmerkung\\nFehlt\\nAbmessung\n",
-                "Contents1=[=tc.comment]\\n[=missing.field]\\n[=image.Width.Pixel]\n",
+                "Contents1=[=tc.comment]\\n[=tc.invalid-field]\\n[=image.Width.Pixel]\n",
                 "Widths1=300,80,150,180,-240\nOptions1=-1|0|144\n",
                 "[ViewModes]\n1_name=Medien\n1_options=6|102|1|3,-4,1\n",
             ),
@@ -716,6 +879,44 @@ mod tests {
             ]
         );
         assert_eq!(imported.skipped, 2);
+    }
+
+    #[test]
+    fn imports_plugin_columns_composites_autoload_and_dpi_options_without_loading_a_dll() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(file.path(), concat!(
+            "[CustomFields_Example Plugin]\nTitles=Remote\nAutoLoad=1\n",
+            "Headers1=Owner\\nSummary\\nCreated\n",
+            "Contents1=[=<fs>.Owner]\\n[=tc.name] - [=<fs>.Amount.KiB]\\n[=tc.creationdate.Y-M-D]\n",
+            "Widths1=360,0,180,-240,210\nOptions1=1200|1|144\n",
+            "[CustomFields]\nTitles=Local\nHeaders1=Score\nContents1=[=missing.Score.scaled._d2,]\nWidths1=200,0,120\nOptions1=-1|0|96\n",
+        )).unwrap();
+        let imported = read_tc_views(file.path(), |_| None, |_| None).unwrap();
+        assert_eq!(imported.skipped, 0);
+        let remote = &imported.wfx_columns["example plugin"];
+        assert_eq!(remote.active.as_deref(), Some("Remote"));
+        assert_eq!(remote.tc_layouts[&1].name, "Remote");
+        assert_eq!(
+            remote.tc_layouts[&1].sort_keys[..2],
+            [Some(SortKey::Wdx(0)), Some(SortKey::Wdx(1))]
+        );
+        let columns = remote.active_columns().unwrap();
+        assert_eq!(columns.len(), 3);
+        assert!(matches!(&columns[0].field, Field::Wfx(field) if field.selection.field == "Owner"));
+        assert!(
+            matches!(&columns[1].field, Field::TcExpression(expression) if expression.references() == ["<fs>.Amount.KiB"])
+        );
+        assert_eq!(columns[1].width, 160);
+        assert_eq!(columns[1].right_aligned, Some(true));
+        let options = &remote.options["Remote"];
+        assert_eq!(options.reference_width, Some(800));
+        assert_eq!(options.name_width, 240);
+        assert!(options.horizontal_scroll);
+        assert!(
+            matches!(&imported.columns["Local"][0].field, Field::TcExpression(expression) if expression.references() == ["missing.Score.scaled"])
+        );
+        assert!(!imported.column_options["Local"].horizontal_scroll);
+        assert!(super::super::ColumnOptions::from_tc("150,0,90", "-1|2").is_none());
     }
 
     #[test]

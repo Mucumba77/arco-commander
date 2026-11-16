@@ -4,22 +4,84 @@ use crate::commands::{Dialog, Pending};
 use crate::locale::tr;
 use arco_core::files::SortKey;
 use arco_core::plugin::{self, Registration, WfxField};
-use arco_core::view_settings::{Column, Field, WfxColumnSets, parse_wfx_default_view};
+use arco_core::profile::{WfxTabView, WfxView};
+use arco_core::view_settings::{Column, Field, WfxColumnSets, parse_wfx_view};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-
 #[derive(Default)]
 pub(in crate::app) struct DefaultViews {
-    cached: HashMap<PathBuf, Option<Vec<Column>>>,
+    pub(super) cached: HashMap<PathBuf, Option<arco_core::view_settings::CustomView>>,
     loading: bool,
 }
-
 impl App {
+    pub(in crate::app) fn wfx_tab_columns(&self, tab: &crate::panel::Tab) -> Option<&[Column]> {
+        let location = tab.wfx.as_ref()?;
+        if let Some(name) = tab
+            .view_override
+            .as_ref()
+            .filter(|mode| !mode.inherit_view)
+            .and_then(|mode| mode.columns.as_ref())
+        {
+            return self
+                .wfx_sets(&location.plugin.path)
+                .and_then(|sets| sets.sets.get(name))
+                .or_else(|| self.profile.views.columns.get(name))
+                .map(Vec::as_slice);
+        }
+        match tab.options.wfx_selection(&location.plugin.name) {
+            Some(WfxView::Standard) => None,
+            Some(WfxView::PluginDefault) => self
+                .wfx_default_views
+                .cached
+                .get(&location.plugin.path)?
+                .as_ref()
+                .map(|view| view.columns.as_slice()),
+            Some(WfxView::Custom(name)) => self
+                .wfx_sets(&location.plugin.path)?
+                .sets
+                .get(name)
+                .map(Vec::as_slice),
+            None => self.wfx_view_columns(&location.plugin.path),
+        }
+    }
+
+    fn wants_tab_default_view(&self, tab: &crate::panel::Tab) -> bool {
+        let Some(location) = &tab.wfx else {
+            return false;
+        };
+        if tab
+            .view_override
+            .as_ref()
+            .is_some_and(|mode| !mode.inherit_view && mode.columns.is_some())
+        {
+            return false;
+        }
+        match tab.options.wfx_selection(&location.plugin.name) {
+            Some(WfxView::PluginDefault) => true,
+            Some(_) => false,
+            None => self.wants_wfx_default_view(&location.plugin.path),
+        }
+    }
+    pub(in crate::app) fn wfx_sets(&self, path: &Path) -> Option<&WfxColumnSets> {
+        self.profile.views.wfx_columns.get(path).or_else(|| {
+            let plugin = self
+                .profile
+                .plugins
+                .iter()
+                .find(|plugin| plugin.path == path)?;
+            self.profile
+                .views
+                .portable_wfx
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(&plugin.name))
+                .map(|(_, sets)| sets)
+        })
+    }
     pub(super) fn wfx_view_columns(&self, path: &Path) -> Option<&[Column]> {
-        if let Some(sets) = self.profile.views.wfx_columns.get(path) {
+        if let Some(sets) = self.wfx_sets(path) {
             if let Some(columns) = sets.active_columns() {
                 return Some(columns);
             }
@@ -27,17 +89,16 @@ impl App {
                 return None;
             }
         }
-        self.wfx_default_views.cached.get(path)?.as_deref()
+        self.wfx_default_views
+            .cached
+            .get(path)?
+            .as_ref()
+            .map(|view| view.columns.as_slice())
     }
-
     fn wants_wfx_default_view(&self, path: &Path) -> bool {
-        self.profile
-            .views
-            .wfx_columns
-            .get(path)
+        self.wfx_sets(path)
             .is_none_or(WfxColumnSets::uses_plugin_default)
     }
-
     pub(in crate::app) fn update_wfx_default_views(&mut self) {
         if self.wfx_default_views.loading {
             return;
@@ -52,7 +113,7 @@ impl App {
                 && !panel.loading
                 && (!self.quick_open || side == self.active)
                 && self.wfx_enabled(&location.plugin)
-                && self.wants_wfx_default_view(path)
+                && self.wants_tab_default_view(tab)
                 && !self.wfx_default_views.cached.contains_key(path))
             .then(|| path.clone())
         }) else {
@@ -64,49 +125,48 @@ impl App {
             let columns = plugin::wfx_default_view(&path, &AtomicBool::new(false))
                 .ok()
                 .flatten()
-                .and_then(|(view, fields)| parse_wfx_default_view(&view, &fields));
+                .and_then(|(view, fields)| parse_wfx_view(&view, &fields));
             let _ = sender.send(Event::WfxDefaultView(path, columns));
         });
     }
-
     pub(in crate::app) fn apply_wfx_default_view(
         &mut self,
         path: PathBuf,
-        columns: Option<Vec<Column>>,
+        columns: Option<arco_core::view_settings::CustomView>,
     ) {
         self.wfx_default_views.loading = false;
         let found = columns.is_some();
         self.wfx_default_views.cached.insert(path.clone(), columns);
-        if found && self.wants_wfx_default_view(&path) {
+        if found {
             for side in 0..2 {
                 let tab = self.panels[side].current();
                 if tab.detailed()
+                    && self.wants_tab_default_view(tab)
                     && tab.wfx.as_ref().is_some_and(|location| {
                         location.plugin.path == path && self.wfx_enabled(&location.plugin)
                     })
                 {
+                    self.panels[side].current_mut().wdx_sorted = false;
+                    self.panels[side].current().file_model().clear_wdx();
                     self.publish(side);
                 }
             }
         }
     }
-
     pub(in crate::app) fn active_wfx_columns(&self, side: usize) -> Vec<WfxField> {
         if self.panels[side].current().wfx.is_none() {
             return Vec::new();
         }
-        self.active_columns(side)
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|column| match &column.field {
-                Field::Wfx(field) => Some(field.clone()),
-                _ => None,
+        self.value_columns(side)
+            .into_iter()
+            .map(|(_, column)| WfxField {
+                selection: column.selection,
+                descending: column.descending,
             })
             .collect()
     }
-
     pub(in crate::app) fn choose_wfx_columns(&mut self, plugin: Registration) {
-        let sets = self.profile.views.wfx_columns.get(&plugin.path);
+        let sets = self.wfx_sets(&plugin.path);
         let names: Vec<_> = sets
             .into_iter()
             .flat_map(|sets| sets.sets.keys().cloned())
@@ -116,24 +176,22 @@ impl App {
             .map(tr)
             .chain(names.iter().map(String::as_str))
             .collect();
-        let description = format!(
-            "{} · Aktiver Spaltensatz: {}",
-            plugin.name,
-            sets.and_then(|sets| sets.active.as_deref())
+        let selected = self.current().options.wfx_selection(&plugin.name);
+        let active_name = match selected {
+            Some(WfxView::Custom(name)) => name.as_str(),
+            Some(WfxView::Standard) => tr("Standardansicht"),
+            Some(WfxView::PluginDefault) => tr("Plugin-Standardansicht"),
+            None => sets
+                .and_then(|sets| sets.active.as_deref())
                 .unwrap_or_else(|| {
-                    if self.wants_wfx_default_view(&plugin.path)
-                        && self
-                            .wfx_default_views
-                            .cached
-                            .get(&plugin.path)
-                            .is_some_and(Option::is_some)
-                    {
+                    if self.wants_wfx_default_view(&plugin.path) {
                         tr("Plugin-Standardansicht")
                     } else {
                         tr("Standardansicht")
                     }
-                })
-        );
+                }),
+        };
+        let description = format!("{} · Aktiver Spaltensatz: {}", plugin.name, active_name);
         self.dialog(
             "confirm",
             Pending::ViewSetup(Setup::ChooseWfxColumns(Box::new(plugin), names.clone())),
@@ -145,7 +203,6 @@ impl App {
             },
         );
     }
-
     pub(super) fn select_wfx_columns(
         &mut self,
         plugin: Registration,
@@ -156,10 +213,9 @@ impl App {
             0 | 2 => {
                 let mut sets = self.wfx_column_sets(&plugin.path);
                 let use_default = Some(option == 2);
-                if sets.active.take().is_some() || sets.plugin_default != use_default {
-                    sets.plugin_default = use_default;
-                    self.commit_wfx_columns(&plugin, sets)?;
-                }
+                sets.active = None;
+                sets.plugin_default = use_default;
+                self.commit_wfx_columns(&plugin, sets)?;
             }
             1 => self.read_wfx_columns(plugin, None),
             _ => {
@@ -184,7 +240,6 @@ impl App {
         }
         Ok(())
     }
-
     pub(in crate::app) fn manage_wfx_columns(
         &mut self,
         plugin: Registration,
@@ -198,7 +253,7 @@ impl App {
             ));
         }
         match option {
-            0 if sets.active.as_ref() != Some(&name) => {
+            0 => {
                 sets.active = Some(name);
                 self.commit_wfx_columns(&plugin, sets)?;
             }
@@ -214,7 +269,6 @@ impl App {
         }
         Ok(())
     }
-
     fn read_wfx_columns(&mut self, plugin: Registration, name: Option<String>) {
         if !self.wfx_enabled(&plugin) {
             self.status("Dieses WFX-Plugin ist deaktiviert.");
@@ -242,7 +296,6 @@ impl App {
             },
         );
     }
-
     pub(in crate::app) fn edit_wfx_columns(
         &mut self,
         plugin: Registration,
@@ -313,7 +366,6 @@ impl App {
             },
         );
     }
-
     pub(super) fn save_wfx_columns(
         &mut self,
         plugin: Registration,
@@ -324,15 +376,15 @@ impl App {
         let mut lines = value.lines();
         let name = name_line(lines.next(), original.as_deref())?;
         let columns = parse_wfx_columns(lines, fields)?;
-        self.save_wfx_column_values(plugin, original, name, columns)
+        self.save_wfx_column_values(plugin, original, name, columns, None)
     }
-
     pub(in crate::app) fn save_wfx_column_values(
         &mut self,
         plugin: Registration,
         original: Option<String>,
         name: String,
         columns: Vec<Column>,
+        options: Option<arco_core::view_settings::ColumnOptions>,
     ) -> io::Result<()> {
         let mut sets = self.wfx_column_sets(&plugin.path);
         if original.is_none() && sets.sets.contains_key(&name) {
@@ -345,38 +397,119 @@ impl App {
                 "Für ein WFX-Plugin sind höchstens 128 Spaltensätze möglich.",
             ));
         }
+        if sets
+            .sets
+            .get(&name)
+            .is_some_and(|previous| *previous != columns)
+        {
+            // Original TC column positions no longer describe an edited layout.
+            sets.tc_layouts.retain(|_, layout| layout.name != name);
+        }
         sets.sets.insert(name.clone(), columns);
+        if let Some(options) = options {
+            sets.options.insert(name.clone(), options);
+        }
         sets.active = Some(name);
         self.commit_wfx_columns(&plugin, sets)
     }
-
     fn wfx_column_sets(&self, plugin: &Path) -> WfxColumnSets {
-        self.profile
-            .views
-            .wfx_columns
-            .get(plugin)
-            .cloned()
-            .unwrap_or_default()
+        self.wfx_sets(plugin).cloned().unwrap_or_default()
     }
-
-    fn commit_wfx_columns(&mut self, plugin: &Registration, sets: WfxColumnSets) -> io::Result<()> {
+    fn commit_wfx_columns(
+        &mut self,
+        plugin: &Registration,
+        mut sets: WfxColumnSets,
+    ) -> io::Result<()> {
+        sets.tc_layouts
+            .retain(|_, layout| sets.sets.contains_key(&layout.name));
         if !self.wfx_enabled(plugin) {
             return Err(io::Error::other("Dieses WFX-Plugin ist deaktiviert."));
         }
         if !self.save_profile {
             return Err(io::Error::other("Das Arco-Profil ist nicht verfügbar."));
         }
+        let selected = sets.active.clone().map(WfxView::Custom).unwrap_or_else(|| {
+            if sets.uses_plugin_default() {
+                WfxView::PluginDefault
+            } else {
+                WfxView::Standard
+            }
+        });
+        let names: std::collections::BTreeSet<_> = sets.sets.keys().cloned().collect();
+        let applies = self
+            .current()
+            .wfx
+            .as_ref()
+            .is_some_and(|location| location.plugin.same_file(plugin));
         let mut profile = self.profile_snapshot();
-        if sets.sets.is_empty() && sets.plugin_default.is_none() {
-            profile.views.wfx_columns.remove(&plugin.path);
-        } else {
-            profile.views.wfx_columns.insert(plugin.path.clone(), sets);
+        if applies
+            && let Some(tab) = profile.panels[self.active]
+                .tab_options
+                .get_mut(self.panels[self.active].tab)
+        {
+            tab.wfx_view = Some(WfxTabView {
+                plugin: plugin.name.clone(),
+                view: selected.clone(),
+            });
         }
+        for panel in profile
+            .panels
+            .iter_mut()
+            .chain(profile.tab_groups.values_mut().flatten())
+        {
+            for tab in &mut panel.tab_options {
+                if matches!(tab.wfx_selection(&plugin.name), Some(WfxView::Custom(name)) if !names.contains(name))
+                {
+                    tab.wfx_view = None;
+                }
+            }
+        }
+        profile.views.wfx_columns.insert(plugin.path.clone(), sets);
         profile.save(&self.profile_path)?;
         self.profile = profile;
-        let show_hidden = self.profile.show_hidden;
-        for panel in &mut self.panels {
-            for tab in &mut panel.tabs {
+        let current_side = self.active;
+        for (side, panel) in self.panels.iter_mut().enumerate() {
+            for (index, tab) in panel.tabs.iter_mut().enumerate() {
+                if tab
+                    .wfx
+                    .as_ref()
+                    .is_some_and(|location| location.plugin.same_file(plugin))
+                {
+                    if applies && side == current_side && index == panel.tab {
+                        tab.options.wfx_view = Some(WfxTabView {
+                            plugin: plugin.name.clone(),
+                            view: selected.clone(),
+                        });
+                        tab.options.view = arco_core::profile::TabView::Details;
+                        tab.manual_view = true;
+                        tab.view_override = None;
+                    } else if matches!(tab.options.wfx_selection(&plugin.name), Some(WfxView::Custom(name)) if !names.contains(name))
+                    {
+                        tab.options.wfx_view = None;
+                    }
+                }
+            }
+        }
+        let counts: Vec<Vec<_>> = self
+            .panels
+            .iter()
+            .map(|panel| {
+                panel
+                    .tabs
+                    .iter()
+                    .map(|tab| {
+                        self.wfx_tab_columns(tab).map_or(0, |columns| {
+                            columns
+                                .iter()
+                                .filter(|column| column.field.requires_values())
+                                .count()
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        for (side, panel) in self.panels.iter_mut().enumerate() {
+            for (index, tab) in panel.tabs.iter_mut().enumerate() {
                 if tab
                     .wfx
                     .as_ref()
@@ -384,19 +517,18 @@ impl App {
                 {
                     let mut orders = tab.current_sort_orders().to_vec();
                     let previous = orders.len();
-                    orders.retain(|order| !matches!(order.key, SortKey::Wdx(_)));
+                    orders.retain(|order| !matches!(order.key, SortKey::Wdx(column) if usize::from(column) >= counts[side][index]));
                     if orders.len() != previous {
-                        tab.set_sort_orders(orders, show_hidden);
+                        tab.set_sort_orders(orders, self.profile.show_hidden);
                     }
                 }
             }
         }
         self.invalidate_wdx_columns();
-        self.status("WFX-Spaltensatz gespeichert.");
+        self.close_dialog();
         Ok(())
     }
 }
-
 fn parse_wfx_columns<'a>(
     lines: impl Iterator<Item = &'a str>,
     fields: &[WfxField],
@@ -409,12 +541,10 @@ fn parse_wfx_columns<'a>(
             .map(Field::Wfx)
     })
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use arco_core::plugin::WdxField;
-
     #[test]
     fn named_wfx_sets_keep_fields_units_alignment_and_active_name() {
         let field = WfxField {
@@ -433,6 +563,7 @@ mod tests {
             sets: [("Belegung".into(), columns)].into(),
             active: Some("Belegung".into()),
             plugin_default: Some(true),
+            ..Default::default()
         };
         let saved = serde_json::to_string(&sets).unwrap();
         let loaded: WfxColumnSets = serde_json::from_str(&saved).unwrap();
@@ -442,7 +573,6 @@ mod tests {
         assert_eq!(active[1].field, Field::Extension);
         assert!(!loaded.uses_plugin_default());
     }
-
     #[test]
     fn explicit_standard_view_survives_empty_wfx_sets_and_old_profiles() {
         assert!(WfxColumnSets::default().uses_plugin_default());

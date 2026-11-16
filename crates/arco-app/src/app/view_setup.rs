@@ -12,10 +12,10 @@ use arco_core::view_settings::{
 use slint::{ComponentHandle, Model, ModelRc, ModelTracker, VecModel};
 use std::io;
 use std::rc::Rc;
-
+mod lifecycle;
 mod wfx;
+pub(super) use lifecycle::Runtime as ViewRuntime;
 pub(super) use wfx::DefaultViews as WfxDefaultViews;
-
 const BUILTIN_FIELDS: &[(&str, Field)] = &[
     ("erweiterung", Field::Extension),
     ("größe", Field::Size),
@@ -32,7 +32,6 @@ const SORT_KEYS: &[(&str, SortKey)] = &[
     ("kommentar", SortKey::Comment),
     ("unsortiert", SortKey::Unsorted),
 ];
-
 #[derive(Clone)]
 pub(crate) enum Setup {
     Choose {
@@ -57,7 +56,6 @@ pub(crate) enum Setup {
     Colors,
     Sort,
 }
-
 pub(super) fn automatic_view(
     settings: &Settings,
     location: &Location,
@@ -74,22 +72,31 @@ pub(super) fn automatic_view(
     });
     settings
         .automatic_mode(scope, &location.display(), entries)
-        .cloned()
+        .map(|mode| {
+            let mut result = mode.clone();
+            if let Some((name, _)) = settings
+                .modes
+                .iter()
+                .find(|(_, candidate)| std::ptr::eq(*candidate, mode))
+            {
+                result.identity.clone_from(name);
+            }
+            if let Location::Wfx(location) = location {
+                result = result.for_wfx(&location.plugin.name);
+            }
+            result
+        })
 }
-
 struct ExpressionRows {
     source: Rc<FileModel>,
     expressions: Vec<TcColumnExpression>,
     local: bool,
 }
-
 impl Model for ExpressionRows {
     type Data = FileRow;
-
     fn row_count(&self) -> usize {
         self.source.row_count()
     }
-
     fn row_data(&self, index: usize) -> Option<FileRow> {
         let mut row = self.source.row_data(index)?;
         if let Some(entry) = self.source.entry(index) {
@@ -101,12 +108,10 @@ impl Model for ExpressionRows {
         }
         Some(row)
     }
-
     fn model_tracker(&self) -> &dyn ModelTracker {
         self.source.model_tracker()
     }
 }
-
 impl App {
     pub(super) fn poll_tc_drive_views(&mut self) {
         let settings = &self.profile.views;
@@ -153,7 +158,6 @@ impl App {
             }
         }
     }
-
     pub(super) fn active_columns(&self, side: usize) -> Option<&[Column]> {
         let tab = self.panels[side].current();
         if !tab.detailed() {
@@ -163,7 +167,7 @@ impl App {
             if !self.wfx_enabled(&location.plugin) {
                 return None;
             }
-            self.wfx_view_columns(&location.plugin.path)?
+            self.wfx_tab_columns(tab)?
         } else {
             self.profile
                 .views
@@ -173,8 +177,59 @@ impl App {
         };
         Some(&columns[..columns.len().min(MAX_COLUMNS)])
     }
+    fn active_column_options(
+        &self,
+        side: usize,
+    ) -> Option<&arco_core::view_settings::ColumnOptions> {
+        let tab = self.panels[side].current();
+        if let Some(location) = &tab.wfx {
+            let sets = self.wfx_sets(&location.plugin.path);
+            if let Some(name) = tab
+                .view_override
+                .as_ref()
+                .filter(|mode| !mode.inherit_view)
+                .and_then(|mode| mode.columns.as_ref())
+            {
+                return sets
+                    .and_then(|sets| sets.options.get(name))
+                    .or_else(|| self.profile.views.column_options.get(name));
+            }
+            match tab.options.wfx_selection(&location.plugin.name) {
+                Some(arco_core::profile::WfxView::Standard) => None,
+                Some(arco_core::profile::WfxView::Custom(name)) => sets?.options.get(name),
+                Some(arco_core::profile::WfxView::PluginDefault) => self
+                    .wfx_default_views
+                    .cached
+                    .get(&location.plugin.path)?
+                    .as_ref()?
+                    .options
+                    .as_ref(),
+                None => {
+                    if let Some(sets) = sets
+                        && let Some(name) = &sets.active
+                    {
+                        return sets.options.get(name);
+                    }
+                    self.wfx_default_views
+                        .cached
+                        .get(&location.plugin.path)?
+                        .as_ref()?
+                        .options
+                        .as_ref()
+                }
+            }
+        } else {
+            self.profile.views.column_options.get(tab.column_set()?)
+        }
+    }
 
     pub(super) fn publish_columns(&self, side: usize, data: &mut PanelData) {
+        data.custom_horizontal_scroll = true;
+        if let Some(options) = self.active_column_options(side) {
+            data.custom_name_width = i32::from(options.name_width);
+            data.custom_reference_width = i32::from(options.reference_width.unwrap_or(0));
+            data.custom_horizontal_scroll = options.horizontal_scroll;
+        }
         if let Some(columns) = self.active_columns(side) {
             let mut index = 0i32;
             let mut expressions = Vec::new();
@@ -182,23 +237,24 @@ impl App {
                 .iter()
                 .map(|column| {
                     let key = column.field.key();
-                    let expression_index = if let Field::TcExpression(expression) = &column.field {
+                    let expression_index = if let Field::TcExpression(expression) = &column.field
+                        && !expression.background()
+                    {
                         let index = expressions.len() as i32;
                         expressions.push(expression.clone());
                         index
                     } else {
                         -1
                     };
-                    let (wdx_index, action) =
-                        if matches!(column.field, Field::Wdx(_) | Field::Wfx(_)) {
-                            let wdx_index = index;
-                            index += 1;
-                            (wdx_index, format!("sort-wdx:{wdx_index}"))
-                        } else if !key.is_empty() {
-                            (-1, format!("sort-{key}"))
-                        } else {
-                            (-1, String::new())
-                        };
+                    let (wdx_index, action) = if column.field.requires_values() {
+                        let wdx_index = index;
+                        index += 1;
+                        (wdx_index, format!("sort-wdx:{wdx_index}"))
+                    } else if !key.is_empty() {
+                        (-1, format!("sort-{key}"))
+                    } else {
+                        (-1, String::new())
+                    };
                     let width = i32::from(column.width.clamp(40, 600));
                     data.custom_width += width + 2;
                     data.custom_extension |= column.field == Field::Extension;
@@ -228,11 +284,10 @@ impl App {
             data.wdx_headings = strings(
                 self.active_wdx_columns(side)
                     .into_iter()
-                    .map(|(_, column, _)| column.selection.label()),
+                    .map(|(_, column)| column.selection.label()),
             );
         }
     }
-
     pub(crate) fn view_setup_action(&mut self, command: &str) -> bool {
         match command {
             "column-sets" => {
@@ -288,9 +343,9 @@ impl App {
                         })
                         .collect()
                 } else {
-                    self.active_wdx_columns(self.active)
+                    self.value_columns(self.active)
                         .into_iter()
-                        .map(|(index, column, _)| {
+                        .map(|(index, column)| {
                             format!("wdx{} · {}", index + 1, column.selection.label())
                         })
                         .collect()
@@ -314,7 +369,6 @@ impl App {
         }
         true
     }
-
     pub(super) fn choose_view(&mut self, modes: bool) {
         let settings = &self.profile.views;
         let names: Vec<_> = if modes {
@@ -324,6 +378,7 @@ impl App {
         };
         let options: Vec<_> = ["Standardansicht", "Neu anlegen"]
             .into_iter()
+            .map(crate::locale::tr)
             .chain(names.iter().map(String::as_str))
             .collect();
         self.dialog("confirm", Pending::ViewSetup(Setup::Choose { modes, names: names.clone() }), Dialog {
@@ -332,7 +387,6 @@ impl App {
             options: &options, ..Default::default()
         });
     }
-
     fn manage_view(&mut self, modes: bool, name: String) {
         let title = name.clone();
         self.dialog(
@@ -340,12 +394,15 @@ impl App {
             Pending::ViewSetup(Setup::Manage { modes, name }),
             Dialog {
                 title: &title,
-                options: &["Im aktiven Tab anwenden", "Bearbeiten", "Löschen"],
+                options: &[
+                    crate::locale::tr("Im aktiven Tab anwenden"),
+                    crate::locale::tr("Bearbeiten"),
+                    crate::locale::tr("Löschen"),
+                ],
                 ..Default::default()
             },
         );
     }
-
     fn edit_columns(&mut self, name: Option<String>) {
         let columns = name
             .as_ref()
@@ -419,7 +476,6 @@ impl App {
             },
         );
     }
-
     fn edit_mode(&mut self, name: Option<String>) {
         let mode = name
             .as_ref()
@@ -464,7 +520,6 @@ impl App {
             },
         );
     }
-
     fn edit_view_rules(&mut self) {
         let settings = &self.profile.views;
         let mut value = format!("Aktiv={}", if settings.automatic { "ja" } else { "nein" });
@@ -505,7 +560,6 @@ impl App {
             },
         );
     }
-
     fn edit_file_colors(&mut self) {
         let settings = &self.profile.views;
         let mut value = String::new();
@@ -529,7 +583,6 @@ impl App {
             value: &value, ..Default::default()
         });
     }
-
     pub(crate) fn submit_view_setup(
         &mut self,
         setup: Setup,
@@ -611,6 +664,11 @@ impl App {
                     .as_ref()
                     .and_then(|name| settings.modes.get(name))
                     .and_then(|mode| mode.colors);
+                if let Some(previous) = name.as_ref().and_then(|name| settings.modes.get(name)) {
+                    mode.wfx_columns.clone_from(&previous.wfx_columns);
+                    mode.commands.clone_from(&previous.commands);
+                    mode.icon.clone_from(&previous.icon);
+                }
                 settings.modes.insert(key, mode);
                 self.save_view_settings(settings)?;
                 self.choose_view(true);
@@ -638,14 +696,22 @@ impl App {
                             })
                     },
                 )?;
-                if imported.modes.is_empty() && imported.columns.is_empty() {
+                if imported.modes.is_empty()
+                    && imported.columns.is_empty()
+                    && imported.wfx_columns.is_empty()
+                {
                     return Err(io::Error::other(
                         "Die INI enthält keine übernehmbaren Spaltensätze oder Ansichtsmodi.",
                     ));
                 }
                 let description = format!(
                     "{} Spaltensätze, {} Modi und {} Regeln anhängen? {} Einträge oder Optionen konnten nicht vollständig übernommen werden.",
-                    imported.columns.len(),
+                    imported.columns.len()
+                        + imported
+                            .wfx_columns
+                            .values()
+                            .map(|sets| sets.sets.len())
+                            .sum::<usize>(),
                     imported.modes.len(),
                     imported.rules.len(),
                     imported.skipped
@@ -689,6 +755,46 @@ impl App {
                     column_names.insert(name, candidate.clone());
                     settings.columns.insert(candidate, columns);
                 }
+                for (name, options) in imported.column_options {
+                    if let Some(name) = column_names.get(&name) {
+                        settings.column_options.insert(name.clone(), options);
+                    }
+                }
+                let mut wfx_names = std::collections::BTreeMap::new();
+                for (plugin, imported) in imported.wfx_columns {
+                    let key = settings
+                        .portable_wfx
+                        .keys()
+                        .find(|name| name.eq_ignore_ascii_case(&plugin))
+                        .cloned()
+                        .unwrap_or_else(|| plugin.clone());
+                    let target = settings.portable_wfx.entry(key).or_default();
+                    let mut names = std::collections::BTreeMap::new();
+                    for (name, columns) in imported.sets {
+                        let candidate = import_view_name(&name, &target.sets);
+                        target.sets.insert(candidate.clone(), columns);
+                        names.insert(name, candidate);
+                    }
+                    for (name, options) in imported.options {
+                        if let Some(name) = names.get(&name) {
+                            target.options.insert(name.clone(), options);
+                        }
+                    }
+                    for (id, mut layout) in imported.tc_layouts {
+                        if let Some(name) = names.get(&layout.name) {
+                            layout.name.clone_from(name);
+                            target.tc_layouts.insert(id, layout);
+                        }
+                    }
+                    wfx_names.insert(plugin.to_ascii_lowercase(), names.clone());
+                    target.active = imported.active.and_then(|name| names.remove(&name));
+                    target.plugin_default = imported.plugin_default;
+                    if target.sets.len() > 128 {
+                        return Err(io::Error::other(
+                            "Mehr als 128 WFX-Spaltensätze für ein Plugin.",
+                        ));
+                    }
+                }
                 if !imported.column_layouts.is_empty() {
                     settings.tc_columns = imported.column_layouts;
                     for layout in settings.tc_columns.values_mut() {
@@ -704,6 +810,14 @@ impl App {
                         && let Some(name) = column_names.get(columns)
                     {
                         columns.clone_from(name);
+                    }
+                    for (plugin, variant) in &mut mode.wfx_columns {
+                        if let Some(mapped) = wfx_names
+                            .get(&plugin.to_ascii_lowercase())
+                            .and_then(|names| names.get(&variant.columns))
+                        {
+                            variant.columns.clone_from(mapped);
+                        }
                     }
                     names.insert(name, candidate.clone());
                     settings.modes.insert(candidate, mode);
@@ -731,9 +845,8 @@ impl App {
                     parse_sort_in(value, Some(&self.active_wfx_columns(self.active)))?
                 } else {
                     let sort = parse_sort(value)?;
-                    let columns = self.active_wdx_columns(self.active);
-                    if sort.iter().any(|order| matches!(order.key, SortKey::Wdx(index) if !self.current().is_local()
-                        || !self.current().detailed() || !columns.iter().any(|(pos, _, _)| *pos == usize::from(index)))) {
+                    let columns = self.value_columns(self.active);
+                    if sort.iter().any(|order| matches!(order.key, SortKey::Wdx(index) if !self.current().detailed() || !columns.iter().any(|(pos, _)| *pos == usize::from(index)))) {
                         return Err(io::Error::other("Die angegebene WDX-Spalte fehlt in der lokalen Detailansicht."));
                     }
                     sort
@@ -745,10 +858,12 @@ impl App {
         }
         Ok(())
     }
-
     pub(crate) fn apply_named_view(&mut self, name: &str, modes: bool) -> io::Result<()> {
         let mode = if modes {
-            self.profile.views.modes.get(name).cloned()
+            self.profile.views.modes.get(name).cloned().map(|mut mode| {
+                mode.identity = name.into();
+                mode
+            })
         } else {
             self.profile.views.columns.contains_key(name).then(|| Mode {
                 columns: Some(name.to_owned()),
@@ -759,8 +874,22 @@ impl App {
         self.apply_view(mode);
         Ok(())
     }
-
     fn apply_view(&mut self, mode: Mode) {
+        let mode = self.current().wfx.as_ref().map_or_else(
+            || mode.clone(),
+            |location| mode.clone().for_wfx(&location.plugin.name),
+        );
+        let lifecycle = mode.clone();
+        let wfx_selection = self.current().wfx.as_ref().and_then(|location| {
+            let name = mode.columns.as_ref()?;
+            self.wfx_sets(&location.plugin.path)?
+                .sets
+                .contains_key(name)
+                .then(|| arco_core::profile::WfxTabView {
+                    plugin: location.plugin.name.clone(),
+                    view: arco_core::profile::WfxView::Custom(name.clone()),
+                })
+        });
         let side = self.active;
         let hidden = self.profile.show_hidden;
         let tab = self.current_mut();
@@ -776,6 +905,16 @@ impl App {
             hidden,
         );
         tab.options.view_colors = mode.colors;
+        if let Some(selection) = wfx_selection {
+            tab.options.wfx_view = Some(selection);
+            tab.options.column_set = None;
+        }
+        if !lifecycle.identity.is_empty()
+            || !lifecycle.commands.is_empty()
+            || !lifecycle.icon.is_empty()
+        {
+            tab.view_override = Some(lifecycle);
+        }
         if self.current().view_scope.is_none()
             && self.current().is_local()
             && (self.current().shows_comments()
@@ -788,7 +927,6 @@ impl App {
         self.publish(side);
         self.save();
     }
-
     pub(super) fn save_view_settings(&mut self, settings: Settings) -> io::Result<()> {
         if !self.save_profile {
             return Err(io::Error::other("Das Arco-Profil ist nicht verfügbar."));
@@ -851,7 +989,6 @@ impl App {
         }
         Ok(())
     }
-
     pub(super) fn apply_color_settings(&self) {
         let ui = self.ui();
         let colors = ui.global::<Colors>();
@@ -868,7 +1005,6 @@ impl App {
         }
     }
 }
-
 fn parse_colors(value: &str, settings: &mut Settings) -> io::Result<()> {
     let parse_rgb = |raw: &str| -> io::Result<u32> {
         let raw = raw.strip_prefix('#').unwrap_or(raw);
@@ -913,7 +1049,6 @@ fn parse_colors(value: &str, settings: &mut Settings) -> io::Result<()> {
     settings.cursor = cursor;
     Ok(())
 }
-
 pub(super) fn name_line(value: Option<&str>, existing: Option<&str>) -> io::Result<String> {
     let name = value.unwrap_or_default().trim();
     if name.is_empty()
@@ -932,7 +1067,6 @@ pub(super) fn name_line(value: Option<&str>, existing: Option<&str>) -> io::Resu
     }
     Ok(name.into())
 }
-
 fn import_view_name<T>(name: &str, existing: &std::collections::BTreeMap<String, T>) -> String {
     if !existing.contains_key(name) {
         return name.into();
@@ -942,7 +1076,6 @@ fn import_view_name<T>(name: &str, existing: &std::collections::BTreeMap<String,
         .find(|candidate| !existing.contains_key(candidate))
         .unwrap()
 }
-
 fn parse_columns<'a>(
     lines: impl Iterator<Item = &'a str>,
     fields: &[WdxColumn],
@@ -955,7 +1088,6 @@ fn parse_columns<'a>(
             .map(Field::Wdx)
     })
 }
-
 fn parse_column_specs<'a>(
     lines: impl Iterator<Item = &'a str>,
     plugin_field: impl Fn(&str) -> Option<Field>,
@@ -1020,7 +1152,6 @@ fn parse_column_specs<'a>(
     }
     Ok(columns)
 }
-
 fn parse_mode<'a>(lines: impl Iterator<Item = &'a str>, settings: &Settings) -> io::Result<Mode> {
     let mut mode = Mode::default();
     for line in lines.map(str::trim).filter(|line| !line.is_empty()) {
@@ -1059,7 +1190,6 @@ fn parse_mode<'a>(lines: impl Iterator<Item = &'a str>, settings: &Settings) -> 
     }
     Ok(mode)
 }
-
 fn parse_rules(value: &str, settings: &mut Settings) -> io::Result<()> {
     let mut lines = value
         .lines()
@@ -1150,11 +1280,9 @@ fn parse_rules(value: &str, settings: &mut Settings) -> io::Result<()> {
     settings.rules = rules;
     Ok(())
 }
-
 fn sort_text(orders: &[SortOrder]) -> String {
     sort_text_in(orders, false)
 }
-
 fn sort_text_in(orders: &[SortOrder], wfx: bool) -> String {
     orders
         .iter()
@@ -1181,11 +1309,9 @@ fn sort_text_in(orders: &[SortOrder], wfx: bool) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
-
 fn parse_sort(value: &str) -> io::Result<Vec<SortOrder>> {
     parse_sort_in(value, None)
 }
-
 fn parse_sort_in(value: &str, wfx: Option<&[WfxField]>) -> io::Result<Vec<SortOrder>> {
     let mut orders = Vec::new();
     for part in value
@@ -1226,7 +1352,6 @@ fn parse_sort_in(value: &str, wfx: Option<&[WfxField]>) -> io::Result<Vec<SortOr
     }
     Ok(orders)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1234,7 +1359,6 @@ mod tests {
     use arco_core::files::Kind;
     use arco_core::plugin::WdxField;
     use std::path::PathBuf;
-
     #[test]
     fn wfx_multisort_uses_plugin_defaults_and_explicit_directions() {
         let fields = [
@@ -1264,7 +1388,6 @@ mod tests {
         }
         assert!(parse_sort("wfx1").is_err());
     }
-
     #[test]
     fn colors_respect_mask_exclusions_and_light_dark_pairs() {
         let mut settings = Settings::default();
@@ -1286,7 +1409,6 @@ mod tests {
         assert!(!colors[0].matches(std::ffi::OsStr::new("ignoriert.txt")));
         assert!(parse_colors("* | #XYZ | #000000", &mut settings).is_err());
     }
-
     #[test]
     fn named_columns_keep_wdx_field_identity_and_custom_order() {
         let field = WdxColumn {
@@ -1338,7 +1460,6 @@ mod tests {
         );
         assert!(parse_sort("unsortiert,-größe").is_err());
     }
-
     #[test]
     fn automatic_mode_leaves_the_manual_tab_view_and_original_row_order_available() {
         let mut tab = Tab::new(PathBuf::from("C:/test"));

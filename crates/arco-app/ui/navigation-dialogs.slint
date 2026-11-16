@@ -6,7 +6,7 @@ export struct NavigationRow { label: string, detail: string, choice: int, kind: 
 export struct NavigationForm {
     name: string, groups: string, path: string, other: string,
     icon: string, command: string, arguments: string, working: string,
-    action: int, window: int, tc: bool, prompt: bool, args: bool,
+    action: int, window: int, tc: bool, prompt: bool, args: bool, raw: bool,
     drop-children: bool, option: int
 }
 export struct NavigationData {
@@ -252,7 +252,9 @@ export component NavigationEditorCard inherits Rectangle {
                     if root.button && root.form.action == 1 : FormSection {
                         title: @tr("Programmoptionen");
                         CheckBox { text: @tr("Argumente übergeben (ein Argument je Zeile)"); checked <=> root.form.args; }
-                        if root.form.args : TextEdit { text <=> root.form.arguments; height: 110px; accessible-label: @tr("Argumente, ein Argument je Zeile"); }
+                        if root.form.args : CheckBox { text: @tr("Als Windows-Parameterzeile bearbeiten"); checked <=> root.form.raw; }
+                        if root.form.args : TextEdit { text <=> root.form.arguments; height: 110px; accessible-label: root.form.raw ? @tr("Windows-Parameterzeile") : @tr("Argumente, ein Argument je Zeile"); }
+                        if root.form.args && root.form.raw : Text { text: @tr("Manuelle Anführungszeichen bleiben erhalten. %Q unterdrückt bei TC-Platzhaltern automatische Anführungszeichen; selbst gesetzte Anführungszeichen gelten weiterhin."); color: Colors.muted; wrap: word-wrap; font-size: 11px; }
                         FieldLabel { text: @tr("Arbeitsordner (optional)"); }
                         HorizontalLayout { spacing: 8px;
                             LineEdit { text <=> root.form.working; accessible-label: @tr("Arbeitsordner (optional)"); }

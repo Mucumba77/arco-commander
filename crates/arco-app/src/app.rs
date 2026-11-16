@@ -213,7 +213,8 @@ enum Event {
     PluginPrompt(PromptTicket),
     TransferConflict(ConflictTicket),
     WdxValues(wdx::Values),
-    WfxDefaultView(PathBuf, Option<Vec<arco_core::view_settings::Column>>),
+    WfxDefaultView(PathBuf, Option<arco_core::view_settings::CustomView>),
+    ViewIcon(String, Option<image::RgbaImage>),
     Thumbnails(thumbnails::Loaded),
     TreeLoaded(directory_tree::Loaded),
     QuickPreview(QuickTarget, wlx::QuickResult),
@@ -551,6 +552,7 @@ pub struct App {
     wdx_sort_request: Option<wdx::SortRequest>,
     wdx_next_side: usize,
     wfx_default_views: view_setup::WfxDefaultViews,
+    view_lifecycle: view_setup::ViewRuntime,
     thumbnail_jobs: [Option<thumbnails::Running>; 2],
     trees: [Option<directory_tree::Tree>; 2],
     tree_loading: [bool; 2],
@@ -643,6 +645,7 @@ pub fn run(
         wdx_sort_request: None,
         wdx_next_side: 0,
         wfx_default_views: view_setup::WfxDefaultViews::default(),
+        view_lifecycle: view_setup::ViewRuntime::default(),
         thumbnail_jobs: [None, None],
         trees: [None, None],
         tree_loading: [false; 2],
@@ -1520,12 +1523,15 @@ impl App {
 
     pub fn status(&self, text: impl Into<SharedString>) {
         self.ui()
-            .set_status(crate::locale::tr(text.into().as_str()).into());
+            .set_status(crate::locale::message(text.into().as_str()).as_ref().into());
     }
 
     pub fn set_active(&mut self, side: usize) {
         self.active = side.min(1);
         self.ui().set_active_panel(self.active as i32);
+        if self.ui().get_full_panel() >= 0 {
+            self.ui().set_full_panel(self.active as i32);
+        }
     }
 
     pub fn current(&self) -> &Tab {
@@ -1543,6 +1549,7 @@ impl App {
     pub fn publish(&self, side: usize) {
         let mut data = self.panels[side].snapshot(self.effective_light_theme());
         self.publish_columns(side, &mut data);
+        self.publish_view_icons(side, &mut data);
         if side == 0 {
             self.ui().set_left(data);
         } else {
@@ -1949,7 +1956,7 @@ impl App {
         let expanded = description.is_some();
         let description = description.unwrap_or_default();
         ui.set_job_title(crate::locale::tr(label).into());
-        ui.set_job_status(description.detail.into());
+        ui.set_job_status(crate::locale::message(&description.detail).as_ref().into());
         ui.set_job_origin(description.origin.into());
         ui.set_job_target(description.target.into());
         ui.set_job_metrics(Default::default());
@@ -1960,7 +1967,9 @@ impl App {
         ui.set_job_kind(description.kind);
         ui.set_job_pausable(self.transfers.pausable());
         ui.set_job_paused(false);
+        let language = self.profile.language;
         std::thread::spawn(move || {
+            crate::locale::worker_language(language);
             let context = JobContext {
                 cancel,
                 sender: sender.clone(),
@@ -2019,7 +2028,7 @@ impl App {
                 } => {
                     let ui = self.ui();
                     if !ui.get_job_cancelling() {
-                        ui.set_job_status(detail.into());
+                        ui.set_job_status(crate::locale::message(&detail).as_ref().into());
                         ui.set_job_progress(fraction);
                         if let Some(sample) = sample {
                             self.job_progress.update(sample);
@@ -2032,6 +2041,7 @@ impl App {
                 Event::TransferConflict(ticket) => self.transfers.prompt = Some(ticket),
                 Event::WdxValues(values) => self.apply_wdx_values(values),
                 Event::WfxDefaultView(path, columns) => self.apply_wfx_default_view(path, columns),
+                Event::ViewIcon(key, image) => self.apply_view_icon(key, image),
                 Event::Thumbnails(loaded) => self.apply_thumbnails(loaded),
                 Event::TreeLoaded(loaded) => self.tree_loaded(loaded),
                 Event::SeparateSearch(id, action) => self.separate_search_action(id, *action),
@@ -2068,7 +2078,7 @@ impl App {
                         Err(error) if ui.get_job_kind() == crate::OperationKind::Utility => {
                             if ui.get_dialog_kind() == "utility" {
                                 ui.set_utility_state(crate::UtilityState {
-                                    notice: crate::locale::tr(&error).into(),
+                                    notice: crate::locale::message(&error).as_ref().into(),
                                     ..Default::default()
                                 });
                             } else if ui.get_job_cancelling() {
@@ -2079,7 +2089,7 @@ impl App {
                         }
                         Err(error) if ui.get_job_kind() == crate::OperationKind::Compare => {
                             if ui.get_dialog_kind() == "text-comparison" {
-                                ui.set_diff_notice(crate::locale::tr(&error).into());
+                                ui.set_diff_notice(crate::locale::message(&error).as_ref().into());
                             } else if ui.get_job_cancelling() {
                                 self.status(error);
                             } else {
@@ -2087,7 +2097,7 @@ impl App {
                             }
                         }
                         Err(error) if ui.get_dialog_kind() == "viewer" => {
-                            ui.set_viewer_notice(crate::locale::tr(&error).into());
+                            ui.set_viewer_notice(crate::locale::message(&error).as_ref().into());
                         }
                         Err(error)
                             if ui.get_job_kind() == crate::OperationKind::Rename
@@ -2154,6 +2164,7 @@ impl App {
             }
         }
         self.update_separate_search_progress();
+        self.poll_view_lifecycle();
         self.update_wdx_columns();
         self.update_thumbnails();
         self.update_trees();
@@ -2223,6 +2234,9 @@ impl App {
     pub fn toggle_quick_preview(&mut self) {
         self.stop_quick_plugin();
         self.quick_open = !self.quick_open;
+        if self.quick_open {
+            self.ui().set_full_panel(-1);
+        }
         self.quick_requested = None;
         self.quick_ready = false;
         let ui = self.ui();
@@ -2569,7 +2583,7 @@ impl App {
             }
             Outcome::ViewerNotice(message) if self.ui().get_dialog_kind() == "viewer" => {
                 self.ui()
-                    .set_viewer_notice(crate::locale::tr(&message).into());
+                    .set_viewer_notice(crate::locale::message(&message).as_ref().into());
             }
             Outcome::ViewerNotice(message) => self.status(message),
             Outcome::Text(title, body) => self.remember_information(&title, &body),

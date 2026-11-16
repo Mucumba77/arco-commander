@@ -956,8 +956,25 @@ fn transfer_item(
     let destination = target.parent().expect("a transfer target has a directory");
     let meta = fs::symlink_metadata(source)?;
     #[cfg(windows)]
-    if operation == Transfer::Copy && policy.ntfs.copy_links && is_link(&meta) {
-        return copy_junction(source, target, &meta, policy, cancel, progress);
+    if is_link(&meta) && (operation == Transfer::Move || policy.ntfs.copy_links) {
+        let junction = crate::native_copy::junction::Junction::open_for_transfer(
+            source,
+            operation == Transfer::Move,
+        )?;
+        let result = copy_junction(source, target, &meta, &junction, policy, cancel, progress)?;
+        if result.0 && operation == Transfer::Move {
+            check_cancel(cancel)?;
+            let comment = policy
+                .descriptions
+                .map(|_| crate::descriptions::entry_comment(source))
+                .transpose()?
+                .flatten();
+            junction.remove()?;
+            if let (Some(prepare), Some(comment)) = (policy.descriptions, comment) {
+                crate::descriptions::remove_moved(source, &comment, prepare)?;
+            }
+        }
+        return Ok(result);
     }
     let meta = checked_regular_metadata(source, meta)?;
     if policy
@@ -1040,14 +1057,21 @@ fn transfer_item(
     let mut keep = BTreeSet::new();
     let mut sidecars = BTreeMap::new();
     let mut ignored = 0;
+    #[cfg(windows)]
+    let mut junctions = BTreeMap::new();
     for item in WalkDir::new(source)
         .follow_links(false)
         .into_iter()
         .filter_entry(|entry| {
             if entry.depth() > 0
-                && policy
-                    .ignore
-                    .is_some_and(|ignore| ignore.local(entry.path(), entry.file_type().is_dir()))
+                && policy.ignore.is_some_and(|ignore| {
+                    ignore.local(
+                        entry.path(),
+                        entry.file_type().is_dir()
+                            || (entry.file_type().is_symlink()
+                                && entry.metadata().is_ok_and(|meta| is_directory_node(&meta))),
+                    )
+                })
             {
                 ignored += 1;
                 if operation == Transfer::Move {
@@ -1069,14 +1093,30 @@ fn transfer_item(
         check_cancel(cancel)?;
         let item = item?;
         let from = item.into_path();
-        let meta = regular_metadata(&from)?;
+        let meta = fs::symlink_metadata(&from)?;
+        #[cfg(windows)]
+        let junction = is_link(&meta) && (operation == Transfer::Move || policy.ntfs.copy_links);
+        #[cfg(not(windows))]
+        let junction = false;
+        if junction {
+            #[cfg(windows)]
+            junctions.insert(
+                from.clone(),
+                crate::native_copy::junction::Junction::open_for_transfer(
+                    &from,
+                    operation == Transfer::Move,
+                )?,
+            );
+        } else {
+            checked_regular_metadata(&from, meta.clone())?;
+        }
         if policy.descriptions.is_some() && meta.is_file() && crate::descriptions::is_sidecar(&from)
         {
             sidecars.insert(from.parent().expect("sidecar parent").to_path_buf(), from);
             continue;
         }
         if let Some(filter) = policy.filter
-            && meta.is_file()
+            && !is_directory_node(&meta)
         {
             let name = from.file_name().unwrap_or_default().to_os_string();
             if filter.matches(&Entry::from_metadata(from.clone(), name, &meta), cancel)? {
@@ -1114,6 +1154,25 @@ fn transfer_item(
     let mut new_directories = BTreeMap::new();
     for (from, to, meta) in &plan {
         check_cancel(cancel)?;
+        #[cfg(windows)]
+        if let Some(junction) = junctions.get(from) {
+            let (copied, _) = copy_junction(from, to, meta, junction, policy, cancel, progress)?;
+            if !copied {
+                skipped = true;
+                skipped_files.insert(from);
+                keep.extend(
+                    from.ancestors()
+                        .skip(1)
+                        .take_while(|p| p.starts_with(source))
+                        .map(Path::to_path_buf),
+                );
+            } else if operation == Transfer::Move && policy.descriptions.is_some() {
+                if let Some(comment) = crate::descriptions::entry_comment(from)? {
+                    moved_comments.insert(from, comment);
+                }
+            }
+            continue;
+        }
         if meta.is_dir() {
             let _created = create_transfer_directory(to)?;
             if let Some(prepare) = policy.descriptions
@@ -1153,7 +1212,11 @@ fn transfer_item(
             }
         }
     }
-    for (_from, to, meta) in plan.iter().rev().filter(|(_, _, meta)| meta.is_dir()) {
+    for (_from, to, meta) in plan
+        .iter()
+        .rev()
+        .filter(|(_, _, meta)| meta.is_dir() && !is_link(meta))
+    {
         #[cfg(windows)]
         if let Some(identity) = new_directories.get(to) {
             ensure_unchanged(_from, meta)?;
@@ -1169,10 +1232,27 @@ fn transfer_item(
     if operation == Transfer::Move && (!skipped || policy.resolve_conflict.is_some()) {
         check_cancel(cancel)?;
         for (from, _, meta) in &plan {
+            #[cfg(windows)]
+            if let Some(junction) = junctions.get(from) {
+                junction.check()?;
+                continue;
+            }
             ensure_unchanged(from, meta)?;
         }
         for (from, _, meta) in plan.iter().rev() {
             check_cancel(cancel)?;
+            #[cfg(windows)]
+            if let Some(junction) = junctions.remove(from) {
+                if !skipped_files.contains(from) {
+                    junction.remove()?;
+                    if let (Some(prepare), Some(comment)) =
+                        (policy.descriptions, moved_comments.remove(from))
+                    {
+                        crate::descriptions::remove_moved(from, &comment, prepare)?;
+                    }
+                }
+                continue;
+            }
             if meta.is_dir() {
                 if !keep.contains(from) {
                     if let Some(sidecar) = sidecars.get(from)
@@ -1215,33 +1295,36 @@ fn copy_junction(
     source: &Path,
     target: &Path,
     metadata: &Metadata,
+    junction: &crate::native_copy::junction::Junction,
     policy: &TransferPolicy<'_>,
     cancel: &AtomicBool,
     progress: &mut impl FnMut(Progress<'_>),
 ) -> io::Result<(bool, usize)> {
     if policy
         .ignore
-        .is_some_and(|ignore| ignore.local(source, true))
+        .is_some_and(|ignore| ignore.local(source, is_directory_node(metadata)))
     {
         return Ok((false, 1));
     }
-    if policy.filter.is_some() {
-        // A directory filter matches contents. Junction copies never inspect them.
-        return Ok((false, 0));
+    if let Some(filter) = policy.filter {
+        // Directory-link targets are never traversed. A file link can match
+        // metadata/name filters; content filters reject Kind::Link without I/O.
+        if is_directory_node(metadata)
+            || !filter.matches(
+                &Entry::from_metadata(
+                    source.to_owned(),
+                    source.file_name().unwrap_or_default().to_owned(),
+                    metadata,
+                ),
+                cancel,
+            )?
+        {
+            return Ok((false, 0));
+        }
     }
-    let options = policy.ntfs;
-    if options.streams
-        || options.permissions
-        || options.owner
-        || options.audit
-        || options.creation_time
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "Die gewählten NTFS-Metadatenoptionen sind für Verzeichnisjunctions nicht verfügbar.",
-        ));
-    }
-    let junction = crate::native_copy::junction::Junction::open(source)?;
+    let native = crate::native_copy::State::new(policy.ntfs);
+    native.check_audit_privilege()?;
+    junction.check()?;
     let target = match fs::symlink_metadata(target) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => target.to_path_buf(),
         Err(error) => return Err(error),
@@ -1281,7 +1364,7 @@ fn copy_junction(
         current: None,
         phase: ProgressPhase::Data,
     });
-    junction.copy_to(&target, cancel)?;
+    junction.copy_to(source, &target, &native, cancel)?;
     if let Some(prepare) = policy.descriptions {
         crate::descriptions::copy_entry(source, &target, prepare)?;
     }
@@ -1691,6 +1774,16 @@ pub fn is_link(meta: &Metadata) -> bool {
     }
     #[cfg(not(windows))]
     meta.is_symlink()
+}
+
+fn is_directory_node(meta: &Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        meta.file_attributes() & 0x10 != 0
+    }
+    #[cfg(not(windows))]
+    meta.is_dir()
 }
 
 fn is_hidden(meta: &Metadata, name: &OsStr) -> bool {

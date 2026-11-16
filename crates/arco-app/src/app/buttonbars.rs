@@ -9,6 +9,7 @@ use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+mod raw_arguments;
 mod tc_arguments;
 use tc_arguments::TcArguments;
 
@@ -93,9 +94,9 @@ impl App {
                 Dialog {
                     title: &title,
                     options: &[
-                        "Vorlage anwenden",
-                        "Vorlage mit aktuellem Stand ersetzen",
-                        "Vorlage entfernen",
+                        crate::locale::tr("Vorlage anwenden"),
+                        crate::locale::tr("Vorlage mit aktuellem Stand ersetzen"),
+                        crate::locale::tr("Vorlage entfernen"),
                     ],
                     ..Default::default()
                 },
@@ -560,6 +561,7 @@ impl App {
             ButtonbarAction::Program {
                 path,
                 arguments,
+                raw_parameters,
                 working_directory,
                 window,
                 tc_arguments,
@@ -568,6 +570,7 @@ impl App {
                 let result = self.prepare_button_program(
                     path,
                     arguments,
+                    raw_parameters,
                     working_directory,
                     window,
                     tc_arguments,
@@ -602,6 +605,7 @@ impl App {
         &mut self,
         path: PathBuf,
         arguments: Vec<String>,
+        raw_parameters: Option<String>,
         working: Option<PathBuf>,
         window: ProgramWindow,
         tc_arguments: bool,
@@ -623,16 +627,50 @@ impl App {
             }
             None => source.is_local().then(|| source.path.clone()),
         };
-        let (arguments, list_file) = if tc_arguments {
-            TcArguments::parse(&arguments)?.expand(
+        if tc_arguments {
+            let input = raw_parameters
+                .as_deref()
+                .map(arco_windows::parse_windows_arguments)
+                .transpose()?
+                .unwrap_or_else(|| arguments.clone());
+            if TcArguments::parse(&input)?.marks_cursor()
+                && self.current().marked_paths().is_empty()
+                && self.current().current().is_some()
+            {
+                let cursor = self.current().cursor;
+                self.current_mut().select_row(cursor, true, false);
+                self.publish_cursor(self.active, true);
+            }
+        }
+        let (arguments, list_file, raw) = if let Some(parameters) = raw_parameters {
+            let (expanded, list) = if tc_arguments {
+                TcArguments::expand_raw(
+                    &parameters,
+                    self.panels.each_ref().map(|panel| panel.current()),
+                    self.active,
+                )?
+            } else {
+                raw_arguments::manual_quotes(&parameters)?;
+                (parameters, None)
+            };
+            (
+                arco_windows::parse_windows_arguments(&expanded)?,
+                list,
+                Some(expanded),
+            )
+        } else if tc_arguments {
+            let (expanded, list) = TcArguments::parse(&arguments)?.expand(
                 self.panels.each_ref().map(|panel| panel.current()),
                 self.active,
-            )?
+            )?;
+            (expanded, list, None)
         } else {
-            (arguments, None)
+            (arguments, None, None)
         };
         if prompt_arguments {
-            let value = join_windows_arguments(arguments.iter().map(String::as_str));
+            let value = raw
+                .clone()
+                .unwrap_or_else(|| join_windows_arguments(arguments.iter().map(String::as_str)));
             let description = format!(
                 "{}\n{}",
                 display_path(&path),
@@ -657,7 +695,7 @@ impl App {
             );
             return Ok(());
         }
-        Self::start_button_program(&path, arguments, working, window, list_file)
+        Self::start_button_program(&path, arguments, working, window, list_file, raw)
     }
 
     pub(crate) fn start_button_program(
@@ -666,17 +704,43 @@ impl App {
         working: Option<PathBuf>,
         window: ProgramWindow,
         list_file: Option<tempfile::TempPath>,
+        raw: Option<String>,
     ) -> io::Result<()> {
+        if let Some(raw) = &raw {
+            raw_arguments::manual_quotes(raw)?;
+            if path
+                .as_os_str()
+                .len()
+                .saturating_add(raw.encode_utf16().count())
+                .saturating_add(4)
+                > 32767
+            {
+                return Err(io::Error::other(
+                    "Der Programmaufruf überschreitet 32767 Zeichen.",
+                ));
+            }
+        }
         let waiter = list_file.map(keep_list_until_exit).transpose()?;
         let running = if window == ProgramWindow::Normal {
             let mut program = std::process::Command::new(path);
-            program.args(arguments);
+            if let Some(raw) = raw {
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    program.raw_arg(raw);
+                }
+                #[cfg(not(windows))]
+                program.args(arco_windows::parse_windows_arguments(&raw)?);
+            } else {
+                program.args(arguments);
+            }
             if let Some(working) = working {
                 program.current_dir(working);
             }
             RunningButton::Process(program.spawn()?)
         } else {
-            let parameters = join_windows_arguments(arguments.iter().map(String::as_str));
+            let parameters =
+                raw.unwrap_or_else(|| join_windows_arguments(arguments.iter().map(String::as_str)));
             RunningButton::Shell(arco_windows::launch_with_window(
                 path,
                 &parameters,
@@ -790,11 +854,15 @@ fn button_text(button: &ButtonbarButton) -> String {
         ButtonbarAction::Program {
             path,
             arguments,
+            raw_parameters,
             window,
             tc_arguments,
             prompt_arguments,
             ..
         } => {
+            if raw_parameters.is_some() {
+                text.push_str("raw:");
+            }
             text.push_str(match (window, tc_arguments, prompt_arguments) {
                 (ProgramWindow::Normal, _, true) => "tc-ask:",
                 (ProgramWindow::Minimized, _, true) => "tc-min-ask:",
@@ -807,7 +875,11 @@ fn button_text(button: &ButtonbarButton) -> String {
                 (ProgramWindow::Maximized, true, false) => "tc-max:",
             });
             text.push_str(&display_path(path));
-            for argument in arguments {
+            if let Some(raw) = raw_parameters {
+                text.push('\n');
+                text.push_str(raw);
+            }
+            for argument in arguments.iter().filter(|_| raw_parameters.is_none()) {
                 text.push('\n');
                 text.push_str(argument);
             }
@@ -851,6 +923,7 @@ fn import_tc_button(entry: TcButtonbarEntry) -> Option<ButtonbarButton> {
         ButtonbarAction::Program {
             path,
             arguments,
+            raw_parameters: Some(parameters.into()),
             working_directory: start_directory(&entry.working_directory).ok()?,
             window,
             tc_arguments,
@@ -1130,13 +1203,17 @@ fn export_tc_buttonbar(
             ButtonbarAction::Program {
                 path,
                 arguments,
+                raw_parameters,
                 working_directory,
                 tc_arguments,
                 prompt_arguments,
                 ..
             } => (
                 format!("\"{}\"", display_path(path)),
-                export_program_arguments(arguments, *tc_arguments, *prompt_arguments),
+                raw_parameters.as_ref().map_or_else(
+                    || export_program_arguments(arguments, *tc_arguments, *prompt_arguments),
+                    |raw| format!("{}{raw}", if *prompt_arguments { "?" } else { "" }),
+                ),
                 working_directory
                     .as_deref()
                     .map(display_path)
@@ -1365,7 +1442,7 @@ fn keep_list_until_exit(
     Ok(sender)
 }
 
-fn icon_image(value: &str) -> Option<image::RgbaImage> {
+pub(super) fn icon_image(value: &str) -> Option<image::RgbaImage> {
     if let Some((path, index)) = resource_icon(value) {
         if !path.is_absolute() {
             return None;
@@ -1455,7 +1532,7 @@ fn start_directory(value: &str) -> io::Result<Option<PathBuf>> {
 }
 
 pub(super) fn parse_button(value: &str, working_directory: &str) -> io::Result<ButtonbarButton> {
-    if value.len() > 4096 {
+    if value.len() > 128 * 1024 {
         return Err(io::Error::other("Die Schaltfläche enthält zu viel Text."));
     }
     let mut lines = value.lines();
@@ -1477,16 +1554,33 @@ pub(super) fn parse_button(value: &str, working_directory: &str) -> io::Result<B
             "Wähle einen Symbolnamen oder eine lesbare Bilddatei bis 1 MiB.",
         ));
     };
-    let arguments: Vec<_> = lines.map(str::to_owned).collect();
+    let mut arguments: Vec<_> = lines.map(str::to_owned).collect();
     if command.chars().any(char::is_control)
-        || arguments
-            .iter()
-            .any(|argument| argument.chars().any(char::is_control))
+        || arguments.iter().any(|argument| {
+            argument.chars().any(|character| {
+                character.is_control() && !(command.starts_with("raw:") && character == '\t')
+            })
+        })
     {
         return Err(io::Error::other(
             "Der Befehl oder ein Argument enthält Steuerzeichen.",
         ));
     }
+    let raw_mode = command.starts_with("raw:");
+    let command = command.strip_prefix("raw:").unwrap_or(command);
+    let raw_parameters = if raw_mode {
+        if arguments.len() > 1 {
+            return Err(io::Error::other(
+                "Eine Windows-Parameterzeile darf keinen Zeilenumbruch enthalten.",
+            ));
+        }
+        let raw = arguments.first().cloned().unwrap_or_default();
+        raw_arguments::manual_quotes(&raw)?;
+        arguments = arco_windows::parse_windows_arguments(&raw)?;
+        Some(raw)
+    } else {
+        None
+    };
     let (path, window, tc_arguments, prompt_arguments) = match command.split_once(':') {
         Some(("tc", path)) => (path, ProgramWindow::Normal, true, false),
         Some(("min", path)) => (path, ProgramWindow::Minimized, false, false),
@@ -1521,6 +1615,7 @@ pub(super) fn parse_button(value: &str, working_directory: &str) -> io::Result<B
         ButtonbarAction::Program {
             path,
             arguments,
+            raw_parameters,
             working_directory,
             window,
             tc_arguments,
@@ -1644,6 +1739,7 @@ mod tests {
             ButtonbarAction::Program {
                 path: PathBuf::from(r"C:\Program Files\Tool.exe"),
                 arguments: vec!["mit Leerzeichen".into(), "".into()],
+                raw_parameters: Some("\"mit Leerzeichen\" \"\"".into()),
                 working_directory: Some(PathBuf::from(r"C:\Start Ordner")),
                 window: ProgramWindow::Normal,
                 tc_arguments: false,
@@ -1686,7 +1782,11 @@ mod tests {
             .filter_map(import_tc_button)
             .next()
             .unwrap();
-        assert_eq!(restored.action, button.action);
+        let mut expected = button.action.clone();
+        if let ButtonbarAction::Program { raw_parameters, .. } = &mut expected {
+            *raw_parameters = Some(r#""%P%N" "%%""#.into());
+        }
+        assert_eq!(restored.action, expected);
         assert_eq!(parse_button(&button_text(&button), "").unwrap(), button);
         assert!(parse_button("X\nterminal\ntc:C:\\test.exe\n%L", "").is_ok());
         assert!(parse_button("X\nterminal\ntc:C:\\test.exe\n%L\n%UL", "").is_err());
@@ -1721,7 +1821,7 @@ mod tests {
         ));
         let output = export_tc_buttonbar(&imported, &mut |_| unreachable!()).unwrap();
         assert!(output.contains(r#"param1=?"/in=%v" "C:\\""#));
-        assert!(output.contains(r#"param2="?literal" "%v""#));
+        assert!(output.contains(r#"param2="?literal" %v"#));
         assert!(output.contains("param3=?\r\n"));
         for (button, entry) in imported
             .iter()
@@ -1730,6 +1830,35 @@ mod tests {
             assert_eq!(&import_tc_button(entry).unwrap(), button);
             assert_eq!(&parse_button(&button_text(button), "").unwrap(), button);
         }
+    }
+
+    #[test]
+    fn imported_raw_parameters_survive_bar_json_and_editor_round_trips() {
+        let raw = r#"%Q "%P%N" /out="%T" "" %%"#;
+        let input = format!(
+            "[Buttonbar]\nButtoncount=1\ncmd1=C:\\Tools\\Example.exe\nparam1={raw}\nmenu1=Example\n"
+        );
+        let buttons: Vec<_> = profile::parse_tc_buttonbar(&input)
+            .unwrap()
+            .into_iter()
+            .filter_map(import_tc_button)
+            .collect();
+        assert_eq!(buttons.len(), 1);
+        assert!(
+            matches!(&buttons[0].action, ButtonbarAction::Program { raw_parameters: Some(value), .. } if value == raw)
+        );
+        let stored = serde_json::to_string(&buttons[0]).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ButtonbarButton>(&stored).unwrap(),
+            buttons[0]
+        );
+        let edited = parse_button(&button_text(&buttons[0]), "").unwrap();
+        assert_eq!(edited, buttons[0]);
+        let export = export_tc_buttonbar(&buttons, &mut |_| unreachable!()).unwrap();
+        assert_eq!(
+            profile::parse_tc_buttonbar(&export).unwrap()[0].parameters,
+            raw
+        );
     }
 
     #[test]
@@ -1752,6 +1881,7 @@ mod tests {
             ButtonbarAction::Program {
                 path: executable,
                 arguments: vec!["--file".into(), "A B.txt".into()],
+                raw_parameters: None,
                 working_directory: Some(PathBuf::from("bin")),
                 window: ProgramWindow::Normal,
                 tc_arguments: false,

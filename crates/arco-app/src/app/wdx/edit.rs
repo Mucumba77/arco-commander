@@ -101,7 +101,7 @@ impl App {
                 Dialog {
                     title: "WDX-Eingabemodus",
                     description: "Der Plugin-Editor startet mit dem Wert der ersten Datei, wenn das Plugin ihn bereitstellt.",
-                    options: &["Plugin-Editor öffnen", "Wert direkt eingeben"],
+                    options: &[crate::locale::tr("Plugin-Editor öffnen"), crate::locale::tr("Wert direkt eingeben")],
                     ..Dialog::default()
                 },
             );

@@ -4,7 +4,7 @@ import { DialogHeading, FieldLabel, FormSection } from "operation-dialogs.slint"
 import { NavigationRow } from "navigation-dialogs.slint";
 
 export enum ConfigurationKind { columns, mode, rules, association, sort, colors }
-export struct ConfigurationForm { name: string, view: int, column: int, automatic: bool, program: string, args: bool, arguments: string, default-open: bool }
+export struct ConfigurationForm { name: string, view: int, column: int, automatic: bool, program: string, args: bool, arguments: string, default-open: bool, commands: string, icon: string, auto-width: string, name-width: string, horizontal-scroll: bool }
 export struct ConfigurationItem {
     field: int, title: string, expression: string, width: string, alignment: int,
     mode: int, scope: int, path: string, contains: string, excludes: string,
@@ -82,6 +82,25 @@ export component ConfigurationCard inherits Rectangle {
                         FieldLabel { text: @tr("Spaltensatz"); }
                         ComboBox { model: root.data.sets; current-index <=> root.form.column; accessible-label: @tr("Spaltensatz"); }
                         Text { text: @tr("Eigene Spaltensätze benötigen die Detailansicht. Importierte Ansichtsfarben bleiben erhalten."); color: Colors.muted; wrap: word-wrap; font-size: 11px; }
+                    }
+                    if root.data.kind == ConfigurationKind.mode : FormSection {
+                        title: @tr("Moduswechsel und Tab-Symbol");
+                        FieldLabel { text: @tr("Automatische Befehle"); }
+                        LineEdit { text <=> root.form.commands; accessible-label: @tr("Automatische Befehle"); }
+                        Text { text: @tr("Interne TC-Befehle mit Komma trennen. * wiederholt bei Ordnerwechsel, - unterdrückt Tabwechsel; hinter | stehen Befehle beim Verlassen."); color: Colors.muted; wrap: word-wrap; font-size: 11px; }
+                        FieldLabel { text: @tr("Symbolpfad, optional mit Ressourcenindex"); }
+                        HorizontalLayout { spacing: 8px;
+                            LineEdit { text <=> root.form.icon; accessible-label: @tr("Symbolpfad, optional mit Ressourcenindex"); }
+                            Button { text: @tr("Datei wählen …"); clicked => { let path = root.file(false, root.form.icon); if (path != "") { root.form.icon = path; } } }
+                        }
+                    }
+                    if root.columns : FormSection {
+                        title: @tr("Spaltenbreiten und Laufleiste");
+                        FieldLabel { text: @tr("Referenzbreite für automatische Anpassung (0 = aus)"); }
+                        LineEdit { text <=> root.form.auto-width; accessible-label: @tr("Referenzbreite für automatische Anpassung (0 = aus)"); }
+                        FieldLabel { text: @tr("Namensspalte: Mindestbreite"); }
+                        LineEdit { text <=> root.form.name-width; accessible-label: @tr("Namensspalte: Mindestbreite"); }
+                        CheckBox { text: @tr("Horizontales Scrollen erlauben"); checked <=> root.form.horizontal-scroll; }
                     }
                     if root.association : FormSection {
                         title: @tr("Dateien und Aktion");

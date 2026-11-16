@@ -9,11 +9,13 @@ Arco Commander ist ein Zwei-Fenster-Dateimanager für Windows, geschrieben in Ru
 
 ## Download
 
-[**Arco Commander 1.3.0 für Windows x64 herunterladen**](https://github.com/Mucumba77/arco-commander/releases/download/v1.3.0/arco-commander-v1.3.0-windows-x64.zip)
+[**Arco Commander 1.4.0 für Windows x64 herunterladen**](https://github.com/Mucumba77/arco-commander/releases/download/v1.4.0/arco-commander-v1.4.0-windows-x64.zip)
 
-Das portable ZIP ist für Windows 10 22H2 und Windows 11 vorgesehen. Entpacke es vollständig und starte `arco-commander.exe`. Das Paket enthält beide Plugin-Hosts, das ZIP-SFX-Modul, die Kurzanleitung und Drittanbieterhinweise. Es ist unsigniert. [Release-Hinweise und SHA-256-Prüfsumme](https://github.com/Mucumba77/arco-commander/releases/tag/v1.3.0)
+Das portable ZIP ist für Windows 10 22H2 und Windows 11 vorgesehen. Entpacke es vollständig und starte `arco-commander.exe`. Das Paket enthält beide Plugin-Hosts, das ZIP-SFX-Modul, die Kurzanleitung und Drittanbieterhinweise. Es ist unsigniert. [Release-Hinweise und SHA-256-Prüfsumme](https://github.com/Mucumba77/arco-commander/releases/tag/v1.4.0)
 
 Für ein Update entpacke die neue Version in einen eigenen Ordner. Arco verwendet das bisherige Standardprofil weiter. Bei Verwendung von `--portable` übernimm zusätzlich die Profildatei `arco-commander.json` aus dem bisherigen Programmordner.
+
+Voraussetzung ist die aktuelle **Microsoft Visual C++ v14-Laufzeit (x64)**; für den 32-Bit-Plugin-Host zusätzlich **x86**. Beide Pakete gibt es bei den [offiziellen Microsoft-Downloads](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist/). Wenn Windows eine fehlende `VCRUNTIME140.dll` oder `VCRUNTIME140_1.dll` meldet, installiere das passende Paket.
 
 ![Arco Commander mit Arbeitsstand und Archiv nebeneinander](docs/screenshots/hauptfenster.jpg)
 
@@ -39,6 +41,10 @@ Die Fortschrittskarte zeigt die aktuelle Datei und den Stand der Kopie. Über **
 Mit **Eigenes Fenster** öffnest du die Dateivorschau im separaten Lister. Dort kannst du im Text suchen oder zur Hexansicht wechseln.
 
 ![Arco Lister mit der Projektübersicht aus den Beispieldateien](docs/screenshots/lister.jpg)
+
+## Neu in Version 1.4.0
+
+Die Abschlussarbeit für **Oberfläche/Navigation** und **Dateioperationen/Windows-Integration** ist im [Nachweis für Bereiche 1 und 2](docs/BEREICH1-2-ABSCHLUSS.md) dokumentiert. Version 1.4.0 enthält diesen Abschluss der ersten beiden Matrixbereiche. Die [Bedienung der ergänzten Funktionen](docs/NAVIGATION-UND-DATEIEN.md) und die [Fensterprüfliste](docs/UI-PRUEFUNG.md) unterscheiden Implementierung und manuelle Abnahme.
 
 ## Bedienung und Funktionen
 

@@ -3,6 +3,8 @@ pub(crate) use windows::*;
 #[cfg(windows)]
 pub(crate) mod junction;
 #[cfg(windows)]
+mod link_streams;
+#[cfg(windows)]
 mod security;
 
 #[cfg(not(windows))]
@@ -38,9 +40,9 @@ mod windows {
         FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL,
         FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_SPARSE_FILE, FILE_ATTRIBUTE_SYSTEM,
         FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO,
-        FILE_WRITE_ATTRIBUTES, FileBasicInfo, FileIdInfo, FindClose, FindFirstStreamW,
-        FindNextStreamW, FindStreamInfoStandard, GetFileInformationByHandleEx, READ_CONTROL,
-        SetFileInformationByHandle, WIN32_FIND_STREAM_DATA,
+        FILE_READ_ATTRIBUTES, FILE_WRITE_ATTRIBUTES, FileBasicInfo, FileIdInfo, FindClose,
+        FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard, GetFileInformationByHandleEx,
+        READ_CONTROL, SetFileInformationByHandle, WIN32_FIND_STREAM_DATA,
     };
     use windows_sys::Win32::System::IO::DeviceIoControl;
     use windows_sys::Win32::System::Ioctl::{
@@ -175,6 +177,42 @@ mod windows {
                 security::check_audit()?;
             }
             Ok(())
+        }
+
+        pub(crate) fn prepare_link(
+            &self,
+            input: &File,
+            source: &Path,
+            target: (&Path, &File),
+            cancel: &AtomicBool,
+        ) -> io::Result<()> {
+            self.check_audit_privilege()?;
+            let metadata = input.metadata()?;
+            if !files::is_link(&metadata) || !files::is_link(&target.1.metadata()?) {
+                return Err(io::Error::other("Die Verzeichnisjunction wurde ersetzt."));
+            }
+            if self.options.streams {
+                super::link_streams::copy(input, source, target.1, target.0, cancel)?;
+            }
+            if self.options.permissions || self.options.owner || self.options.audit {
+                let source_handle = fs::OpenOptions::new()
+                    .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES)
+                    .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                    .open(source)?;
+                if file_id(&source_handle)? != file_id(input)? {
+                    return Err(io::Error::other(
+                        "Die Quelle für Junction-Sicherheitsdaten wurde ersetzt.",
+                    ));
+                }
+                security::copy(&source_handle, source, target, self.options)?;
+            }
+            files::check_cancel(cancel)?;
+            self.copy_basic_attributes(target.1, &metadata, &metadata)?;
+            set_file_handle_times(
+                target.1,
+                Some(FileTime::from_last_access_time(&metadata)),
+                Some(FileTime::from_last_modification_time(&metadata)),
+            )
         }
 
         fn copies_directory_metadata(&self) -> bool {

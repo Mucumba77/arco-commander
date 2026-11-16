@@ -49,11 +49,11 @@ impl App {
                         Err(error) => allocation_errors.push(format!("{}: {error}", display_path(path))),
                     }
                 })?;
-                let allocated_label = if allocation_errors.is_empty() && usage.errors.is_empty() {
+                let allocated_label = crate::locale::tr(if allocation_errors.is_empty() && usage.errors.is_empty() {
                     "Belegter Speicher"
                 } else {
                     "Belegter Speicher (teilweise ermittelt)"
-                };
+                });
                 let mut text = format!(
                     "{}\n\nLogische Gesamtgröße    {}\n{allocated_label}    {}\nDateien    {}\nOrdner    {}\nÜbersprungene Verknüpfungen    {}",
                     display_path(&root), human_size(usage.bytes), human_size(allocation), usage.files, usage.directories, usage.links,

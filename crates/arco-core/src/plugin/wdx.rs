@@ -2,13 +2,13 @@ use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, io};
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct WdxValue {
     pub display: String,
     pub key: WdxKey,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum WdxKey {
     Integer(i64),
     Float(f64),

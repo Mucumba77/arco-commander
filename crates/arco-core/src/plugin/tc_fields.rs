@@ -58,6 +58,115 @@ pub const TC_METADATA_FIELDS: &[&str] = &[
 ];
 
 /// Built-in metadata available without loading an external content plugin.
+/// Metadata already supplied by a virtual provider. Unsupported local-only
+/// fields remain absent: a virtual pathname must never be opened on disk.
+pub fn tc_entry_field(token: &str, entry: &crate::files::Entry) -> io::Result<Option<WdxValue>> {
+    use crate::files::Kind;
+    let Some((prefix, field)) = token.split_once('.') else {
+        return Ok(None);
+    };
+    if !prefix.eq_ignore_ascii_case("tc") {
+        return Ok(None);
+    }
+    let field = field.to_ascii_lowercase();
+    if let Some(unit) = field.strip_prefix("size.") {
+        let divisor = match unit {
+            "bytes" | "b" => 1_u64,
+            "kbytes" | "kb" | "kib" => 1024,
+            "mbytes" | "mb" | "mib" => 1024_u64.pow(2),
+            "gbytes" | "gb" | "gib" => 1024_u64.pow(3),
+            "tbytes" | "tb" | "tib" => 1024_u64.pow(4),
+            _ => return Err(io::Error::other("Unbekannte Einheit für tc.size.")),
+        };
+        return Ok(entry.size.map(|size| {
+            let value = size as f64 / divisor as f64;
+            WdxValue {
+                display: value.to_string(),
+                key: if divisor == 1 {
+                    WdxKey::Integer(size.min(i64::MAX as u64) as i64)
+                } else {
+                    WdxKey::Float(value)
+                },
+            }
+        }));
+    }
+    let text = |display: String| {
+        Some(WdxValue {
+            key: WdxKey::Text(display.to_lowercase()),
+            display,
+        })
+    };
+    let integer = |value: i64| {
+        Some(WdxValue {
+            display: value.to_string(),
+            key: WdxKey::Integer(value),
+        })
+    };
+    Ok(match field.as_str() {
+        "fullname" => text(entry.name.to_string_lossy().into_owned()),
+        "name" | "namenoext" => text(if entry.kind == Kind::Directory {
+            entry.name.to_string_lossy().into_owned()
+        } else {
+            entry
+                .path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        }),
+        "ext" | "extension" => text(
+            entry
+                .path
+                .extension()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        "path" => text(
+            entry
+                .path
+                .parent()
+                .unwrap_or(Path::new(""))
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        "fullpath" => text(entry.path.to_string_lossy().into_owned()),
+        "directory" => text(
+            entry
+                .path
+                .parent()
+                .and_then(Path::file_name)
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        "attributes" => integer(i64::from(entry.attributes)),
+        "comment" => text(entry.comment.as_deref().unwrap_or_default().into()),
+        "size" | "size.bytes" | "size.b" => entry
+            .size
+            .and_then(|size| i64::try_from(size).ok())
+            .and_then(integer),
+        "writedate" | "writetime" | "writedatetime" => entry.modified.and_then(|time| {
+            let nanos = match time.duration_since(SystemTime::UNIX_EPOCH) {
+                Ok(value) => value.as_nanos() as i128,
+                Err(error) => -(error.duration().as_nanos() as i128),
+            };
+            let ticks = u64::try_from(nanos / 100 + 116444736000000000_i128).ok()?;
+            Some(WdxValue {
+                display: chrono::DateTime::<chrono::Local>::from(time)
+                    .format(if field == "writetime" {
+                        "%H:%M:%S"
+                    } else {
+                        "%Y-%m-%d"
+                    })
+                    .to_string(),
+                key: WdxKey::DateTime(ticks),
+            })
+        }),
+        _ => None,
+    })
+}
+
 pub fn tc_field(token: &str, path: &Path, metadata: &Metadata) -> io::Result<Option<WdxValue>> {
     tc_field_with_cancel(token, path, metadata, &AtomicBool::new(false))
 }

@@ -1210,3 +1210,27 @@ Ziel	Destination
 Partnerdatei mit anderer Erweiterung	Partner file with another extension
 Partner-Erweiterungen	Partner extensions
 Partnerdatei fehlt	Partner file is missing
+Verzeichnisjunctions auch rekursiv als Links kopieren	Copy directory junctions as links, including subfolders
+Moduswechsel und Tab-Symbol	Mode changes and tab icon
+Automatische Befehle	Automatic commands
+Interne TC-Befehle mit Komma trennen. * wiederholt bei Ordnerwechsel, - unterdrückt Tabwechsel; hinter | stehen Befehle beim Verlassen.	Separate internal TC commands with commas. * repeats on folder changes, - suppresses tab switches; commands after | run on exit.
+Symbolpfad, optional mit Ressourcenindex	Icon path, optionally with a resource index
+Spaltenbreiten und Laufleiste	Column widths and scrolling
+Referenzbreite für automatische Anpassung (0 = aus)	Reference width for automatic scaling (0 = off)
+Namensspalte: Mindestbreite	Name column: minimum width
+Horizontales Scrollen erlauben	Allow horizontal scrolling
+Aktives Dateifenster auf volle Breite	Expand active file panel to full width
+Dateifenster gleich breit	Make file panels equal width
+Als Windows-Parameterzeile bearbeiten	Edit as a Windows parameter line
+Windows-Parameterzeile	Windows parameter line
+Manuelle Anführungszeichen bleiben erhalten. %Q unterdrückt bei TC-Platzhaltern automatische Anführungszeichen; selbst gesetzte Anführungszeichen gelten weiterhin.	Manual quotes are preserved. %Q suppresses automatic quoting of TC placeholders; explicitly added quotes still apply.
+Symbolische Links und Junctions als Links kopieren	Copy symbolic links and junctions as links
+Systemsteuerung	Control Panel
+Schriftarten	Fonts
+Drucker	Printers
+Systemsteuerung im Dateifenster	Control Panel in file panel
+Schriftarten im Dateifenster	Fonts in file panel
+Drucker im Dateifenster	Printers in file panel
+Netzwerk im Dateifenster	Network in file panel
+Papierkorb im Dateifenster	Recycle Bin in file panel
+Verschieben erhält Links. Metadatenoptionen gelten für das Linkobjekt; sein Ziel wird nicht durchlaufen. Symbolische Links benötigen die passende Windows-Berechtigung oder den Entwicklermodus.	Moving preserves links. Metadata options apply to the link itself; its target is not traversed. Symbolic links require the appropriate Windows privilege or Developer Mode.

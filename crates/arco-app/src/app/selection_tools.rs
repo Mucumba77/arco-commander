@@ -17,7 +17,7 @@ impl App {
             description: "Springt zum nächsten sichtbaren Treffer und behält Auswahl und Filter bei.",
             placeholder: "Suchtext oder regulärer Ausdruck",
             value: text,
-            options: &["Anfang des Namens", "Teil des Namens", "Regulärer Ausdruck"],
+            options: &[crate::locale::tr("Anfang des Namens"), crate::locale::tr("Teil des Namens"), crate::locale::tr("Regulärer Ausdruck")],
             ..Default::default()
         });
     }

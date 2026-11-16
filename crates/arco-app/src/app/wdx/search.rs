@@ -508,7 +508,7 @@ impl App {
             Dialog {
                 title: "WDX-Suchprofil",
                 description: &name,
-                options: &["Öffnen", "Löschen"],
+                options: &[crate::locale::tr("Öffnen"), crate::locale::tr("Löschen")],
                 ..Dialog::default()
             },
         );

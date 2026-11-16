@@ -398,7 +398,12 @@ impl Panel {
         };
         PanelData {
             path: deferred_path
-                .unwrap_or_else(|| tab.location().display())
+                .unwrap_or_else(|| match &tab.shell {
+                    Some(shell) if shell.address().starts_with(arco_windows::SHELL_PIDL_PREFIX) => {
+                        format!("Windows · {}", shell.label())
+                    }
+                    _ => tab.location().display(),
+                })
                 .into(),
             rows: ModelRc::from(tab.model.clone()),
             tabs: ModelRc::new(VecModel::from(tabs)),

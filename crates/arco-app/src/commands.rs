@@ -250,6 +250,9 @@ const VIRTUAL_SHELL_FOLDERS: &[(&str, &str)] = &[
     ("Windows-Bibliotheken", arco_windows::SHELL_LIBRARIES),
     ("Installierte Anwendungen", arco_windows::SHELL_APPLICATIONS),
     ("Papierkorb", arco_windows::SHELL_RECYCLE_BIN),
+    ("Systemsteuerung", arco_windows::SHELL_CONTROLS),
+    ("Schriftarten", arco_windows::SHELL_FONTS),
+    ("Drucker", arco_windows::SHELL_PRINTERS),
 ];
 
 fn asks_target_password(archive: &ArchiveTab) -> bool {
@@ -276,6 +279,13 @@ fn extraction_target(value: &str, base: &Path) -> io::Result<PathBuf> {
 }
 
 pub const COMMANDS: &[(&str, &str)] = &[
+    ("Aktives Dateifenster auf volle Breite", "panel-full"),
+    ("Dateifenster gleich breit", "panel-equal"),
+    ("Systemsteuerung im Dateifenster", "shell-controls"),
+    ("Schriftarten im Dateifenster", "shell-fonts"),
+    ("Drucker im Dateifenster", "shell-printers"),
+    ("Netzwerk im Dateifenster", "shell-network"),
+    ("Papierkorb im Dateifenster", "shell-recycle"),
     ("Suchen", "search"),
     ("Suchen in separatem Fenster", "search-separate"),
     ("Nach Plugin-Feld suchen", "search-wdx"),
@@ -542,6 +552,21 @@ impl App {
             .iter()
             .find(|(label, _)| *label == command)
             .map_or(command, |(_, id)| *id);
+        if matches!(command, "panel-full" | "panel-equal") {
+            if self.ui().get_quick_open() {
+                self.action("quick-view");
+            }
+            self.ui().set_full_panel(if command == "panel-full" {
+                self.active as i32
+            } else {
+                -1
+            });
+            if command == "panel-equal" {
+                self.ui().set_split_ratio(0.5);
+            }
+            self.save();
+            return;
+        }
         if command == "about" {
             self.text("Über Arco Commander", &format!("Arco Commander {}\n\n{}\n\nMIT-Lizenz\nhttps://github.com/Mucumba77/arco-commander",crate::VERSION,crate::locale::tr("Dateiverwaltung mit zwei Dateifenstern für Windows.")));
             return;
@@ -594,11 +619,16 @@ impl App {
                 self.open_separate_search();
                 return;
             }
-            "shell-desktop" | "shell-computer" => {
-                let address = if command == "shell-desktop" {
-                    arco_windows::SHELL_DESKTOP
-                } else {
-                    arco_windows::SHELL_COMPUTER
+            "shell-desktop" | "shell-computer" | "shell-controls" | "shell-fonts"
+            | "shell-printers" | "shell-network" | "shell-recycle" => {
+                let address = match command {
+                    "shell-desktop" => arco_windows::SHELL_DESKTOP,
+                    "shell-controls" => arco_windows::SHELL_CONTROLS,
+                    "shell-fonts" => arco_windows::SHELL_FONTS,
+                    "shell-printers" => arco_windows::SHELL_PRINTERS,
+                    "shell-network" => arco_windows::SHELL_NETWORK,
+                    "shell-recycle" => arco_windows::SHELL_RECYCLE_BIN,
+                    _ => arco_windows::SHELL_COMPUTER,
                 };
                 self.open_shell_panel(self.active, address);
                 return;
@@ -1123,7 +1153,7 @@ impl App {
                     title: "Duplikate suchen",
                     confirm_label: "Suchen",
                     description: "Durchsucht den aktiven Ordner einschließlich Unterordnern.",
-                    options: &["Identischer Inhalt", "Gleicher Name", "Gleiche Größe", "Name und Größe", "Name und Inhalt", "Gleiche Plugin-Felder …"],
+                    options: &[crate::locale::tr("Identischer Inhalt"), crate::locale::tr("Gleicher Name"), crate::locale::tr("Gleiche Größe"), crate::locale::tr("Name und Größe"), crate::locale::tr("Name und Inhalt"), crate::locale::tr("Gleiche Plugin-Felder …")],
                     ..Default::default()
                 });
             }
@@ -1238,7 +1268,7 @@ impl App {
         ui.set_dialog_transfer_filter(0);
         ui.set_dialog_title(crate::locale::tr(data.title).into());
         ui.set_dialog_notice("".into());
-        ui.set_dialog_description(crate::locale::tr(data.description).into());
+        ui.set_dialog_description(crate::locale::message(data.description).as_ref().into());
         ui.set_dialog_content_lines(content_lines(data.value));
         ui.set_dialog_value(data.value.into());
         ui.set_dialog_second(data.second.into());
@@ -1326,7 +1356,7 @@ impl App {
             ) {
                 Ok(()) if self.ui().get_dialog_revision() == revision => self.close_dialog(),
                 Err(error) => {
-                    let notice = crate::locale::tr(&error.to_string()).to_owned();
+                    let notice = crate::locale::message(&error.to_string()).into_owned();
                     self.ui().set_dialog_notice(notice.as_str().into());
                     self.ui().set_message_feedback(notice.into());
                 }
@@ -1486,6 +1516,7 @@ impl App {
                 working,
                 window,
                 list_file,
+                Some(value.to_owned()),
             )?,
             Pending::PackerProfiles(names) => self.choose_packer_profile(names, option),
             Pending::PackerProfileAction(name) => {
@@ -2137,7 +2168,7 @@ impl App {
                         };
                         Ok(Outcome::Notice(format!(
                             "{count} Einträge {}.",
-                            if test { "geprüft" } else { "entpackt" }
+                            crate::locale::tr(if test { "geprüft" } else { "entpackt" })
                         )))
                     },
                 );
@@ -2636,11 +2667,11 @@ impl App {
         let mut description = format!(
             "{} Einträge {}?",
             paths.len(),
-            if permanent {
+            crate::locale::tr(if permanent {
                 "unwiderruflich löschen"
             } else {
                 "in den Windows-Papierkorb verschieben"
-            }
+            })
         );
         if permanent && self.ignore_list().is_some() && paths.iter().any(|path| path.is_dir()) {
             description.push_str("\nDer Vorgang löscht auch ausgeblendete Inhalte dieser Ordner.");
@@ -2819,7 +2850,9 @@ impl App {
             }
             Err(error) => {
                 self.pending = Some(Pending::Rename(paths, true, times));
-                self.ui().set_dialog_description(error.to_string().into());
+                self.ui().set_dialog_description(
+                    crate::locale::message(&error.to_string()).as_ref().into(),
+                );
             }
         }
     }
@@ -3131,21 +3164,21 @@ impl App {
                 options_label: "Archivformat",
                 confirm_label: "Packen",
                 options: &[
-                    "ZIP",
-                    "7z",
-                    "TAR über 7-Zip",
-                    "GZIP über 7-Zip",
-                    "Selbstentpackendes 7z (.exe)",
-                    "UC2 über Python",
-                    "Selbstentpackendes ZIP (.exe)",
-                    "ACE (ohne Kompression)",
-                    "UC2-SAS-Mehrteiler",
-                    "ZIP-Mehrteiler",
-                    "7z-Mehrteiler",
-                    "Selbstentpackendes DOS-UC2SEA",
-                    "ACE (LZ77)",
-                    "ACE 2.0 (Blocked)",
-                    "ZIP (ZipCrypto)",
+                    crate::locale::tr("ZIP"),
+                    crate::locale::tr("7z"),
+                    crate::locale::tr("TAR über 7-Zip"),
+                    crate::locale::tr("GZIP über 7-Zip"),
+                    crate::locale::tr("Selbstentpackendes 7z (.exe)"),
+                    crate::locale::tr("UC2 über Python"),
+                    crate::locale::tr("Selbstentpackendes ZIP (.exe)"),
+                    crate::locale::tr("ACE (ohne Kompression)"),
+                    crate::locale::tr("UC2-SAS-Mehrteiler"),
+                    crate::locale::tr("ZIP-Mehrteiler"),
+                    crate::locale::tr("7z-Mehrteiler"),
+                    crate::locale::tr("Selbstentpackendes DOS-UC2SEA"),
+                    crate::locale::tr("ACE (LZ77)"),
+                    crate::locale::tr("ACE 2.0 (Blocked)"),
+                    crate::locale::tr("ZIP (ZipCrypto)"),
                 ],
                 ..Default::default()
             },
@@ -3403,12 +3436,12 @@ impl App {
             Dialog {
                 title: "Archiveintrag",
                 options: &[
-                    "Öffnen oder anzeigen",
-                    "Auswahl entpacken",
-                    "Archiv prüfen",
-                    "Eigenschaften",
-                    "Umbenennen (ZIP)",
-                    "Löschen (ZIP)",
+                    crate::locale::tr("Öffnen oder anzeigen"),
+                    crate::locale::tr("Auswahl entpacken"),
+                    crate::locale::tr("Archiv prüfen"),
+                    crate::locale::tr("Eigenschaften"),
+                    crate::locale::tr("Umbenennen (ZIP)"),
+                    crate::locale::tr("Löschen (ZIP)"),
                 ],
                 ..Default::default()
             },
@@ -3422,15 +3455,15 @@ impl App {
             Dialog {
                 title: "FTP-Eintrag",
                 options: &[
-                    "Öffnen",
-                    "Vorschau",
-                    "In anderes Fenster kopieren",
-                    "Umbenennen",
-                    "Neuer Ordner",
-                    "Dauerhaft löschen",
-                    "Eigenschaften",
-                    "Unix-Rechte ändern",
-                    "Datei bearbeiten",
+                    crate::locale::tr("Öffnen"),
+                    crate::locale::tr("Vorschau"),
+                    crate::locale::tr("In anderes Fenster kopieren"),
+                    crate::locale::tr("Umbenennen"),
+                    crate::locale::tr("Neuer Ordner"),
+                    crate::locale::tr("Dauerhaft löschen"),
+                    crate::locale::tr("Eigenschaften"),
+                    crate::locale::tr("Unix-Rechte ändern"),
+                    crate::locale::tr("Datei bearbeiten"),
                 ],
                 ..Default::default()
             },
@@ -3536,9 +3569,9 @@ impl App {
                     placeholder: "FTP-Adresse oder Servername:Port",
                     second_placeholder: "Benutzername (optional)",
                     options: &[
-                        "Explizites FTPS",
-                        "Implizites FTPS (ftps://)",
-                        "Klartext-FTP",
+                        crate::locale::tr("Explizites FTPS"),
+                        crate::locale::tr("Implizites FTPS (ftps://)"),
+                        crate::locale::tr("Klartext-FTP"),
                     ],
                     ..Default::default()
                 },
@@ -3546,7 +3579,7 @@ impl App {
             return;
         }
         let Some((session, directory)) = self.ftp_endpoint() else {
-            self.status("Öffne zuerst eine FTP-Verbindung über Werkzeuge.");
+            self.status("Öffne zuerst eine FTP-Verbindung über Netz.");
             return;
         };
         match command {
@@ -3591,7 +3624,7 @@ impl App {
                 self.dialog("input", Pending::FtpUpload((session, directory), source), Dialog {
                     title: "FTP hochladen", value: &name, placeholder: "Entfernter Dateiname",
                     description: "Die Datei wird direkt an den Server übertragen. Nach einem Abbruch kann dort eine Teildatei liegen.",
-                    options: &["Vorhandene Namen im Verzeichnis erkennen", "Überschreiben erlauben"], ..Default::default()
+                    options: &[crate::locale::tr("Vorhandene Namen im Verzeichnis erkennen"), crate::locale::tr("Überschreiben erlauben")], ..Default::default()
                 });
             }
             "ftp-close" if self.job.is_none() => self.disconnect_ftp(),
@@ -3648,7 +3681,10 @@ impl App {
                 value: name,
                 placeholder: "Entfernter Dateiname",
                 second_placeholder: "Lokaler Name (optional)",
-                options: &["Neu herunterladen", "Fortsetzbaren Download verwenden"],
+                options: &[
+                    crate::locale::tr("Neu herunterladen"),
+                    crate::locale::tr("Fortsetzbaren Download verwenden"),
+                ],
                 ..Default::default()
             },
         );
@@ -4041,6 +4077,15 @@ pub(crate) fn compatibility_command(name: &str) -> Option<&'static str> {
         "cm_srcallfiles" | "312" => Some("clear-filter"),
         "cm_showonlyselected" | "2023" => Some("only-marked"),
         "cm_verticalpanels" => Some("stacked"),
+        "cm_100percent" => Some("panel-full"),
+        "cm_50percent" => Some("panel-equal"),
+        "cm_opendesktop" => Some("shell-desktop"),
+        "cm_opendrives" => Some("shell-computer"),
+        "cm_opencontrols" => Some("shell-controls"),
+        "cm_openfonts" => Some("shell-fonts"),
+        "cm_openprinters" => Some("shell-printers"),
+        "cm_opennetwork" => Some("shell-network"),
+        "cm_openrecycled" => Some("shell-recycle"),
         "cm_executedos" => Some("terminal"),
         "cm_copynamestoclip" | "2017" => Some("copy-names"),
         "cm_copyfullnamestoclip" | "2018" => Some("copy-paths"),

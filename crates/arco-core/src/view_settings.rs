@@ -10,10 +10,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod commands;
 mod tc;
+pub use commands::ViewCommands;
 mod tc_columns;
 mod tc_drives;
-pub use tc::{TcViews, parse_wfx_default_view, read_tc_views};
+pub use tc::{TcViews, parse_wfx_default_view, parse_wfx_view, read_tc_views};
 pub use tc_columns::TcColumnExpression;
 pub(crate) use tc_columns::date as tc_date;
 pub use tc_drives::{request_tc_drive_type, tc_drive_changed_since, tc_drive_revision};
@@ -34,6 +36,14 @@ pub enum Field {
 }
 
 impl Field {
+    pub fn requires_values(&self) -> bool {
+        match self {
+            Self::Wdx(_) | Self::Wfx(_) => true,
+            Self::TcExpression(expression) => expression.background(),
+            _ => false,
+        }
+    }
+
     pub fn key(&self) -> &'static str {
         match self {
             Self::Extension => "extension",
@@ -82,12 +92,42 @@ pub struct Column {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Mode {
+    #[serde(skip)]
+    pub identity: String,
     pub view: TabView,
     pub inherit_view: bool,
     pub columns: Option<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub wfx_columns: BTreeMap<String, ModeColumns>,
     pub sort: Vec<SortOrder>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub colors: Option<ModeColors>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub commands: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub icon: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ModeColumns {
+    pub columns: String,
+    pub sort: Vec<SortOrder>,
+}
+
+impl Mode {
+    pub fn for_wfx(mut self, plugin: &str) -> Self {
+        if let Some((_, variant)) = self
+            .wfx_columns
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(plugin))
+        {
+            self.columns = Some(variant.columns.clone());
+            self.sort.clone_from(&variant.sort);
+            self.view = TabView::Details;
+            self.inherit_view = false;
+        }
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -292,6 +332,11 @@ impl Rule {
 pub struct Settings {
     pub columns: BTreeMap<String, Vec<Column>>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub column_options: BTreeMap<String, ColumnOptions>,
+    /// Portable WFX definitions keyed by display name; never authorizes DLL loading.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub portable_wfx: BTreeMap<String, WfxColumnSets>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub wfx_columns: BTreeMap<PathBuf, WfxColumnSets>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub tc_columns: BTreeMap<u16, TcColumnLayout>,
@@ -306,10 +351,57 @@ pub struct Settings {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WfxColumnSets {
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub tc_layouts: BTreeMap<u16, TcColumnLayout>,
     pub sets: BTreeMap<String, Vec<Column>>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub options: BTreeMap<String, ColumnOptions>,
     pub active: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plugin_default: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColumnOptions {
+    pub reference_width: Option<u16>,
+    pub name_width: u16,
+    pub horizontal_scroll: bool,
+}
+
+impl ColumnOptions {
+    pub fn from_tc(widths: &str, options: &str) -> Option<Self> {
+        let mut parts = options.split('|');
+        let reference = parts.next().unwrap_or("-1").parse::<i32>().ok()?;
+        let scroll = match parts.next().unwrap_or("0") {
+            "0" => false,
+            "1" => true,
+            _ => return None,
+        };
+        let dpi = parts.next().unwrap_or("96").parse::<u32>().ok()?.max(1);
+        if parts.next().is_some() {
+            return None;
+        }
+        let scale = |width: u32| (u64::from(width) * 96 / u64::from(dpi)).clamp(40, 32767) as u16;
+        Some(Self {
+            reference_width: (reference > 0).then(|| scale(reference as u32)),
+            name_width: scale(
+                widths
+                    .split(',')
+                    .next()?
+                    .parse::<i32>()
+                    .ok()?
+                    .unsigned_abs(),
+            ),
+            horizontal_scroll: scroll,
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct CustomView {
+    pub columns: Vec<Column>,
+    pub options: Option<ColumnOptions>,
 }
 
 impl WfxColumnSets {

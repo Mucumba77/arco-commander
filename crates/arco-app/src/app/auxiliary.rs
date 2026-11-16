@@ -75,22 +75,26 @@ impl Notice {
         }
     }
     fn copy_text(&self) -> String {
-        let mut text = format!("{}\n{}", self.title, self.summary);
+        let mut text = format!(
+            "{}\n{}",
+            crate::locale::message(&self.title),
+            crate::locale::message(&self.summary)
+        );
         for (label, value) in &self.stats {
             text.push_str(&format!("\n{label}: {value}"));
         }
         if !self.details.is_empty() && self.details != self.summary {
             text.push_str("\n\n");
-            text.push_str(&self.details);
+            text.push_str(&crate::locale::message(&self.details));
         }
         text
     }
     fn data(&self) -> MessageData {
         MessageData {
             level: self.level,
-            title: tr(&self.title).into(),
-            summary: self.summary.clone().into(),
-            details: self.details.clone().into(),
+            title: crate::locale::message(&self.title).as_ref().into(),
+            summary: crate::locale::message(&self.summary).as_ref().into(),
+            details: crate::locale::message(&self.details).as_ref().into(),
             copy_text: self.copy_text().into(),
             stats: slint::ModelRc::new(slint::VecModel::from(
                 self.stats
@@ -839,7 +843,7 @@ mod tests {
                 title: "Import",
                 description: "Check",
                 value: body,
-                options: &["Append", "Replace"],
+                options: &[crate::locale::tr("Append"), crate::locale::tr("Replace")],
                 confirm_label: "Apply",
                 ..Default::default()
             },

@@ -69,7 +69,7 @@ impl App {
         self.dialog("confirm", Pending::ShellElevation, Dialog {
             title: "Dateiauftrag mit Windows-Rechteabfrage",
             description: "Windows kann für diesen einzelnen Auftrag bei Bedarf die Benutzerkontensteuerung anzeigen.",
-            options: &["Kopieren", "Verschieben", "Umbenennen", "Ordner erstellen", "Papierkorb", "Endgültig löschen"],
+            options: &[crate::locale::tr("Kopieren"), crate::locale::tr("Verschieben"), crate::locale::tr("Umbenennen"), crate::locale::tr("Ordner erstellen"), crate::locale::tr("Papierkorb"), crate::locale::tr("Endgültig löschen")],
             ..Default::default()
         });
     }

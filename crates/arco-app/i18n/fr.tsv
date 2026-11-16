@@ -1210,3 +1210,27 @@ Ziel	Destination
 Partnerdatei mit anderer Erweiterung	Fichier associé avec une autre extension
 Partner-Erweiterungen	Extensions des fichiers associés
 Partnerdatei fehlt	Fichier associé absent
+Verzeichnisjunctions auch rekursiv als Links kopieren	Copier les jonctions comme liens, y compris dans les sous-dossiers
+Moduswechsel und Tab-Symbol	Changements de mode et icône d’onglet
+Automatische Befehle	Commandes automatiques
+Interne TC-Befehle mit Komma trennen. * wiederholt bei Ordnerwechsel, - unterdrückt Tabwechsel; hinter | stehen Befehle beim Verlassen.	Séparez les commandes internes TC par des virgules. * répète lors d’un changement de dossier, - exclut les changements d’onglet ; les commandes après | s’exécutent à la sortie.
+Symbolpfad, optional mit Ressourcenindex	Chemin de l’icône, avec indice de ressource facultatif
+Spaltenbreiten und Laufleiste	Largeur des colonnes et défilement
+Referenzbreite für automatische Anpassung (0 = aus)	Largeur de référence pour l’adaptation automatique (0 = désactivée)
+Namensspalte: Mindestbreite	Colonne de nom : largeur minimale
+Horizontales Scrollen erlauben	Autoriser le défilement horizontal
+Aktives Dateifenster auf volle Breite	Agrandir le panneau actif sur toute la largeur
+Dateifenster gleich breit	Rétablir des panneaux de même largeur
+Als Windows-Parameterzeile bearbeiten	Modifier comme ligne de paramètres Windows
+Windows-Parameterzeile	Ligne de paramètres Windows
+Manuelle Anführungszeichen bleiben erhalten. %Q unterdrückt bei TC-Platzhaltern automatische Anführungszeichen; selbst gesetzte Anführungszeichen gelten weiterhin.	Les guillemets manuels sont conservés. %Q désactive les guillemets automatiques des paramètres TC ; les guillemets explicites restent applicables.
+Symbolische Links und Junctions als Links kopieren	Copier les liens symboliques et les jonctions comme liens
+Systemsteuerung	Panneau de configuration
+Schriftarten	Polices
+Drucker	Imprimantes
+Systemsteuerung im Dateifenster	Panneau de configuration dans le panneau de fichiers
+Schriftarten im Dateifenster	Polices dans le panneau de fichiers
+Drucker im Dateifenster	Imprimantes dans le panneau de fichiers
+Netzwerk im Dateifenster	Réseau dans le panneau de fichiers
+Papierkorb im Dateifenster	Corbeille dans le panneau de fichiers
+Verschieben erhält Links. Metadatenoptionen gelten für das Linkobjekt; sein Ziel wird nicht durchlaufen. Symbolische Links benötigen die passende Windows-Berechtigung oder den Entwicklermodus.	Le déplacement préserve les liens. Les options de métadonnées concernent le lien lui-même ; sa cible n’est pas parcourue. Les liens symboliques nécessitent le droit Windows approprié ou le mode développeur.

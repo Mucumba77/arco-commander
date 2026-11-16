@@ -29,6 +29,7 @@ DOCS = (
     "TOTAL-COMMANDER-REFERENZ.md", "docs/RELEASE.md",
     "docs/UI-PRUEFUNG.md", "docs/WEITERARBEIT.md",
     "docs/SUCHE-UND-WERKZEUGE.md", "docs/AREA3-ABSCHLUSS.md",
+    "docs/NAVIGATION-UND-DATEIEN.md", "docs/BEREICH1-2-ABSCHLUSS.md",
     "docs/branding/arco-commander.svg",
     "docs/screenshots/hauptfenster.jpg", "docs/screenshots/kopierfortschritt.jpg",
     "docs/screenshots/lister.jpg",
@@ -204,6 +205,12 @@ def package_release(*, run_app=True):
             shutil.copyfile(ROOT / document, destination)
         (stage / "START-HIER.txt").write_text(f"""Arco Commander {version}
 Windows 10 22H2 und Windows 11 (x64)
+
+Voraussetzung: aktuelle Microsoft Visual C++ v14-Laufzeit (x64).
+Fuer den 32-Bit-Plugin-Host wird zusaetzlich die x86-Laufzeit benoetigt.
+Offizielle Downloads (beide Architekturen):
+https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist/
+Die Laufzeit-Installer sind nicht im ZIP enthalten.
 
 1. Entpacke das gesamte ZIP in einen Ordner deiner Wahl.
 2. Starte arco-commander.exe. Die drei Hilfsprogramme bleiben daneben.
