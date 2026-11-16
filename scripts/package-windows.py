@@ -28,6 +28,7 @@ DOCS = (
     "CHANGELOG.md", "FUNKTIONSMATRIX.md", "PLAN.md",
     "TOTAL-COMMANDER-REFERENZ.md", "docs/RELEASE.md",
     "docs/UI-PRUEFUNG.md", "docs/WEITERARBEIT.md",
+    "docs/SUCHE-UND-WERKZEUGE.md", "docs/AREA3-ABSCHLUSS.md",
     "docs/branding/arco-commander.svg",
     "docs/screenshots/hauptfenster.jpg", "docs/screenshots/kopierfortschritt.jpg",
     "docs/screenshots/lister.jpg",

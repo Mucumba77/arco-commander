@@ -1,0 +1,111 @@
+import { ComboBox, LineEdit, ScrollView, ListView } from "std-widgets.slint";
+import { Colors, Button, CheckBox, FocusBoundary } from "dialog-theme.slint";
+import { DialogHeading, FormSection, FieldLabel, ReviewRow, ReviewTable } from "operation-dialogs.slint";
+
+export struct DuplicateFolder { id: int, path: string, selected: bool }
+export struct DuplicateForm {
+    names: string, exclude: string, pattern: string, direct-parent: bool, recursive: bool,
+    folders: [DuplicateFolder], date: int, size: int, keep-one: bool,
+    keep-first: int, keep-second: int, keep-third: int,
+}
+
+export component DuplicateCard inherits Rectangle {
+    in-out property <DuplicateForm> form;
+    in property <[ReviewRow]> rows;
+    in property <int> revision;
+    in property <int> generation;
+    in property <int> focus-cycle;
+    in property <string> notice;
+    in property <string> summary;
+    property <bool> dirty: true;
+    changed revision => { root.dirty = true; names.focus(); }
+    changed generation => { root.dirty = root.generation <= 0; }
+    changed focus-cycle => { if root.focus-cycle > 0 { names.focus(); } else { cancel.focus(); } }
+    callback action(int, DuplicateForm, int);
+    callback copy(string);
+    function edit() { root.dirty = true; }
+    background: Colors.panel; border-color: Colors.edge; border-width: 1px; border-radius: 16px;
+    FocusScope {
+        width: parent.width; height: parent.height;
+        key-pressed(event) => {
+            if event.text == Key.Escape { root.action(2, root.form, 0); return accept; }
+            if event.text == Key.Return {
+                root.action(root.dirty ? 0 : 1, root.form, 0); return accept;
+            }
+            return reject;
+        }
+        VerticalLayout { padding: 20px; spacing: 12px;
+            FocusBoundary { reached => { if (!root.dirty && root.generation > 0) { accept-selection.focus(); } else { cancel.focus(); } } }
+            DialogHeading { icon: @image-url("icons/search.svg"); title: @tr("Duplikate markieren"); subtitle: @tr("Filter kombinieren, Vorschau prüfen und die Auswahl ins Dateifenster übernehmen."); }
+            ScrollView { vertical-stretch: 1; viewport-height: content.preferred-height;
+                content := VerticalLayout { spacing: 12px;
+                    FormSection { title: @tr("Dateien filtern");
+                        HorizontalLayout { spacing: 10px;
+                            VerticalLayout { spacing: 4px; FieldLabel { text: @tr("Markieren nach Name / Erweiterung"); }
+                                names := LineEdit { text <=> root.form.names; accessible-label: @tr("Markieren nach Name / Erweiterung"); edited => { root.edit(); } accepted => { root.action(0, root.form, 0); } }
+                            }
+                            VerticalLayout { spacing: 4px; FieldLabel { text: @tr("Markierung entfernen nach Name / Erweiterung"); }
+                                LineEdit { text <=> root.form.exclude; accessible-label: @tr("Markierung entfernen nach Name / Erweiterung"); edited => { root.edit(); } accepted => { root.action(0, root.form, 0); } }
+                            }
+                        }
+                        Text { text: @tr("Masken: *.txt *.jpg | alt* · RegEx: <Muster · Suchprofil: >Profilname. Namens-, Ordner-, Datums- und Größenfilter werden mit UND kombiniert."); wrap: word-wrap; color: Colors.muted; font-size: 11px; }
+                        HorizontalLayout { spacing: 10px;
+                            VerticalLayout { spacing: 4px; FieldLabel { text: @tr("Datum innerhalb der Gruppe"); }
+                                ComboBox { model: [@tr("Alle Zeitstempel"), @tr("Alle ältesten Dateien"), @tr("Alle neuesten Dateien"), @tr("Älter als die neueste Datei"), @tr("Neuer als die älteste Datei")]; current-index <=> root.form.date; accessible-label: @tr("Datum innerhalb der Gruppe"); selected => { root.edit(); } }
+                            }
+                            VerticalLayout { spacing: 4px; FieldLabel { text: @tr("Größe innerhalb der Gruppe"); }
+                                ComboBox { model: [@tr("Alle Größen"), @tr("Alle kleinsten Dateien"), @tr("Alle größten Dateien"), @tr("Kleiner als die größte Datei"), @tr("Größer als die kleinste Datei")]; current-index <=> root.form.size; accessible-label: @tr("Größe innerhalb der Gruppe"); selected => { root.edit(); } }
+                            }
+                        }
+                    }
+                    FormSection { title: @tr("Ordner auswählen");
+                        CheckBox { text: @tr("Unterordner bei Auswahl und Mustern einbeziehen"); checked <=> root.form.recursive; toggled => { root.edit(); } }
+                        HorizontalLayout { spacing: 8px;
+                            LineEdit { text <=> root.form.pattern; placeholder-text: @tr("Ordnername, Pfad oder *Muster*"); accessible-label: @tr("Ordnermuster"); accepted => { root.edit(); root.action(4, root.form, 0); } }
+                            Button { text: @tr("Markieren"); clicked => { root.edit(); root.action(4, root.form, 0); } }
+                            Button { text: @tr("Entfernen"); clicked => { root.edit(); root.action(5, root.form, 0); } }
+                        }
+                        CheckBox { text: @tr("Muster nur auf den direkten Elternordner anwenden"); checked <=> root.form.direct-parent; }
+                        ListView { height: 128px;
+                            for folder[index] in root.form.folders : CheckBox { text: folder.path; checked: folder.selected;
+                                toggled => { root.edit(); root.action(3, root.form, index); }
+                            }
+                        }
+                        HorizontalLayout { spacing: 8px;
+                            Button { text: @tr("Alle"); clicked => { root.edit(); root.action(6, root.form, 0); } }
+                            Button { text: @tr("Keine"); clicked => { root.edit(); root.action(7, root.form, 0); } }
+                            Button { text: @tr("Umkehren"); clicked => { root.edit(); root.action(8, root.form, 0); } }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                    }
+                    FormSection { title: @tr("Mindestens eine Kopie behalten");
+                        CheckBox { text: @tr("Mindestens eine Datei je Gruppe unmarkiert lassen"); checked <=> root.form.keep-one; toggled => { root.edit(); } }
+                        if root.form.keep-one : HorizontalLayout { spacing: 8px;
+                            VerticalLayout { spacing: 4px; FieldLabel { text: @tr("1. Priorität"); }
+                                ComboBox { model: keep-options; current-index <=> root.form.keep-first; accessible-label: @tr("1. Priorität"); selected => { root.edit(); } }
+                            }
+                            VerticalLayout { spacing: 4px; FieldLabel { text: @tr("2. Priorität bei Gleichstand"); }
+                                ComboBox { model: keep-options; current-index <=> root.form.keep-second; accessible-label: @tr("2. Priorität bei Gleichstand"); selected => { root.edit(); } }
+                            }
+                            VerticalLayout { spacing: 4px; FieldLabel { text: @tr("3. Priorität bei Gleichstand"); }
+                                ComboBox { model: keep-options; current-index <=> root.form.keep-third; accessible-label: @tr("3. Priorität bei Gleichstand"); selected => { root.edit(); } }
+                            }
+                        }
+                    }
+                    ReviewTable { rows: root.rows; primary-label: @tr("Auswahl / Name"); secondary-label: @tr("Gruppe / Größe"); height: 210px; copy(text) => { root.copy(text); } }
+                }
+            }
+            Text { text: root.notice; visible: root.notice != ""; wrap: word-wrap; color: Colors.archive; }
+            HorizontalLayout { spacing: 8px;
+                Text { text: root.dirty ? @tr("Vorschau nach Änderungen aktualisieren. Es werden keine Dateien verändert.") : root.summary; color: Colors.muted; wrap: word-wrap; horizontal-stretch: 1; }
+                Button { text: @tr("Text kopieren"); clicked => { root.action(9, root.form, 0); } }
+                cancel := Button { text: @tr("Abbrechen"); clicked => { root.action(2, root.form, 0); } }
+                Button { text: @tr("Vorschau aktualisieren"); clicked => { root.action(0, root.form, 0); } }
+                accept-selection := Button { text: @tr("Auswahl übernehmen"); primary: true; enabled: !root.dirty && root.generation > 0; clicked => { root.action(1, root.form, 0); } }
+            }
+            FocusBoundary { reached => { names.focus(); } }
+        }
+    }
+    property <[string]> keep-options: [@tr("Erste Datei"), @tr("Letzte Datei"), @tr("Älteste Datei"), @tr("Neueste Datei"), @tr("Kleinste Datei"), @tr("Größte Datei")];
+    init => { names.focus(); }
+}

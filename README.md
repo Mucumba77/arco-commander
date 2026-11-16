@@ -9,9 +9,9 @@ Arco Commander ist ein Zwei-Fenster-Dateimanager für Windows, geschrieben in Ru
 
 ## Download
 
-[**Arco Commander 1.2.0 für Windows x64 herunterladen**](https://github.com/Mucumba77/arco-commander/releases/download/v1.2.0/arco-commander-v1.2.0-windows-x64.zip)
+[**Arco Commander 1.3.0 für Windows x64 herunterladen**](https://github.com/Mucumba77/arco-commander/releases/download/v1.3.0/arco-commander-v1.3.0-windows-x64.zip)
 
-Das portable ZIP ist für Windows 10 22H2 und Windows 11 vorgesehen. Entpacke es vollständig und starte `arco-commander.exe`. Das Paket enthält beide Plugin-Hosts, das ZIP-SFX-Modul, die Kurzanleitung und Drittanbieterhinweise. Es ist unsigniert. [Release-Hinweise und SHA-256-Prüfsumme](https://github.com/Mucumba77/arco-commander/releases/tag/v1.2.0)
+Das portable ZIP ist für Windows 10 22H2 und Windows 11 vorgesehen. Entpacke es vollständig und starte `arco-commander.exe`. Das Paket enthält beide Plugin-Hosts, das ZIP-SFX-Modul, die Kurzanleitung und Drittanbieterhinweise. Es ist unsigniert. [Release-Hinweise und SHA-256-Prüfsumme](https://github.com/Mucumba77/arco-commander/releases/tag/v1.3.0)
 
 Für ein Update entpacke die neue Version in einen eigenen Ordner. Arco verwendet das bisherige Standardprofil weiter. Bei Verwendung von `--portable` übernimm zusätzlich die Profildatei `arco-commander.json` aus dem bisherigen Programmordner.
 
@@ -359,6 +359,7 @@ Die Referenz bleibt Total Commander 11.58.1 für Windows. Die Funktionsparität 
 
 - [Entwicklungsplan](PLAN.md)
 - [Funktionsmatrix und Prüffälle](FUNKTIONSMATRIX.md)
+- [Suche und Werkzeuge in 1.3.0](docs/SUCHE-UND-WERKZEUGE.md)
 - [Änderungen pro Version](CHANGELOG.md)
 - [Herstellerhilfe und Referenzindex für Dialoge, Einstellungen und Tastatur](TOTAL-COMMANDER-REFERENZ.md)
 

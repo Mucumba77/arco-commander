@@ -291,7 +291,7 @@ fn size(bytes: u64, divisor: u64) -> String {
     }
 }
 
-fn date(time: DateTime<Local>, format: &str) -> String {
+pub(crate) fn date(time: DateTime<Local>, format: &str) -> String {
     let mut output = String::new();
     for ch in format.chars() {
         match ch {

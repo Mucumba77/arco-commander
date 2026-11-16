@@ -9,11 +9,44 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 use zeroize::{Zeroize, Zeroizing};
 
+mod detection;
 mod operations;
 mod registry;
+mod tc_audio;
+mod tc_fields;
+#[cfg(test)]
+mod tc_fields_tests;
+mod tc_names;
+#[cfg(windows)]
+#[allow(unsafe_code)] // Read-only Win32 metadata and locale APIs.
+mod tc_native;
 mod wdx;
+pub use tc_fields::{TC_METADATA_FIELDS, tc_field, tc_field_with_cancel};
+
+pub(crate) fn grouping_separator() -> String {
+    #[cfg(windows)]
+    {
+        tc_native::grouping_separator()
+    }
+    #[cfg(not(windows))]
+    {
+        ",".into()
+    }
+}
+
+pub(crate) fn decimal_separator() -> String {
+    #[cfg(windows)]
+    {
+        tc_native::decimal_separator()
+    }
+    #[cfg(not(windows))]
+    {
+        ".".into()
+    }
+}
 mod wfx_content;
 mod wlx_bitmap;
+pub use detection::{WLX_DETECT_BYTES, WlxDetection, WlxFile};
 pub use operations::{
     DownloadConflict, WFX_TREE_DEPTH, WFX_TREE_ENTRIES, WcxOperation, WfxOperation, WfxOverwrite,
     WfxVersion, operate, operate_interactive, wfx_batch, wfx_batch_filtered,
@@ -28,7 +61,7 @@ pub use wlx_bitmap::{
     WLX_BITMAP_BATCH, WLX_BITMAP_HEIGHT, WLX_BITMAP_WIDTH, WlxBitmap, wlx_thumbnails,
 };
 
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 pub const MAX_REQUEST: u64 = 768 * 1024;
 const MAX_REPLY: u64 = 24 * 1024 * 1024;
 const HOST_TIMEOUT: Duration = Duration::from_secs(90);
@@ -78,6 +111,9 @@ pub enum Operation {
     },
     WlxEmbedded {
         parent: usize,
+    },
+    WlxDetected {
+        parent: Option<usize>,
     },
     WlxThumbnails {
         files: Vec<PathBuf>,
@@ -317,6 +353,12 @@ pub struct PromptMessage {
     pub prompt: Prompt,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ReadyMessage {
+    pub version: u32,
+    pub ready: bool,
+}
+
 #[derive(Deserialize, Serialize)]
 pub struct PromptAnswer {
     pub value: String,
@@ -335,6 +377,7 @@ pub type PromptHandler<'a> = dyn FnMut(Prompt) -> Option<PromptAnswer> + 'a;
 enum HostMessage {
     Reply(Reply),
     Prompt(PromptMessage),
+    Ready(ReadyMessage),
 }
 
 pub fn inspect(
@@ -408,12 +451,11 @@ fn inspect_interactive(
             | Operation::WfxBatch(_)
             | Operation::WfxFilteredBatch { .. }
     ) || report_after_cancel;
-    let timeout = if matches!(
+    let quick_operation = matches!(
         operation,
         Operation::WlxThumbnails { .. } | Operation::WfxDefaultView
-    ) {
-        Duration::from_secs(10)
-    } else if file_operation {
+    );
+    let timeout = if file_operation {
         Duration::from_secs(3600)
     } else {
         HOST_TIMEOUT
@@ -422,9 +464,12 @@ fn inspect_interactive(
         start_host(interface, plugin, file, operation, cancel, prompt.is_some())?;
     let mut input = host.child.stdin.take().expect("stdin piped");
     let output = host.child.stdout.take().expect("stdout piped");
+    let keep_input = prompt.is_some();
     let mut writer = Some(std::thread::spawn(move || {
         input.write_all(&request)?;
-        Ok::<_, io::Error>(input)
+        // Noninteractive hosts have received their entire request. EOF also lets
+        // console-less children finish when the launching process has a NUL stdin.
+        Ok::<_, io::Error>(keep_input.then_some(input))
     }));
     let mut input = None;
     let (sender, replies) = mpsc::channel();
@@ -443,13 +488,15 @@ fn inspect_interactive(
                     }
                     serde_json::from_slice::<HostMessage>(&bytes).map_err(io::Error::other)
                 });
-            let finished = !matches!(result, Ok(HostMessage::Prompt(_)));
+            let finished = !matches!(result, Ok(HostMessage::Prompt(_) | HostMessage::Ready(_)));
             if sender.send(result).is_err() || finished {
                 break;
             }
         }
     });
     let mut started = Instant::now();
+    let mut ready = false;
+    let mut quick_started = None;
     let mut last_report = String::new();
     let mut last_poll = started;
     let mut result = None;
@@ -474,7 +521,13 @@ fn inspect_interactive(
                 return Err(io::ErrorKind::Interrupted.into());
             }
         } else {
-            check_host_timeout(started, timeout, cancel)?;
+            if let Some(loaded) = quick_started {
+                check_host_timeout(loaded, Duration::from_secs(10), cancel)?;
+            } else {
+                // Loading a newly installed DLL can itself exceed ten seconds.
+                // Apply the short SDK-call budget only after the host loaded it.
+                check_host_timeout(started, timeout, cancel)?;
+            }
         }
         if file_operation && last_poll.elapsed() >= Duration::from_millis(100) {
             last_poll = Instant::now();
@@ -507,7 +560,28 @@ fn inspect_interactive(
             continue;
         }
         match replies.recv_timeout(Duration::from_millis(25)) {
-            Ok(Ok(HostMessage::Reply(reply))) => result = Some(checked_reply(reply)),
+            Ok(Ok(HostMessage::Ready(message))) => {
+                if message.version != PROTOCOL_VERSION || !message.ready || ready {
+                    return Err(io::Error::other("Ungültige Startmeldung des Plugin-Hosts."));
+                }
+                ready = true;
+                if quick_operation {
+                    quick_started = Some(Instant::now());
+                }
+            }
+            Ok(Ok(HostMessage::Reply(reply))) => {
+                // A final reply ends the prompt exchange as well. Do not retain a
+                // live stdin writer while waiting for the host to exit.
+                if let Some(writer) = writer.take() {
+                    drop(
+                        writer
+                            .join()
+                            .map_err(|_| io::Error::other("Plugin-Eingabe fehlgeschlagen"))??,
+                    );
+                }
+                input.take();
+                result = Some(checked_reply(reply));
+            }
             Ok(Ok(HostMessage::Prompt(message))) => {
                 if message.version != PROTOCOL_VERSION {
                     return Err(io::Error::other("Ungültige Version der Plugin-Abfrage."));
@@ -517,14 +591,16 @@ fn inspect_interactive(
                     .ok_or_else(|| io::Error::other("Unerwartete Plugin-Abfrage."))?;
                 let waiting = Instant::now();
                 let answer = handler(message.prompt);
-                started += waiting.elapsed();
+                let waited = waiting.elapsed();
+                started += waited;
+                if let Some(loaded) = quick_started.as_mut() {
+                    *loaded += waited;
+                }
                 files::check_cancel(cancel)?;
                 if let Some(writer) = writer.take() {
-                    input = Some(
-                        writer
-                            .join()
-                            .map_err(|_| io::Error::other("Plugin-Eingabe fehlgeschlagen"))??,
-                    );
+                    input = writer
+                        .join()
+                        .map_err(|_| io::Error::other("Plugin-Eingabe fehlgeschlagen"))??;
                 }
                 let mut bytes =
                     Zeroizing::new(serde_json::to_vec(&answer).map_err(io::Error::other)?);
@@ -575,6 +651,16 @@ pub fn view(plugin: &Path, file: &Path, cancel: &AtomicBool) -> io::Result<HostP
     launch_view(plugin, file, Operation::Run, cancel).map(|(host, _)| host)
 }
 
+pub fn detected_view(plugin: &Path, file: &Path, cancel: &AtomicBool) -> io::Result<HostProcess> {
+    launch_view(
+        plugin,
+        file,
+        Operation::WlxDetected { parent: None },
+        cancel,
+    )
+    .map(|(host, _)| host)
+}
+
 pub fn embedded_view(
     plugin: &Path,
     file: &Path,
@@ -582,6 +668,29 @@ pub fn embedded_view(
     cancel: &AtomicBool,
 ) -> io::Result<(HostProcess, usize)> {
     let (host, rows) = launch_view(plugin, file, Operation::WlxEmbedded { parent }, cancel)?;
+    let window = rows
+        .into_iter()
+        .find(|row| row.name == "hwnd")
+        .and_then(|row| row.value.parse::<usize>().ok())
+        .filter(|window| *window != 0)
+        .ok_or_else(|| io::Error::other("WLX-Host meldet kein eingebettetes Fenster."))?;
+    Ok((host, window))
+}
+
+pub fn detected_embedded_view(
+    plugin: &Path,
+    file: &Path,
+    parent: usize,
+    cancel: &AtomicBool,
+) -> io::Result<(HostProcess, usize)> {
+    let (host, rows) = launch_view(
+        plugin,
+        file,
+        Operation::WlxDetected {
+            parent: Some(parent),
+        },
+        cancel,
+    )?;
     let window = rows
         .into_iter()
         .find(|row| row.name == "hwnd")

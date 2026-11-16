@@ -57,6 +57,64 @@ fn opted_in_progress_is_streamed_before_results_with_final_counts() {
 }
 
 #[test]
+fn global_archive_search_and_member_refinement_round_trip_separate_origins() {
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::AtomicBool;
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("search");
+    let source = fixture.path().join("docs");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(root.join("local.txt"), b"needle").unwrap();
+    std::fs::write(root.join("local.jpg"), b"partner").unwrap();
+    std::fs::write(source.join("Größe.txt"), b"needle").unwrap();
+    std::fs::write(source.join("Größe.jpg"), b"partner").unwrap();
+    std::fs::write(source.join("wrong.txt"), b"other").unwrap();
+    let file = root.join("encrypted.zip");
+    arco_core::archives::create_zip(
+        &[source],
+        fixture.path(),
+        &file,
+        Some("test"),
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let messages = search_worker(serde_json::json!({
+        "options": {"names":"*.txt", "content_mode":1, "content":"needle", "archives":true, "partner_extensions":"jpg"},
+        "roots":[root.as_os_str()], "show_hidden":true, "password":"test", "plugins":[]
+    }));
+    let entries = messages
+        .iter()
+        .filter_map(|message| message.get("Entry"))
+        .collect::<Vec<_>>();
+    assert_eq!(entries.len(), 2, "{messages:?}");
+    let member = entries
+        .iter()
+        .find(|entry| !entry["archive_file"].is_null())
+        .unwrap();
+    let origin: OsString = serde_json::from_value(member["archive_file"].clone()).unwrap();
+    assert_eq!(PathBuf::from(origin), file);
+    let narrowed = search_worker(serde_json::json!({
+        "only_roots":true, "options":{"names":"~[invalid", "depth":"0", "selected_only":true},
+        "roots":[], "archive_scopes":[{"file":file,"roots":[Path::new("docs/Größe.txt")]}],
+        "show_hidden":true, "password":"test", "plugins":[]
+    }));
+    let entries = narrowed
+        .iter()
+        .filter_map(|message| message.get("Entry"))
+        .collect::<Vec<_>>();
+    assert_eq!(entries.len(), 1, "{narrowed:?}");
+    let path: OsString = serde_json::from_value(entries[0]["path"].clone()).unwrap();
+    assert_eq!(PathBuf::from(path), PathBuf::from("docs/Größe.txt"));
+    assert!(!entries[0]["archive_file"].is_null());
+    assert!(
+        narrowed
+            .iter()
+            .all(|message| message.get("Warning").is_none())
+    );
+}
+
+#[test]
 fn separate_search_process_returns_matching_file_metadata_and_exits() {
     let fixture = tempfile::tempdir().unwrap();
     let found = fixture.path().join("Größe.txt");
@@ -170,4 +228,59 @@ fn separate_search_process_reads_gzip_content() {
         messages[1],
         serde_json::json!({"Done": {"cancelled": false}})
     );
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires 7-Zip in ARCO_7ZIP_PATH"]
+fn shared_content_search_matches_independent_archive_formats() {
+    use std::os::windows::process::CommandExt;
+    use std::path::PathBuf;
+    let fixture = tempfile::tempdir().unwrap();
+    let source = fixture.path().join("input");
+    std::fs::create_dir(&source).unwrap();
+    let name = "Grüße.txt";
+    std::fs::write(source.join(name), "Independent archive needle & Grüße").unwrap();
+    std::fs::write(
+        source.join("skip.txt"),
+        "Independent archive needle & Grüße",
+    )
+    .unwrap();
+    let tool = std::env::var_os("ARCO_7ZIP_PATH").expect("7-Zip test executable");
+    for (format, suffix) in [
+        ("zip", "zip"),
+        ("7z", "7z"),
+        ("tar", "tar"),
+        ("gzip", "txt.gz"),
+        ("bzip2", "txt.bz2"),
+        ("xz", "txt.xz"),
+    ] {
+        let archive = fixture.path().join(format!("Grüße.{suffix}"));
+        let output = Command::new(&tool)
+            .current_dir(&source)
+            .args(["a", &format!("-t{format}"), "-y"])
+            .arg(&archive)
+            .arg(name)
+            .creation_flags(0x0800_0000)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{format}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let messages = search_worker(serde_json::json!({
+            "options": {"names": "*.txt | skip*", "content_mode": 1, "content": "needle & Grüße", "whole_words": true},
+            "roots": [OsString::new()], "show_hidden": false, "plugins": [],
+            "archive": {"file": archive, "folder": ""}
+        }));
+        assert_eq!(messages.len(), 2, "{format}: {messages:?}");
+        let path =
+            serde_json::from_value::<OsString>(messages[0]["Entry"]["path"].clone()).unwrap();
+        assert_eq!(PathBuf::from(path), PathBuf::from(name), "{format}");
+        assert_eq!(
+            messages[1],
+            serde_json::json!({"Done": {"cancelled": false}})
+        );
+    }
 }

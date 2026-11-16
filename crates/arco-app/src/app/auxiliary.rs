@@ -610,6 +610,10 @@ fn rename_form(value: &str) -> TextDraftForm {
         name: lines.next().unwrap_or_default().into(),
         body: lines.next().unwrap_or_default().into(),
         second: lines.next().unwrap_or_default().into(),
+        counter_start: "1".into(),
+        counter_step: "1".into(),
+        counter_width: "1".into(),
+        counter_every: "1".into(),
         ..Default::default()
     };
     for line in lines {
@@ -636,6 +640,19 @@ fn rename_form(value: &str) -> TextDraftForm {
                     form.first_only = flags.contains(&"erstes");
                     form.include_extension = flags.contains(&"erweiterung");
                     form.substitute = flags.contains(&"substitution");
+                    form.auto_number = flags.contains(&"autonummer");
+                    for flag in flags {
+                        if let Some((key, value)) = flag.split_once('=') {
+                            match key {
+                                "start" => form.counter_start = value.into(),
+                                "step" => form.counter_step = value.into(),
+                                "width" => form.counter_width = value.into(),
+                                "every" => form.counter_every = value.into(),
+                                "case" => form.case = value.parse().unwrap_or_default(),
+                                _ => (),
+                            }
+                        }
+                    }
                 }
                 _ => (),
             }
@@ -644,6 +661,25 @@ fn rename_form(value: &str) -> TextDraftForm {
     form
 }
 fn rename_text(form: &TextDraftForm) -> io::Result<String> {
+    let counter = arco_core::rename::CounterSettings {
+        start: form.counter_start.to_string(),
+        step: form.counter_step.to_string(),
+        width: form.counter_width.to_string(),
+        every: form.counter_every.to_string(),
+    };
+    counter.pattern()?;
+    arco_core::rename::NameCase::from_index(form.case)?;
+    if !form.search && (counter != Default::default() || form.case != 0 || form.auto_number) {
+        let search = arco_core::rename::SearchOptions::from_legacy(&form.second)?;
+        let mut actual = form.clone();
+        actual.search = true;
+        actual.find = search.find.into();
+        actual.replace = search.replace.into();
+        actual.regex = search.regex;
+        actual.match_case = search.match_case;
+        actual.include_extension = search.include_extension;
+        return rename_text(&actual);
+    }
     for text in [
         &form.name,
         &form.body,
@@ -671,11 +707,13 @@ fn rename_text(form: &TextDraftForm) -> io::Result<String> {
             (form.first_only, "erstes"),
             (form.include_extension, "erweiterung"),
             (form.substitute, "substitution"),
+            (form.auto_number, "autonummer"),
         ]
         .into_iter()
         .filter_map(|(yes, flag)| yes.then_some(flag))
         .collect::<Vec<_>>()
         .join(",");
+        let flags = super::rename_setup::counter_flags(&flags, &counter, form.case);
         text.push_str(&format!(
             "\nSuchen={}\nErsetzen={}\nOptionen={flags}",
             form.find, form.replace
@@ -782,6 +820,8 @@ mod tests {
         for source in [
             "Template\n[N]\nold=>new",
             "Template\n[N]-[C]\n\nErweiterung=[E]\nSuchen=(a)\nErsetzen=$1\nOptionen=regex,schreibweise,erstes,erweiterung,substitution",
+            "Template\n[N]-[C]\n\nSuchen=\nErsetzen=\nOptionen=start=5,step=2,width=3,every=2,case=5",
+            "Template\n[N]\n\nSuchen=\nErsetzen=\nOptionen=autonummer",
         ] {
             let form = rename_form(source);
             assert_eq!(rename_text(&form).unwrap(), source);

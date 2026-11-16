@@ -205,7 +205,7 @@ impl Session {
         let Some(replies) = self.checksum_replies(directory, &commands, cancel)? else {
             return Ok(None);
         };
-        let Some(digest) = checksum_reply(&replies, method, &expected.name) else {
+        let Some(digest) = checksum_reply(&replies, method, &expected.name, expected.size) else {
             return Ok(None);
         };
         self.verify_sync_entry(directory, expected, cancel)?;
@@ -575,7 +575,12 @@ fn checksum_method(replies: &[u8]) -> Option<SyncChecksum> {
     None
 }
 
-fn checksum_reply(replies: &[u8], method: SyncChecksum, name: &str) -> Option<String> {
+fn checksum_reply(
+    replies: &[u8],
+    method: SyncChecksum,
+    name: &str,
+    size: Option<u64>,
+) -> Option<String> {
     let replies = String::from_utf8_lossy(replies);
     let mut multiline = None;
     let mut digest = None;
@@ -586,8 +591,9 @@ fn checksum_reply(replies: &[u8], method: SyncChecksum, name: &str) -> Option<St
         if let Some(start) = multiline {
             if code == start && payload.starts_with(' ') {
                 multiline = None;
+            } else {
+                continue;
             }
-            continue;
         }
         if !code.bytes().all(|byte| byte.is_ascii_digit()) {
             continue;
@@ -603,12 +609,31 @@ fn checksum_reply(replies: &[u8], method: SyncChecksum, name: &str) -> Option<St
             if code != "213" {
                 continue;
             }
-            let mut fields = payload.splitn(3, ' ');
-            let algorithm = fields.next()?;
-            let hash = fields.next()?;
-            let path = fields.next()?;
-            (algorithm.eq_ignore_ascii_case(method.algorithm) && checksum_name(path, name))
-                .then_some(hash)
+            (|| {
+                let (algorithm, rest) = payload.split_once(' ')?;
+                let (first, rest) = rest.split_once(' ')?;
+                let (hash, path) = if let Some((start, end)) = first.split_once('-') {
+                    if start.is_empty()
+                        || end.is_empty()
+                        || !start
+                            .bytes()
+                            .chain(end.bytes())
+                            .all(|ch| ch.is_ascii_digit())
+                    {
+                        return None;
+                    }
+                    let start = start.parse::<u64>().ok()?;
+                    let end = end.parse::<u64>().ok()?;
+                    if start != 0 || end != size?.saturating_sub(1) {
+                        return None;
+                    }
+                    rest.split_once(' ')?
+                } else {
+                    (first, rest)
+                };
+                (algorithm.eq_ignore_ascii_case(method.algorithm) && checksum_name(path, name))
+                    .then_some(hash)
+            })()
         } else {
             if !matches!(code, "213" | "250" | "251") {
                 continue;
@@ -696,26 +721,65 @@ mod tests {
             "220-Welcome\r\n213 SHA-256 {hash} {name}\r\n220 Ready\r\n250 OK\r\n213 SHA-256 {hash} {name}\r\n"
         );
         assert_eq!(
-            checksum_reply(reply.as_bytes(), method, name),
+            checksum_reply(reply.as_bytes(), method, name, None),
             Some(hash.clone())
         );
-        assert!(checksum_reply(reply.as_bytes(), method, "other.txt").is_none());
+        assert!(checksum_reply(reply.as_bytes(), method, "other.txt", None).is_none());
         assert!(
             checksum_reply(
                 format!("213 SHA-1 {hash} {name}\r\n").as_bytes(),
                 method,
-                name
+                name,
+                None
             )
             .is_none()
         );
         let legacy =
             checksum_method(b"211-Features:\r\n XCRC filename;start;end\r\n211 End\r\n").unwrap();
+        for response in [
+            format!("213 SHA-256 0-5 {hash} {name}\r\n"),
+            format!("213-Computing\r\n213 SHA-256 0-5 {hash} {name}\r\n"),
+            format!("213 6\r\n213 SHA-256 0-5 {hash} {name}\r\n"),
+        ] {
+            assert_eq!(
+                checksum_reply(response.as_bytes(), method, name, Some(6)),
+                Some(hash.clone())
+            );
+        }
+        for range in [
+            "0-4",
+            "1-5",
+            "1-4",
+            "5-0",
+            "+0-5",
+            "0-x",
+            "0-18446744073709551616",
+        ] {
+            assert!(
+                checksum_reply(
+                    format!("213 SHA-256 {range} {hash} {name}\r\n").as_bytes(),
+                    method,
+                    name,
+                    Some(6)
+                )
+                .is_none()
+            );
+        }
+        assert!(
+            checksum_reply(
+                format!("213 SHA-256 0-5 {hash} {name}\r\n").as_bytes(),
+                method,
+                name,
+                None
+            )
+            .is_none()
+        );
         assert_eq!(legacy.command, "XCRC");
         assert_eq!(
-            checksum_reply(b"250 OK\r\n250 A10F2245\r\n", legacy, name).as_deref(),
+            checksum_reply(b"250 OK\r\n250 A10F2245\r\n", legacy, name, None).as_deref(),
             Some("A10F2245")
         );
-        assert!(checksum_reply(b"250 A10F224G\r\n", legacy, name).is_none());
+        assert!(checksum_reply(b"250 A10F224G\r\n", legacy, name, None).is_none());
         assert!(checksum_method(b"500 Unknown command\r\n").is_none());
     }
 

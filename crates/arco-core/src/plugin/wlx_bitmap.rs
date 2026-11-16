@@ -119,6 +119,58 @@ mod tests {
     #[cfg(windows)]
     #[test]
     #[ignore = "requires the ANSI and Unicode WLX test DLLs in ARCO_TEST_WLX_BITMAP_X86 and ARCO_TEST_WLX_BITMAP_X64"]
+    fn wlx_thumbnail_round_trip_without_console_input_closes_the_request_pipe() {
+        use std::os::windows::process::CommandExt;
+        use std::process::{Command, Stdio};
+        // A GUI process has no terminal input. Keep this separate from the normal
+        // CLI test, where an inherited pipe can conceal a host shutdown deadlock.
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "plugin::wlx_bitmap::tests::wlx_thumbnail_batch_calls_both_native_exports_and_rejects_oversize", "--ignored", "--test-threads=1"])
+            .stdin(Stdio::null()).creation_flags(0x0800_0000).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires both WLX SDK fixture DLLs; deliberately delays DLL loading and the preview callback"]
+    fn wlx_load_budget_is_separate_from_the_preview_callback_deadline() {
+        use std::os::windows::process::CommandExt;
+        use std::process::{Command, Stdio};
+        let run = |variable| {
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "plugin::wlx_bitmap::tests::wlx_thumbnail_batch_calls_both_native_exports_and_rejects_oversize", "--ignored", "--test-threads=1"])
+                .env_remove("ARCO_TEST_WLX_LOAD_DELAY_MS")
+                .env_remove("ARCO_TEST_WLX_PREVIEW_DELAY_MS")
+                .env(variable, "11000")
+                .stdin(Stdio::null()).creation_flags(0x0800_0000).output().unwrap()
+        };
+        let loaded = run("ARCO_TEST_WLX_LOAD_DELAY_MS");
+        assert!(
+            loaded.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&loaded.stdout),
+            String::from_utf8_lossy(&loaded.stderr)
+        );
+        let stalled = run("ARCO_TEST_WLX_PREVIEW_DELAY_MS");
+        let report = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&stalled.stdout),
+            String::from_utf8_lossy(&stalled.stderr)
+        );
+        assert!(
+            !stalled.status.success() && report.contains("Zeitlimit von 10 s"),
+            "{report}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires the ANSI and Unicode WLX test DLLs in ARCO_TEST_WLX_BITMAP_X86 and ARCO_TEST_WLX_BITMAP_X64"]
     fn wlx_thumbnail_batch_calls_both_native_exports_and_rejects_oversize() {
         let fixture = tempfile::tempdir().unwrap();
         for (architecture, name) in [("X86", "preview.txt"), ("X64", "Grüße-𐐀.txt")] {
@@ -133,8 +185,8 @@ mod tests {
             let oversized = fixture.path().join("oversized.txt");
             contents[0] = b'O';
             std::fs::write(&oversized, &contents).unwrap();
-            let images =
-                wlx_thumbnails(&plugin, vec![oversized, valid], &AtomicBool::new(false)).unwrap();
+            let images = wlx_thumbnails(&plugin, vec![oversized, valid], &AtomicBool::new(false))
+                .unwrap_or_else(|error| panic!("{architecture}: {error}"));
             assert_eq!(images.len(), 1);
             let (index, image) = &images[0];
             assert_eq!(*index, 1);

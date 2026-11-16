@@ -8,7 +8,12 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
+mod fields;
+mod masks;
+pub use fields::FieldReference;
+mod paths;
 mod times;
+pub use masks::{CounterSettings, NameCase};
 use times::TimeState;
 pub use times::Times;
 
@@ -22,6 +27,7 @@ pub struct Plan {
     entries: Vec<(PathBuf, PathBuf)>,
     before: Vec<fs::Metadata>,
     skipped_capture: usize,
+    roots: Vec<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -50,6 +56,9 @@ pub struct SearchOptions {
     pub first_only: bool,
     pub include_extension: bool,
     pub substitute: bool,
+    pub counter: CounterSettings,
+    pub case: NameCase,
+    pub auto_number: bool,
 }
 
 pub struct Search {
@@ -58,6 +67,9 @@ pub struct Search {
     first_only: bool,
     include_extension: bool,
     substitute: bool,
+    counter: String,
+    case: NameCase,
+    auto_number: bool,
 }
 
 enum Replacement {
@@ -96,6 +108,24 @@ impl SearchOptions {
     }
 
     pub fn compile(&self) -> io::Result<Option<Search>> {
+        let counter = self.counter.pattern()?;
+        if self.find.is_empty()
+            && self.replace.is_empty()
+            && (self.counter != CounterSettings::default()
+                || self.case != NameCase::Original
+                || self.auto_number)
+        {
+            return Ok(Some(Search {
+                pattern: Regex::new(r"\b\B").expect("never matches"),
+                replacement: Replacement::Regex(String::new()),
+                first_only: false,
+                include_extension: false,
+                substitute: false,
+                counter,
+                case: self.case,
+                auto_number: self.auto_number,
+            }));
+        }
         if self.find.len() > 4096 || self.replace.len() > 4096 {
             return Err(io::Error::other(
                 "Such- und Ersetzungstext sind auf 4096 Bytes begrenzt.",
@@ -146,6 +176,9 @@ impl SearchOptions {
             first_only: self.first_only,
             include_extension: self.include_extension,
             substitute: self.substitute,
+            counter,
+            case: self.case,
+            auto_number: self.auto_number,
         }))
     }
 }
@@ -309,6 +342,8 @@ impl Plan {
             paths,
             mask,
             extension_mask,
+            "",
+            false,
             PreviewContext {
                 times: Times::now(),
                 cancel: None,
@@ -362,15 +397,20 @@ impl Plan {
             paths,
             mask,
             extension_mask,
+            search.map_or("", |search| search.counter.as_str()),
+            search.is_some_and(|search| search.auto_number),
             context,
             clipboard,
             field,
-            |stem, extension| match search {
-                None => join_name(stem, extension),
-                Some(search) if search.include_extension || extension.is_none() => {
-                    search.apply(&join_name(stem, extension))
-                }
-                Some(search) => join_name(search.apply(&stem), extension),
+            |stem, extension| {
+                let output = match search {
+                    None => join_name(stem, extension),
+                    Some(search) if search.include_extension || extension.is_none() => {
+                        search.apply(&join_name(stem, extension))
+                    }
+                    Some(search) => join_name(search.apply(&stem), extension),
+                };
+                search.map_or(output.clone(), |search| search.case.apply(output))
             },
         )
     }
@@ -379,6 +419,8 @@ impl Plan {
         paths: &[PathBuf],
         mask: &str,
         extension_mask: Option<&str>,
+        counter_settings: &str,
+        auto_number: bool,
         context: PreviewContext<'_>,
         clipboard: Option<&str>,
         mut field: impl FnMut(&Path, &str) -> Option<String>,
@@ -408,8 +450,13 @@ impl Plan {
                 let mut output = String::new();
                 let mut case = Case::Original;
                 let mut word_start = true;
+                let mut english_ranges = Vec::<std::ops::Range<usize>>::new();
                 for (literal, placeholder) in parts {
+                    let start = output.len();
                     case.push(&mut output, literal, &mut word_start);
+                    if matches!(case, Case::EnglishTitle) {
+                        extend_range(&mut english_ranges, start..output.len());
+                    }
                     let Some(placeholder) = *placeholder else {
                         continue;
                     };
@@ -432,6 +479,12 @@ impl Plan {
                             word_start = true;
                             continue;
                         }
+                        "f" => {
+                            case = Case::EnglishTitle;
+                            word_start = true;
+                            continue;
+                        }
+                        "u" => continue,
                         "I" => {
                             if files::regular_metadata(path)?.is_dir() {
                                 ignore_dir_extension = !ignore_dir_extension;
@@ -444,6 +497,19 @@ impl Plan {
                         }
                         "N" => stem.into(),
                         "c" | "c1" => paths.len().to_string(),
+                        "c2" => {
+                            let width = counter(
+                                counter_settings,
+                                paths.len().saturating_sub(1),
+                                paths.len(),
+                            )?
+                            .chars()
+                            .count();
+                            format!("{:0width$}", paths.len())
+                        }
+                        "c3" => {
+                            counter(counter_settings, paths.len().saturating_sub(1), paths.len())?
+                        }
                         "S" => files::regular_metadata(path)?.len().to_string(),
                         "E" => extension.into(),
                         "A" | "F" => file.into(),
@@ -494,18 +560,10 @@ impl Plan {
                                 value
                             }
                         }
+                        "C" => counter(counter_settings, index, paths.len())?,
                         key if key.starts_with('C') => counter(&key[1..], index, paths.len())?,
-                        key if key.starts_with('B')
-                            && key.len() == 2
-                            && key.as_bytes()[1].is_ascii_digit() =>
-                        {
-                            path.ancestors()
-                                .nth(usize::from(key.as_bytes()[1] - b'0') + 1)
-                                .and_then(Path::file_name)
-                                .map(OsStr::to_string_lossy)
-                                .unwrap_or_default()
-                                .into_owned()
-                        }
+                        key if key.starts_with('B') => masks::ancestor(path, &key[1..])?,
+                        key if key.starts_with('%') => masks::environment(key)?,
                         key if key.starts_with(['N', 'E', 'A', 'P', 'G']) => {
                             let text = match &key[..1] {
                                 "N" => stem.into(),
@@ -517,7 +575,7 @@ impl Plan {
                             name_range(&text, &key[1..])?
                         }
                         key if key.starts_with(|ch: char| ch.is_ascii_digit() || ch == '-') => {
-                            name_range(file, key)?
+                            name_range(&masks::full_path(path), key)?
                         }
                         key if key.starts_with('=') => field(path, &key[1..]).ok_or_else(|| {
                             io::Error::other(format!(
@@ -531,7 +589,14 @@ impl Plan {
                             )));
                         }
                     };
+                    let start = output.len();
                     case.push(&mut output, &value, &mut word_start);
+                    if matches!(case, Case::EnglishTitle) {
+                        extend_range(&mut english_ranges, start..output.len());
+                    }
+                }
+                for range in english_ranges {
+                    masks::english_title(&mut output[range]);
                 }
                 Ok(Some(output))
             };
@@ -549,10 +614,20 @@ impl Plan {
                 None
             };
             let output = transform(stem, extension);
-            let target = path.with_file_name(files::leaf_name(OsStr::new(&output))?);
+            let output = if mask.starts_with("[u]")
+                || extension_mask.is_some_and(|mask| mask.starts_with("[u]"))
+            {
+                masks::normalize(output)?
+            } else {
+                output
+            };
+            let target = paths::target(path, &output)?;
             if path.as_os_str() != target.as_os_str() {
                 entries.push((path.clone(), target));
             }
+        }
+        if auto_number {
+            paths::number_collisions(&mut entries, context.cancel)?;
         }
         let mut plan = Self::from_entries(entries)?;
         plan.skipped_capture = skipped_capture;
@@ -567,7 +642,7 @@ impl Plan {
         }
         let mut entries = Vec::new();
         for (path, name) in paths.iter().zip(names) {
-            let target = path.with_file_name(files::leaf_name(OsStr::new(name))?);
+            let target = paths::target(path, name)?;
             if path.as_os_str() != target.as_os_str() {
                 entries.push((path.clone(), target));
             }
@@ -576,6 +651,19 @@ impl Plan {
     }
 
     fn from_entries(entries: Vec<(PathBuf, PathBuf)>) -> io::Result<Self> {
+        let roots = entries
+            .iter()
+            .map(|(source, _)| {
+                source
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .ok_or_else(|| io::Error::other("Der Quellordner fehlt."))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        Self::with_roots(entries, roots)
+    }
+
+    fn with_roots(entries: Vec<(PathBuf, PathBuf)>, roots: Vec<PathBuf>) -> io::Result<Self> {
         let before = entries
             .iter()
             .map(|(source, _)| files::regular_metadata(source))
@@ -584,6 +672,7 @@ impl Plan {
             entries,
             before,
             skipped_capture: 0,
+            roots,
         };
         plan.validate()?;
         Ok(plan)
@@ -598,11 +687,12 @@ impl Plan {
     }
 
     pub fn inverse(&self) -> io::Result<Self> {
-        Self::from_entries(
+        Self::with_roots(
             self.entries
                 .iter()
                 .map(|(source, target)| (target.clone(), source.clone()))
                 .collect(),
+            self.roots.clone(),
         )
     }
 
@@ -610,15 +700,35 @@ impl Plan {
         let Some((first, _)) = self.entries.first() else {
             return Ok(());
         };
-        let folder = first
+        first
             .parent()
             .ok_or_else(|| io::Error::other("invalid source"))?;
         let key = |path: &Path| path.to_string_lossy().to_lowercase();
         let sources: HashSet<_> = self.entries.iter().map(|(source, _)| key(source)).collect();
+        let source_directories: HashSet<_> = self
+            .entries
+            .iter()
+            .zip(&self.before)
+            .filter(|(_, metadata)| metadata.is_dir())
+            .map(|((source, _), _)| key(source))
+            .collect();
         let mut targets = HashSet::new();
-        for ((source, target), metadata) in self.entries.iter().zip(&self.before) {
-            if source.parent() != Some(folder) || target.parent() != Some(folder) {
-                return Err(io::Error::other("batch rename requires a single directory"));
+        for (((source, target), metadata), root) in
+            self.entries.iter().zip(&self.before).zip(&self.roots)
+        {
+            paths::parents(root, source)?;
+            paths::parents(root, target)?;
+            for path in [source, target] {
+                if path
+                    .parent()
+                    .into_iter()
+                    .flat_map(Path::ancestors)
+                    .any(|parent| source_directories.contains(&key(parent)))
+                {
+                    return Err(io::Error::other(
+                        "Ausgewählte Ordner und ihre Untereinträge dürfen nicht ineinander verschoben werden.",
+                    ));
+                }
             }
             files::ensure_unchanged(source, metadata)?;
             if !targets.insert(key(target)) {
@@ -656,12 +766,29 @@ impl Plan {
         let Some((first, _)) = self.entries.first() else {
             return Ok(());
         };
-        let staging = tempfile::Builder::new()
-            .prefix(".arco-rename-")
-            .tempdir_in(first.parent().unwrap())?;
-        let stage = |index: usize| staging.path().join(index.to_string());
+        let mut staging = Vec::new();
+        let mut folders = std::collections::HashMap::new();
+        let mut stages = Vec::new();
+        for (index, (source, _)) in self.entries.iter().enumerate() {
+            let parent = source.parent().unwrap_or(first);
+            let folder = if let Some(index) = folders.get(parent) {
+                *index
+            } else {
+                let directory = tempfile::Builder::new()
+                    .prefix(".arco-rename-")
+                    .tempdir_in(parent)?;
+                let index = staging.len();
+                staging.push(directory);
+                folders.insert(parent.to_path_buf(), index);
+                index
+            };
+            stages.push(staging[folder].path().join(index.to_string()));
+        }
+        let stage = |index: usize| stages[index].clone();
+        let mut created = Vec::new();
         let mut staged = 0;
         let mut published = 0;
+        let mut published_versions = Vec::new();
         let total = self.entries.len().saturating_mul(2);
         let operation = (|| {
             for (index, (source, target)) in self.entries.iter().enumerate() {
@@ -693,8 +820,26 @@ impl Plan {
                     phase: Phase::Publishing,
                 });
                 files::check_cancel(cancel)?;
+                paths::create_parents(&self.roots[index], target, &mut created)?;
+                match fs::symlink_metadata(target) {
+                    Ok(_) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            format!(
+                                "Das Umbenennziel ist inzwischen belegt: {}",
+                                target.display()
+                            ),
+                        ));
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+                    Err(error) => return Err(error),
+                }
                 rename(&stage(index), target)?;
                 published += 1;
+                // Windows can change creation-time metadata through filename
+                // tunnelling during a cyclic rename. Verify rollback against
+                // the version actually published, rather than its old name.
+                published_versions.push(files::regular_metadata(target)?);
                 progress(Progress {
                     source,
                     target,
@@ -716,7 +861,16 @@ impl Plan {
                     total,
                     phase: Phase::Recovering,
                 });
-                if let Err(error) = rename(&self.entries[index].1, &stage(index)) {
+                if let Err(error) = published_versions
+                    .get(index)
+                    .ok_or_else(|| {
+                        io::Error::other(
+                            "Der veröffentlichte Dateistand konnte nicht geprüft werden.",
+                        )
+                    })
+                    .and_then(|version| files::ensure_unchanged(&self.entries[index].1, version))
+                    .and_then(|()| rename(&self.entries[index].1, &stage(index)))
+                {
                     recovery.push(error.to_string());
                 }
             }
@@ -733,16 +887,24 @@ impl Plan {
                 }
             }
             if !recovery.is_empty() {
-                let path = staging.keep();
+                let paths = staging
+                    .into_iter()
+                    .map(|directory| directory.keep().display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 return Err(io::Error::other(format!(
                     "{error}. Rollback incomplete in {}: {}",
-                    path.display(),
+                    paths,
                     recovery.join("; ")
                 )));
             }
+            paths::remove_empty(&created);
             return Err(error);
         }
-        staging.close()
+        for directory in staging {
+            directory.close()?;
+        }
+        Ok(())
     }
 }
 
@@ -827,6 +989,7 @@ enum Case {
     Upper,
     Lower,
     Title,
+    EnglishTitle,
 }
 
 impl Case {
@@ -835,7 +998,7 @@ impl Case {
             Self::Original => output.push_str(value),
             Self::Upper => output.extend(value.chars().flat_map(char::to_uppercase)),
             Self::Lower => output.extend(value.chars().flat_map(char::to_lowercase)),
-            Self::Title => {
+            Self::Title | Self::EnglishTitle => {
                 for character in value.chars() {
                     if *word_start {
                         output.extend(character.to_uppercase());
@@ -846,6 +1009,16 @@ impl Case {
                 }
             }
         }
+    }
+}
+
+fn extend_range(ranges: &mut Vec<std::ops::Range<usize>>, range: std::ops::Range<usize>) {
+    if let Some(last) = ranges.last_mut()
+        && last.end == range.start
+    {
+        last.end = range.end;
+    } else if !range.is_empty() {
+        ranges.push(range);
     }
 }
 
@@ -932,7 +1105,7 @@ fn letter_count(mut number: i128) -> usize {
 pub fn uses_capture_time(mask: &str) -> io::Result<bool> {
     Ok(mask_parts(mask)?
         .iter()
-        .any(|(_, placeholder)| *placeholder == Some("T4")))
+        .any(|(_, placeholder)| placeholder.is_some_and(|value| value.starts_with("T4"))))
 }
 
 pub fn uses_clipboard(mask: &str) -> io::Result<bool> {
@@ -949,9 +1122,22 @@ fn mask_parts(mut mask: &str) -> io::Result<Vec<(&str, Option<&str>)>> {
             mask = next;
             continue;
         }
-        let (placeholder, next) = rest
-            .split_once(']')
+        let mut quoted = false;
+        let end = rest
+            .char_indices()
+            .find_map(|(index, ch)| {
+                if ch == '"' {
+                    quoted = !quoted;
+                }
+                (ch == ']' && !quoted).then_some(index)
+            })
             .ok_or_else(|| io::Error::other("unterminated placeholder"))?;
+        let (placeholder, next) = (&rest[..end], &rest[end + 1..]);
+        if placeholder == "u" && (!result.is_empty() || !literal.is_empty()) {
+            return Err(io::Error::other(
+                "[u] muss am Anfang der Umbenennmaske stehen.",
+            ));
+        }
         result.push((literal, Some(placeholder)));
         mask = next;
     }
@@ -970,6 +1156,55 @@ pub fn wdx_fields(mask: &str) -> io::Result<Vec<&str>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn automatic_numbering_reserves_preview_names_and_never_overwrites_late_collisions() {
+        use super::*;
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path();
+        let paths = [root.join("a.txt"), root.join("b.txt")];
+        fs::write(&paths[0], b"first").unwrap();
+        fs::write(&paths[1], b"second").unwrap();
+        fs::create_dir(root.join("out")).unwrap();
+        fs::write(root.join("out/result.txt"), b"existing").unwrap();
+        let options = SearchOptions {
+            auto_number: true,
+            ..Default::default()
+        };
+        let search = options.compile().unwrap().unwrap();
+        let preview = || {
+            Plan::new_with_search(
+                &paths,
+                "out/result",
+                Some("[E]"),
+                Some(&search),
+                None,
+                |_, _| None,
+            )
+            .unwrap()
+        };
+        let plan = preview();
+        assert_eq!(plan.entries()[0].1, root.join("out/result (2).txt"));
+        assert_eq!(plan.entries()[1].1, root.join("out/result (3).txt"));
+        let late = root.join("out/result (3).txt");
+        fs::write(&late, b"late arrival").unwrap();
+        assert!(plan.apply(|from, to| fs::rename(from, to)).is_err());
+        assert_eq!(fs::read(&paths[0]).unwrap(), b"first");
+        assert_eq!(fs::read(&paths[1]).unwrap(), b"second");
+        assert_eq!(fs::read(&late).unwrap(), b"late arrival");
+        fs::remove_file(&late).unwrap();
+        let plan = preview();
+        plan.apply(|from, to| fs::rename(from, to)).unwrap();
+        assert_eq!(fs::read(root.join("out/result.txt")).unwrap(), b"existing");
+        assert_eq!(fs::read(&plan.entries()[0].1).unwrap(), b"first");
+        assert_eq!(fs::read(&plan.entries()[1].1).unwrap(), b"second");
+        plan.inverse()
+            .unwrap()
+            .apply(|from, to| fs::rename(from, to))
+            .unwrap();
+        assert_eq!(fs::read(&paths[0]).unwrap(), b"first");
+        assert_eq!(fs::read(&paths[1]).unwrap(), b"second");
+    }
+
     #[test]
     fn cancellation_in_each_rename_phase_restores_cyclic_originals() {
         use super::*;
@@ -996,7 +1231,7 @@ mod tests {
                     },
                 )
                 .unwrap_err();
-            assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+            assert_eq!(error.kind(), io::ErrorKind::Interrupted, "{error}");
             assert!(recovery);
             assert_eq!(fs::read(&paths[0]).unwrap(), b"first");
             assert_eq!(fs::read(&paths[1]).unwrap(), b"second");
@@ -1342,6 +1577,165 @@ mod tests {
             .apply(|from, to| fs::rename(from, to))
             .unwrap();
         assert_eq!(fs::read(&a).unwrap(), b"first");
+    }
+
+    #[test]
+    fn configured_counters_and_final_case_follow_the_documented_order() {
+        let root = tempfile::tempdir().unwrap();
+        let files = ["alpha.txt", "beta.txt", "gamma.txt"].map(|name| root.path().join(name));
+        for path in &files {
+            fs::write(path, b"data").unwrap();
+        }
+        let options = SearchOptions {
+            counter: CounterSettings {
+                start: "10".into(),
+                step: "5".into(),
+                width: "3".into(),
+                every: "2".into(),
+            },
+            case: NameCase::Upper,
+            ..Default::default()
+        };
+        let search = options.compile().unwrap().unwrap();
+        let plan = Plan::new_with_search(
+            &files,
+            "[C]_[c2]_[c3]_[N]",
+            Some("[E]"),
+            Some(&search),
+            None,
+            |_, _| None,
+        )
+        .unwrap();
+        let names = plan
+            .entries()
+            .iter()
+            .map(|(_, target)| target.file_name().unwrap().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "010_003_015_ALPHA.TXT",
+                "010_003_015_BETA.TXT",
+                "015_003_015_GAMMA.TXT"
+            ]
+        );
+        let plan =
+            Plan::new_with_masks(&files[..1], "[C2+2:2]", Some("[E]"), None, None, |_, _| {
+                None
+            })
+            .unwrap();
+        assert_eq!(plan.entries()[0].1.file_name().unwrap(), "02.txt");
+        let path = root.path().join("LORD of THE rings and.txt");
+        fs::write(&path, b"x").unwrap();
+        let plan =
+            Plan::new_with_masks(&[path], "[f][N]", Some("[E]"), None, None, |_, _| None).unwrap();
+        assert_eq!(
+            plan.entries()[0].1.file_name().unwrap(),
+            "Lord of the Rings And.txt"
+        );
+        assert!(
+            SearchOptions {
+                counter: CounterSettings {
+                    every: "0".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+            .compile()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn relative_targets_create_subdirectories_and_remain_undoable() {
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("a.txt");
+        let b = root.path().join("b.txt");
+        fs::write(&a, b"first").unwrap();
+        fs::write(&b, b"second").unwrap();
+        let plan = Plan::from_names(
+            &[a.clone(), b.clone()],
+            &[r"one\a.txt", r"two\nested\b.txt"],
+        )
+        .unwrap();
+        assert!(
+            !root.path().join("one").exists(),
+            "preview must not create directories"
+        );
+        plan.apply(|from, to| fs::rename(from, to)).unwrap();
+        assert_eq!(fs::read(root.path().join("one/a.txt")).unwrap(), b"first");
+        plan.inverse()
+            .unwrap()
+            .apply(|from, to| fs::rename(from, to))
+            .unwrap();
+        assert_eq!(fs::read(&a).unwrap(), b"first");
+        assert_eq!(fs::read(&b).unwrap(), b"second");
+        for name in [
+            r"..\escape.txt",
+            r"\absolute.txt",
+            r"C:\escape.txt",
+            "bad/name/",
+        ] {
+            assert!(
+                Plan::from_names(std::slice::from_ref(&a), &[name]).is_err(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn relative_rename_cancellation_rolls_back_files_and_created_empty_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("a.txt");
+        let b = root.path().join("b.txt");
+        fs::write(&a, b"first").unwrap();
+        fs::write(&b, b"second").unwrap();
+        let plan =
+            Plan::from_names(&[a.clone(), b.clone()], &[r"batch\a.txt", r"batch\b.txt"]).unwrap();
+        let cancel = AtomicBool::new(false);
+        let result = plan.apply_with_progress(
+            &cancel,
+            |from, to| fs::rename(from, to),
+            |update| {
+                if update.phase == Phase::Publishing && update.completed == 3 {
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            },
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted);
+        assert_eq!(fs::read(a).unwrap(), b"first");
+        assert_eq!(fs::read(b).unwrap(), b"second");
+        assert!(!root.path().join("batch").exists());
+        assert!(fs::read_dir(root.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".arco-rename-")
+        }));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unicode_normalization_is_explicit_and_checked_before_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("cafe\u{301}.txt");
+        fs::write(&source, b"data").unwrap();
+        let plan = Plan::new_with_masks(
+            std::slice::from_ref(&source),
+            "[u][N]",
+            Some("[E]"),
+            None,
+            None,
+            |_, _| None,
+        )
+        .unwrap();
+        assert_eq!(plan.entries()[0].1.file_name().unwrap(), "café.txt");
+        fs::write(root.path().join("café.txt"), b"existing").unwrap();
+        assert!(plan.apply(|from, to| fs::rename(from, to)).is_err());
+        assert_eq!(fs::read(source).unwrap(), b"data");
+        assert!(uses_capture_time("[T4+60m][YMD]").unwrap());
+        assert!(uses_clipboard("[N][u]").is_err());
     }
 
     #[test]

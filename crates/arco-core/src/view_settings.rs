@@ -15,6 +15,7 @@ mod tc_columns;
 mod tc_drives;
 pub use tc::{TcViews, parse_wfx_default_view, read_tc_views};
 pub use tc_columns::TcColumnExpression;
+pub(crate) use tc_columns::date as tc_date;
 pub use tc_drives::{request_tc_drive_type, tc_drive_changed_since, tc_drive_revision};
 
 pub const MAX_COLUMNS: usize = 29;

@@ -151,7 +151,12 @@ export component ReviewTable inherits Rectangle {
     in property <[ReviewRow]> rows;
     in property <string> primary-label;
     in property <string> secondary-label;
-    property <int> selection;
+    out property <int> selection;
+    in property <int> requested-selection;
+    in property <bool> reorderable;
+    in property <bool> refinable;
+    callback refine();
+    callback reorder(int, int);
     in property <length> secondary-width: 230px;
     callback copy(string);
     forward-focus: keys;
@@ -171,7 +176,8 @@ export component ReviewTable inherits Rectangle {
         if (root.selection * 58px < -list.viewport-y) { list.viewport-y = -root.selection * 58px; }
         else if ((root.selection + 1) * 58px > -list.viewport-y + list.visible-height) { list.viewport-y = list.visible-height - (root.selection + 1) * 58px; }
     }
-    changed rows => { root.selection = 0; list.viewport-y = 0px; }
+    changed rows => { root.select(root.requested-selection); }
+    changed requested-selection => { root.select(root.requested-selection); }
     VerticalLayout {
         padding: 1px;
         spacing: 1px;
@@ -212,6 +218,10 @@ export component ReviewTable inherits Rectangle {
     keys := FocusScope {
         width: 0px; height: 0px;
         key-pressed(event) => {
+            if root.refinable && event.text == Key.F2 { root.refine(); return accept; }
+            if root.reorderable && event.modifiers.control && event.text == Key.UpArrow { root.reorder(0, root.selection); return accept; }
+            if root.reorderable && event.modifiers.control && event.text == Key.DownArrow { root.reorder(1, root.selection); return accept; }
+            if root.reorderable && event.text == Key.Delete { root.reorder(2, root.selection); return accept; }
             if (event.text == Key.UpArrow) { root.select(root.selection - 1); return accept; }
             if (event.text == Key.DownArrow) { root.select(root.selection + 1); return accept; }
             if (event.text == Key.Home) { root.select(0); return accept; }
@@ -225,6 +235,15 @@ export component ReviewTable inherits Rectangle {
 }
 
 export component ReviewCard inherits Rectangle {
+    in property <bool> history-visible;
+    in property <bool> history-back;
+    in property <bool> history-next;
+    in property <string> history-status;
+    in property <bool> can-refine;
+    callback search-action(int);
+    in property <bool> can-reorder;
+    in property <int> initial-selection;
+    callback reorder(int, int);
     in property <int> focus-cycle;
     changed focus-cycle => { if (root.focus-cycle > 0 && root.rows.length > 0) { table.focus(); } else if (confirm-button.enabled) { confirm-button.focus(); } else { close-button.focus(); } }
     in property <OperationKind> kind;
@@ -251,7 +270,24 @@ export component ReviewCard inherits Rectangle {
     VerticalLayout {
         padding: 20px; spacing: 12px;
         DialogHeading { icon: root.kind == OperationKind.search ? @image-url("icons/search.svg") : root.kind == OperationKind.ftp ? @image-url("icons/network.svg") : root.kind == OperationKind.plugin ? @image-url("icons/settings.svg") : @image-url("icons/edit.svg"); title: root.title; subtitle: root.description; }
-        table := ReviewTable { rows: root.rows; primary-label: root.primary-label; secondary-label: root.secondary-label; vertical-stretch: 1; copy(text) => { root.copy-row(text); } }
+        if root.history-visible : HorizontalLayout {
+            spacing: 8px;
+            NavButton { icon: @image-url("icons/back.svg"); label: @tr("Vorheriges Suchergebnis"); enabled: root.history-back; clicked => { root.search-action(0); } }
+            NavButton { icon: @image-url("icons/forward.svg"); label: @tr("Nächstes Suchergebnis"); enabled: root.history-next; clicked => { root.search-action(1); } }
+            Text { text: @tr("Suchverlauf") + " · " + root.history-status; color: Colors.muted; vertical-alignment: center; }
+            Rectangle { horizontal-stretch: 1; }
+            ActionButton { icon: @image-url("icons/search.svg"); text: @tr("Treffer durchsuchen (F2)"); enabled: root.can-refine; clicked => { root.search-action(3); } }
+            NavButton { icon: @image-url("icons/close.svg"); label: @tr("Andere Suchergebnisse verwerfen"); clicked => { root.search-action(4); } }
+        }
+        if root.can-reorder : HorizontalLayout {
+            spacing: 8px;
+            ActionButton { icon: @image-url("icons/up.svg"); text: @tr("Nach oben"); enabled: table.selection > 0; clicked => { root.reorder(0, table.selection); } }
+            ActionButton { icon: @image-url("icons/down.svg"); text: @tr("Nach unten"); enabled: table.selection + 1 < root.rows.length; clicked => { root.reorder(1, table.selection); } }
+            ActionButton { icon: @image-url("icons/close.svg"); text: @tr("Aus Vorschau entfernen"); enabled: root.rows.length > 0; clicked => { root.reorder(2, table.selection); } }
+            Rectangle { horizontal-stretch: 1; }
+        }
+        if root.can-reorder : Text { text: @tr("Strg+Pfeil auf/ab: Reihenfolge · Entf: nur aus Vorschau entfernen. Zähler und Zielnamen werden neu berechnet."); color: Colors.muted; wrap: word-wrap; }
+        table := ReviewTable { rows: root.rows; primary-label: root.primary-label; secondary-label: root.secondary-label; vertical-stretch: 1; requested-selection: root.initial-selection; reorderable: root.can-reorder; refinable: root.can-refine; refine => { root.search-action(3); } reorder(action, index) => { root.reorder(action, index); } copy(text) => { root.copy-row(text); } }
         if root.rows.length == 0 : Note { text: @tr("Keine Einträge vorhanden."); }
         if root.options.length > 0 : ComboBox { model: root.options; current-index <=> root.choice; accessible-label: @tr("Ergebnisaktion"); }
         HorizontalLayout {

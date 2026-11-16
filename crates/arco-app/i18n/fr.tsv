@@ -1112,3 +1112,101 @@ Doppelklick/Enter: Umbenennvorschau · F2: bearbeiten · Einfg: neu · Entf: ent
 Einlesen	Lire
 Dateipfad	Chemin du fichier
 Fehlerdetails	Détails de l’erreur
+Zähler und abschließende Schreibweise	Compteur et casse finale
+Startwert	Valeur initiale
+Schrittweite	Incrément
+Stellen (a = automatisch)	Chiffres (a = automatique)
+Dateien je Zählerwert	Fichiers par valeur du compteur
+Schreibweise unverändert	Conserver la casse
+GROSSBUCHSTABEN	MAJUSCULES
+kleinbuchstaben	minuscules
+Erster Buchstabe groß	Première lettre en majuscule
+Jedes Wort Groß	Majuscule À Chaque Mot
+Englische Titelschreibung	Casse des titres anglais
+Abschließende Schreibweise	Casse finale
+Gilt nach Suchen und Ersetzen. [C] verwendet diese Zählerwerte; [C10+5:3] definiert eigene Werte.	Appliqué après la recherche et le remplacement. [C] utilise ces valeurs ; [C10+5:3] définit ses propres valeurs.
+1. Priorität	1re priorité
+2. Priorität bei Gleichstand	2e priorité en cas d’égalité
+3. Priorität bei Gleichstand	3e priorité en cas d’égalité
+Abspielen	Lire
+Alle Größen	Toutes les tailles
+Alle Zeitstempel	Toutes les dates
+Alle größten Dateien	Tous les fichiers les plus grands
+Alle kleinsten Dateien	Tous les fichiers les plus petits
+Alle neuesten Dateien	Tous les fichiers les plus récents
+Alle ältesten Dateien	Tous les fichiers les plus anciens
+Auswahl / Name	Sélection / nom
+Auswahl übernehmen	Appliquer la sélection
+Dateien filtern	Filtrer les fichiers
+Datum innerhalb der Gruppe	Date dans le groupe
+Duplikate markieren	Sélectionner les doublons
+Erste Datei	Premier fichier
+Filter kombinieren, Vorschau prüfen und die Auswahl ins Dateifenster übernehmen.	Combinez les filtres, vérifiez l’aperçu et appliquez la sélection au panneau de fichiers.
+Gruppe / Größe	Groupe / taille
+Größe innerhalb der Gruppe	Taille dans le groupe
+Größer als die kleinste Datei	Plus grand que le plus petit fichier
+Größte Datei	Plus grand fichier
+Keine	Aucun
+Kleiner als die größte Datei	Plus petit que le plus grand fichier
+Kleinste Datei	Plus petit fichier
+Lautstärke	Volume
+Leertaste: Wiedergabe/Pause · Pfeile: Position/Lautstärke · M: stumm · Esc: zurück	Espace : lecture/pause · Flèches : position/volume · M : muet · Échap : retour
+Letzte Datei	Dernier fichier
+Markieren nach Name / Erweiterung	Sélectionner par nom / extension
+Markierung entfernen nach Name / Erweiterung	Désélectionner par nom / extension
+Masken: *.txt *.jpg | alt* · RegEx: <Muster · Suchprofil: >Profilname. Namens-, Ordner-, Datums- und Größenfilter werden mit UND kombiniert.	Masques : *.txt *.jpg | ancien* · RegEx : <motif · Profil : >nom du profil. Les filtres de nom, dossier, date et taille sont combinés avec ET.
+Medien werden vorbereitet …	Préparation du média…
+Medienvorschau nicht verfügbar	Aperçu multimédia indisponible
+Mindestens eine Datei je Gruppe unmarkiert lassen	Laisser au moins un fichier non sélectionné par groupe
+Mindestens eine Kopie behalten	Conserver au moins une copie
+Muster nur auf den direkten Elternordner anwenden	Appliquer le motif uniquement au dossier parent direct
+Neuer als die älteste Datei	Plus récent que le fichier le plus ancien
+Neueste Datei	Fichier le plus récent
+Nicht älter als	Pas plus ancien que
+Nur ganze Wörter	Mots entiers uniquement
+Ordner auswählen	Sélectionner les dossiers
+Ordnermuster	Motif de dossier
+Ordnername, Pfad oder *Muster*	Nom de dossier, chemin ou *motif*
+Position	Position
+Stopp	Arrêter
+Stumm	Muet
+Text in Office-Dateien und EPUB durchsuchen	Rechercher dans les fichiers Office et EPUB
+Text nicht enthalten	Texte absent
+Ton einschalten	Rétablir le son
+Umkehren	Inverser
+Unterordner bei Auswahl und Mustern einbeziehen	Inclure les sous-dossiers dans la sélection et les motifs
+Verwende Quelldaten anzeigen oder ein passendes WLX-Plugin.	Utilisez Afficher les données source ou un plugin WLX adapté.
+Vorschau aktualisieren	Actualiser l’aperçu
+Vorschau nach Änderungen aktualisieren. Es werden keine Dateien verändert.	Actualisez l’aperçu après modification. Aucun fichier ne sera modifié.
+Älter als	Plus ancien que
+Älter als die neueste Datei	Plus ancien que le fichier le plus récent
+Älteste Datei	Fichier le plus ancien
+Andere Suchergebnisse verwerfen	Supprimer les autres résultats
+Archive vergleichen	Comparer les archives
+Archivvergleich	Comparaison des archives
+Auch Dateien in Archiven durchsuchen	Rechercher aussi dans les archives
+Aus Vorschau entfernen	Retirer de l’aperçu
+Automatische Kodierung	Encodage automatique
+Bei Namenskonflikten freie Nummer anhängen	Ajouter un numéro libre en cas de conflit de nom
+Ein Archiv: Treffer direkt übernehmen. Mehrere Ursprünge: lokale Dateien und passende Archive als Dateiliste übernehmen.	Une archive : utiliser directement les éléments trouvés. Plusieurs origines : afficher les fichiers locaux et les archives correspondantes.
+Erweiterte Dateisuche	Recherche avancée de fichiers
+FTP-Kopie prüfen	Vérifier la copie FTP
+FTP-Verzeichnis	Dossier FTP
+Herunterladen	Télécharger
+Letzte Suchergebnisse anzeigen	Afficher les derniers résultats
+Nach oben	Monter
+Nach unten	Descendre
+Nächstes Suchergebnis	Résultats suivants
+Ordner öffnen	Ouvrir le dossier
+Strg+Pfeil auf/ab: Reihenfolge · Entf: nur aus Vorschau entfernen. Zähler und Zielnamen werden neu berechnet.	Ctrl+Haut/Bas : réordonner · Suppr : retirer de l’aperçu uniquement. Les compteurs et les noms sont recalculés.
+Suchorte mit Zeilenumbruch oder Semikolon trennen. @Dateiliste liest UTF-8, UTF-16 oder Windows-1252. Leer sucht im aktiven Ordner.	Séparez les emplacements par des sauts de ligne ou des points-virgules. @Liste lit UTF-8, UTF-16 ou Windows-1252. Laissez vide pour le dossier actif.
+Suchverlauf	Historique de recherche
+Synchronisieren	Synchroniser
+Synchronisierung prüfen	Vérifier la synchronisation
+Textkodierung	Encodage du texte
+Treffer durchsuchen (F2)	Rechercher dans les résultats (F2)
+Vorheriges Suchergebnis	Résultats précédents
+Ziel	Destination
+Partnerdatei mit anderer Erweiterung	Fichier associé avec une autre extension
+Partner-Erweiterungen	Extensions des fichiers associés
+Partnerdatei fehlt	Fichier associé absent

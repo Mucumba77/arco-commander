@@ -3,6 +3,16 @@
 pub mod ftp;
 
 #[cfg(windows)]
+mod rich_text;
+#[cfg(windows)]
+pub use rich_text::RichTextView;
+
+#[cfg(windows)]
+mod media_view;
+#[cfg(windows)]
+pub use media_view::{MediaState, MediaView};
+
+#[cfg(windows)]
 mod icons;
 #[cfg(windows)]
 pub use icons::resource_icon;

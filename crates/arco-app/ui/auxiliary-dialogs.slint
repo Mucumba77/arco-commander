@@ -63,7 +63,7 @@ export component MessageCard inherits Rectangle {
 }
 
 export enum TextDraftKind { text, ignore, packer, rename }
-export struct TextDraftForm { name: string, program: string, extension: string, body: string, second: string, enabled: bool, option: int, separate: bool, search: bool, find: string, replace: string, regex: bool, wildcards: bool, match-case: bool, first-only: bool, include-extension: bool, substitute: bool }
+export struct TextDraftForm { name: string, program: string, extension: string, body: string, second: string, enabled: bool, option: int, separate: bool, search: bool, find: string, replace: string, regex: bool, wildcards: bool, match-case: bool, first-only: bool, include-extension: bool, substitute: bool, auto-number: bool, case: int, counter-start: string, counter-step: string, counter-width: string, counter-every: string }
 export struct TextDraftData { kind: TextDraftKind, title: string, description: string, label: string, second-label: string, options: [string], options-label: string, initial: TextDraftForm }
 
 export component TextDraftCard inherits Rectangle {
@@ -136,6 +136,19 @@ export component TextDraftCard inherits Rectangle {
                             FieldLabel { text: @tr("Einfache Ersetzung (optional, Muster=>Ersatz)"); }
                             LineEdit { text <=> root.form.second; accessible-label: @tr("Einfache Ersetzung (optional, Muster=>Ersatz)"); }
                         }
+                    }
+                    if root.data.kind == TextDraftKind.rename : FormSection {
+                        title: @tr("Zähler und abschließende Schreibweise");
+                        HorizontalLayout { spacing: 8px;
+                            VerticalLayout { spacing: 4px; FieldLabel { text: @tr("Startwert"); } LineEdit { text <=> root.form.counter-start; accessible-label: @tr("Startwert"); } }
+                            VerticalLayout { spacing: 4px; FieldLabel { text: @tr("Schrittweite"); } LineEdit { text <=> root.form.counter-step; accessible-label: @tr("Schrittweite"); } }
+                        }
+                        HorizontalLayout { spacing: 8px;
+                            VerticalLayout { spacing: 4px; FieldLabel { text: @tr("Stellen (a = automatisch)"); } LineEdit { text <=> root.form.counter-width; accessible-label: @tr("Stellen (a = automatisch)"); } }
+                            VerticalLayout { spacing: 4px; FieldLabel { text: @tr("Dateien je Zählerwert"); } LineEdit { text <=> root.form.counter-every; accessible-label: @tr("Dateien je Zählerwert"); } }
+                        }
+                        ComboBox { model: [@tr("Schreibweise unverändert"), @tr("GROSSBUCHSTABEN"), @tr("kleinbuchstaben"), @tr("Erster Buchstabe groß"), @tr("Jedes Wort Groß"), @tr("Englische Titelschreibung")]; current-index <=> root.form.case; accessible-label: @tr("Abschließende Schreibweise"); }
+                        CheckBox { text: @tr("Bei Namenskonflikten freie Nummer anhängen"); checked <=> root.form.auto-number; }
                     }
                     if root.data.kind == TextDraftKind.text && root.data.second-label != "" : FormSection { title: root.data.second-label; LineEdit { text <=> root.form.second; accessible-label: root.data.second-label; } }
                     if root.data.options.length > 0 : FormSection { title: root.data.options-label; ComboBox { model: root.data.options; current-index <=> root.form.option; accessible-label: root.data.options-label; } }

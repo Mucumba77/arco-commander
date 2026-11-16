@@ -33,6 +33,7 @@ pub fn inspect(request: Request) -> io::Result<Vec<Row>> {
     let _ = WORKSPACE.set(std::env::current_dir()?);
     wfx::set_interactive(request.interface == Interface::Wfx && request.interactive);
     let library = load_library(&request.plugin)?;
+    crate::send_ready()?;
     match (request.interface, &request.operation) {
         (interface, Operation::Probe) => probe(&library, interface),
         (Interface::Wcx, Operation::Run) => inspect_wcx(&library, &request.file, None),
@@ -189,9 +190,16 @@ pub fn view(
     let library = load_library(&request.plugin)?;
     let parent = match request.operation {
         Operation::WlxEmbedded { parent } => Some(parent),
+        Operation::WlxDetected { parent } => parent,
         _ => None,
     };
-    wlx::view(&library, &request.file, parent, ready)
+    wlx::view(
+        &library,
+        &request.file,
+        parent,
+        !matches!(request.operation, Operation::WlxDetected { .. }),
+        ready,
+    )
 }
 
 fn load_library(path: &Path) -> io::Result<Library> {

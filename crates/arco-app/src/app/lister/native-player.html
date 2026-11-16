@@ -1,0 +1,33 @@
+<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-arco-player'; base-uri 'none'; form-action 'none'">
+<style>
+:root{color-scheme:{{scheme}};font:14px 'Segoe UI',sans-serif;--accent:#58d6bd}*{box-sizing:border-box}body{margin:0;background:Canvas;color:CanvasText}main{height:calc(100vh - 118px);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;text-align:center}.art{font-size:64px;color:var(--accent)}.title{max-width:100%;overflow-wrap:anywhere;font-size:17px}footer{position:fixed;bottom:0;left:0;width:100%;height:118px;border-top:1px solid GrayText;padding:10px 16px;background:Canvas}.timeline,.controls{display:flex;align-items:center;gap:10px}.timeline{margin-bottom:8px}.timeline input{min-width:0;flex:1}output{font-variant-numeric:tabular-nums;min-width:96px;text-align:right}button{font:inherit;padding:7px 12px;border:1px solid GrayText;border-radius:8px;background:ButtonFace;color:ButtonText;cursor:pointer}button.primary{background:var(--accent);color:#092019;border-color:var(--accent)}button:disabled{opacity:.45;cursor:default}button:focus-visible,input:focus-visible,p:focus-visible{outline:2px solid #68b8ff;outline-offset:2px}input{accent-color:var(--accent)}#volume{width:100px}.hint{font-size:11px;opacity:.7;margin:4px 0}#error{color:#ed9999;font-size:12px;margin:3px 0;max-height:30px;overflow:auto}#status{opacity:.7;font-size:12px}
+.controls{gap:8px}.controls button{white-space:nowrap;flex-shrink:0}#volume{min-width:40px;flex:1;max-width:100px}#volume-label{position:absolute;width:1px;height:1px;clip-path:inset(50%);overflow:hidden}.hint{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+</style></head><body>
+<main id="placeholder"><div class="art" aria-hidden="true">♫</div><div class="title">{{title}}</div><p id="status" role="status"></p></main>
+<footer><div class="timeline"><label id="position-label" for="position"></label><input id="position" type="range" min="0" max="1000" value="0" disabled><output id="time">0:00 / 0:00</output></div>
+<div class="controls"><button id="play" class="primary" disabled></button><button id="stop" disabled></button><button id="mute" disabled></button><label id="volume-label" for="volume"></label><input id="volume" type="range" min="0" max="100" value="100" disabled></div>
+<p id="error" role="alert" tabindex="0" hidden></p><p id="hint" class="hint"></p></footer>
+<script nonce="arco-player">
+'use strict';const text={{labels}};let frame={ready:false,playing:false,position:0,duration:0,volume:1,muted:false};
+const element=id=>document.getElementById(id);const send=(action,value=0)=>window.chrome.webview.postMessage(JSON.stringify({action,value}));
+const clock=value=>{value=Math.max(0,Math.floor(value||0));return Math.floor(value/60)+':'+String(value%60).padStart(2,'0')};
+element('position-label').textContent=text.position;element('volume-label').textContent=text.volume;element('hint').textContent=text.keys;element('hint').title=text.keys;element('status').textContent=text.loading;
+element('play').textContent='▶ '+text.play;element('stop').textContent='■ '+text.stop;element('mute').textContent=text.mute;
+element('play').onclick=()=>send('toggle');element('stop').onclick=()=>send('stop');element('mute').onclick=()=>send('mute',frame.muted?0:1);
+element('position').onchange=event=>send('seek',Number(event.target.value)/1000);element('volume').oninput=event=>send('volume',Number(event.target.value)/100);
+window.arcoState=value=>{frame=value;for(const id of ['play','stop','mute','volume'])element(id).disabled=!value.ready;element('position').disabled=!value.ready||value.duration<=0;
+element('play').textContent=(value.playing?'Ⅱ '+text.pause:'▶ '+text.play);element('mute').textContent=value.muted?text.unmute:text.mute;
+element('play').setAttribute('aria-label',value.playing?text.pause:text.play);element('mute').setAttribute('aria-label',value.muted?text.unmute:text.mute);
+element('time').textContent=clock(value.position)+' / '+clock(value.duration);element('position').setAttribute('aria-valuetext',element('time').textContent);if(document.activeElement!==element('position'))element('position').value=value.duration>0?Math.round(value.position/value.duration*1000):0;
+if(document.activeElement!==element('volume'))element('volume').value=Math.round(value.volume*100);element('status').textContent=value.error?'':value.ready?text.ready:text.loading;
+element('error').hidden=!value.error;element('error').textContent=value.error||'';element('hint').hidden=!!value.error;element('placeholder').style.visibility=value.video?'hidden':'visible';};
+document.addEventListener('keydown',event=>{if(event.altKey||event.metaKey)return;if(event.key==='Escape'){send('escape');event.preventDefault();return}
+if(event.key==='Tab'){const controls=[...document.querySelectorAll('button:not(:disabled),input:not(:disabled),p[tabindex]:not([hidden])')];const at=controls.indexOf(document.activeElement);if((event.shiftKey&&at===0)||(!event.shiftKey&&at===controls.length-1)){send('leave',event.shiftKey?-1:1);event.preventDefault()}return}
+if(!frame.ready||event.target===element('error'))return;
+if(event.code==='Space'&&!event.ctrlKey){if(!event.repeat)send('toggle')}
+else if(event.key==='ArrowLeft'||event.key==='ArrowRight'){if(frame.duration>0)send('seek',Math.min(1,Math.max(0,(frame.position+(event.key==='ArrowLeft'?-5:5))/frame.duration)))}
+else if(event.key==='Home'){send('seek',0)}else if(event.key==='End'){send('seek',1)}
+else if(event.key==='ArrowUp'||event.key==='ArrowDown'){const step=(event.shiftKey||event.ctrlKey) ? .10 : .01;send('volume',Math.min(1,Math.max(0,frame.volume+(event.key==='ArrowUp'?step:-step))))}
+else if(event.key.toLowerCase()==='m'&&!event.ctrlKey){if(!event.repeat)send('mute',frame.muted?0:1)}else return;event.preventDefault();},true);
+</script></body></html>

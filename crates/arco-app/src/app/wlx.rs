@@ -141,15 +141,18 @@ impl App {
         self.ui().set_quick_embedded(false);
     }
 
-    pub(super) fn quick_plugin(&self, target: &QuickTarget) -> Option<(Registration, usize)> {
+    pub(super) fn quick_plugin(&self, target: &QuickTarget) -> Option<(Vec<Registration>, usize)> {
         if self.quick_skip_plugin || target.archive.is_some() {
             return None;
         }
-        let entry =
-            self.profile.plugins.iter().find(|entry| {
-                !entry.masks.is_empty() && entry.matches(Interface::Wlx, &target.path)
-            })?;
-        Some((entry.clone(), self.native_window_handle()?))
+        let entries = self
+            .profile
+            .plugins
+            .iter()
+            .filter(|entry| entry.matches(Interface::Wlx, &target.path))
+            .cloned()
+            .collect::<Vec<_>>();
+        (!entries.is_empty()).then_some((entries, self.native_window_handle()?))
     }
 
     pub(super) fn native_window_handle(&self) -> Option<usize> {

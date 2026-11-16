@@ -311,7 +311,14 @@ impl State {
                         window.set_status(format!("{label} · Formatierte Vorschau").into());
                         self.position_surface(window);
                     }
-                    Err(error) => window.set_status(error.to_string().into()),
+                    Err(error) => {
+                        self.surface = None;
+                        window.set_has_rich(false);
+                        window.set_has_image(false);
+                        window.set_has_page(true);
+                        window.set_preview_text(format!("Die formatierte Vorschau konnte nicht geöffnet werden.\n\n{error}\n\nMit „Quelldaten anzeigen“ kannst du die Datei als Text oder Hex anzeigen.").into());
+                        window.set_status(error.to_string().into());
+                    }
                 }
             }
             Ok(Loaded::NoMatch) => window.set_status("Kein weiterer Treffer.".into()),

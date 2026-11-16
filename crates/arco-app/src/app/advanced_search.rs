@@ -31,7 +31,12 @@ impl Update {
     }
 }
 
+mod duplicate_selection;
+mod global_archives;
+mod history;
+pub(super) use history::History;
 mod worker;
+pub(crate) use duplicate_selection::State as DuplicateSelectionState;
 pub(crate) use worker::run as run_search_worker;
 
 #[derive(Clone)]
@@ -41,6 +46,9 @@ pub(crate) struct Setup {
     directory: PathBuf,
     selected: Vec<PathBuf>,
     archive: Option<ArchiveTab>,
+    refine: bool,
+    archive_scopes: Vec<global_archives::Scope>,
+    search_password: Option<ArchivePassword>,
 }
 
 impl Setup {
@@ -55,10 +63,12 @@ impl Setup {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct Review {
     setup: Setup,
     found: Found,
     duplicate_groups: Option<Vec<usize>>,
+    criteria: Option<Options>,
 }
 
 pub(super) struct SeparateSearch {
@@ -66,7 +76,9 @@ pub(super) struct SeparateSearch {
     window: SearchWindow,
     setup: Setup,
     cancel: Option<Arc<AtomicBool>>,
-    review: Option<Review>,
+    review: Option<Arc<Review>>,
+    criteria: Options,
+    history: History,
     progress: super::job_progress::Tracker,
 }
 
@@ -77,6 +89,7 @@ pub(super) enum WindowAction {
     Use,
     Finished(io::Result<Found>),
     Progress(Update),
+    ResultAction(i32, i32),
 }
 
 struct SearchTask {
@@ -88,6 +101,7 @@ struct SearchTask {
     ignore: Option<Arc<arco_core::ignore::IgnoreList>>,
     executable: Option<PathBuf>,
     archive: Option<ArchiveTab>,
+    archive_scopes: Vec<global_archives::Scope>,
     password: Option<ArchivePassword>,
     wdx: Option<super::wdx::search::ProfileFilter>,
 }
@@ -105,6 +119,9 @@ impl SearchTask {
     ) -> io::Result<Found> {
         if let Some(archive) = &self.archive {
             return self.run_archive(archive, cancel, &mut progress);
+        }
+        if self.options.archives || !self.archive_scopes.is_empty() {
+            return self.run_global_archives(cancel, &mut progress);
         }
         let mut examined = 0;
         let mut path = self
@@ -166,6 +183,13 @@ impl SearchTask {
             self.show_hidden,
             cancel,
             |row| {
+                if self
+                    .ignore
+                    .as_ref()
+                    .is_some_and(|ignore| ignore.local(&row.path, row.kind == Kind::Directory))
+                {
+                    return Ok(false);
+                }
                 if !reads_files {
                     return Ok(true);
                 }
@@ -184,7 +208,7 @@ impl SearchTask {
                 if content {
                     let mut entry = row.clone();
                     entry.path.clone_from(&file);
-                    if !self.query.matches(&entry, cancel)? {
+                    if !self.query.matches_content(&entry, cancel)? {
                         return Ok(false);
                     }
                 }
@@ -317,6 +341,9 @@ pub(crate) fn duplicate_result(
             directory,
             selected: Vec::new(),
             archive: None,
+            refine: false,
+            archive_scopes: Vec::new(),
+            search_password: None,
         },
         found: Found {
             directory: Directory {
@@ -326,6 +353,7 @@ pub(crate) fn duplicate_result(
             cancelled: false,
         },
         duplicate_groups: Some(duplicate_groups),
+        criteria: None,
     })))
 }
 
@@ -338,6 +366,9 @@ impl App {
             directory: tab.path.clone(),
             selected: tab.marked_paths(),
             archive: tab.archive.clone(),
+            refine: false,
+            archive_scopes: Vec::new(),
+            search_password: None,
         }
     }
 
@@ -352,6 +383,7 @@ impl App {
         ui.set_search_archive(setup.archive.is_some());
         ui.set_search_base(setup.location().display().into());
         self.publish_search_profiles();
+        self.publish_search_history();
         self.pending = Some(Pending::AdvancedSearch(setup));
         ui.set_dialog_kind("advanced-search".into());
     }
@@ -384,8 +416,9 @@ impl App {
         };
         let ui = self.ui();
         ui.set_search_notice("".into());
-        let setup = setup.clone();
+        let mut setup = setup.clone();
         let password = search_password(&data);
+        setup.search_password = password.clone().or(setup.search_password);
         let options = from_draft(data);
         if operation != 2 {
             let (draft, notice) = self.search_profile(&setup, options, name, operation)?;
@@ -399,7 +432,7 @@ impl App {
             return Err(io::Error::other("Ein Auftrag läuft bereits."));
         }
         let task = self.search_task(&setup, options.clone(), password)?;
-        self.profile.search_last = options;
+        self.profile.search_last = options.clone();
         self.save();
         self.close_dialog();
         let origin = if task.archive.is_some() {
@@ -426,6 +459,7 @@ impl App {
                     setup,
                     found,
                     duplicate_groups: None,
+                    criteria: Some(options),
                 })))
             },
         );
@@ -446,7 +480,7 @@ impl App {
                 .get(name)
                 .cloned()
                 .ok_or_else(|| io::Error::other("Wähle ein Suchprofil."))?;
-            options.selected_only &= !setup.selected.is_empty();
+            options.selected_only &= !setup.selected.is_empty() || !setup.archive_scopes.is_empty();
             return Ok((Some(to_draft(&options)), ""));
         }
         if matches!(operation, 1 | 3) {
@@ -509,15 +543,22 @@ impl App {
         options: Options,
         password: Option<ArchivePassword>,
     ) -> io::Result<SearchTask> {
-        let query = compile_search(&options)?;
+        let only_roots = setup.refine && options.depth.trim() == "0";
+        let query = if only_roots {
+            let mut names_ignored = options.clone();
+            names_ignored.names = "*".into();
+            compile_search(&names_ignored)?.only_roots()
+        } else {
+            compile_search(&options)?
+        };
         let wdx = self.wdx_filter(&options)?;
-        if setup.archive.is_some() && options.everything().is_some() {
+        if setup.archive.is_some() && options.everything().is_some() && !only_roots {
             return Err(io::Error::other(
                 "Everything durchsucht Dateisysteme. Entferne das Präfix für die Suche im Archiv.",
             ));
         }
         let roots = if options.selected_only {
-            if setup.selected.is_empty() {
+            if setup.selected.is_empty() && setup.archive_scopes.is_empty() {
                 return Err(io::Error::other(
                     "Markiere vor der Suche Dateien oder Ordner.",
                 ));
@@ -530,12 +571,17 @@ impl App {
                 .map_or(setup.directory.as_path(), |archive| {
                     archive.folder.as_path()
                 });
-            let paths = options
-                .roots
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
+            let paths = advanced_search::search_locations(&options.roots)?
+                .into_iter()
                 .map(|line| {
+                    if let Some(list) = line.strip_prefix('@') {
+                        if setup.archive.is_some() {
+                            return Err(io::Error::other(
+                                "@Dateilisten benötigen lokale Suchorte.",
+                            ));
+                        }
+                        return Ok(advanced_search::list_marker(base, list));
+                    }
                     let path = Path::new(line.trim_matches('"'));
                     if setup.archive.is_some()
                         && path
@@ -555,21 +601,30 @@ impl App {
                 paths
             }
         };
-        if roots.len() > 256 && setup.archive.is_some() {
-            return Err(io::Error::other("Wähle bis zu 256 Suchorte im Archiv."));
+        if roots.len() > 250000 && setup.archive.is_some() {
+            return Err(io::Error::other("Wähle bis zu 250.000 Suchorte im Archiv."));
         }
         Ok(SearchTask {
             query,
             roots,
-            indexed: options
-                .everything()
-                .map(|(scoped, expression)| (scoped, expression.to_owned())),
-            options,
+            indexed: (!only_roots)
+                .then(|| {
+                    options
+                        .everything()
+                        .map(|(scoped, expression)| (scoped || setup.refine, expression.to_owned()))
+                })
+                .flatten(),
+            options: options.clone(),
             show_hidden: self.profile.show_hidden,
             ignore: self.ignore_list(),
             executable: self.profile.everything_cli.clone(),
             archive: setup.archive.clone(),
-            password,
+            archive_scopes: if options.selected_only {
+                setup.archive_scopes.clone()
+            } else {
+                Vec::new()
+            },
+            password: password.or_else(|| setup.search_password.clone()),
             wdx,
         })
     }
@@ -631,6 +686,13 @@ impl App {
             let _ = sender.send(Event::SeparateSearch(id, Box::new(WindowAction::Close)));
         });
         let sender = self.sender.clone();
+        window.on_result_action(move |action, index| {
+            let _ = sender.send(Event::SeparateSearch(
+                id,
+                Box::new(WindowAction::ResultAction(action, index)),
+            ));
+        });
+        let sender = self.sender.clone();
         window.window().on_close_requested(move || {
             let _ = sender.send(Event::SeparateSearch(id, Box::new(WindowAction::Close)));
             slint::CloseRequestResponse::KeepWindowShown
@@ -642,6 +704,8 @@ impl App {
             setup,
             cancel: None,
             review: None,
+            criteria: self.profile.search_last.clone(),
+            history: History::default(),
             progress: super::job_progress::Tracker::default(),
         });
         self.publish_search_profiles();
@@ -722,13 +786,14 @@ impl App {
                         .window
                         .set_notice("Schließe zuerst den Dialog im Hauptfenster.".into());
                 } else {
-                    let mut review = self
+                    let review = self
                         .separate_search
                         .as_mut()
                         .unwrap()
                         .review
                         .take()
                         .unwrap();
+                    let mut review = (*review).clone();
                     review.found.directory.errors.clear();
                     self.close_separate_search();
                     self.use_search_results(review, 0);
@@ -741,11 +806,13 @@ impl App {
                 search.window.set_busy(false);
                 match result {
                     Ok(found) => {
-                        let review = Review {
+                        let review = Arc::new(Review {
                             setup: search.setup.clone(),
                             found,
                             duplicate_groups: None,
-                        };
+                            criteria: Some(search.criteria.clone()),
+                        });
+                        search.history.push(review.clone());
                         let (title, list) = review_text(&review);
                         search.window.set_notice("".into());
                         search.window.set_result_rows(review_rows(&review));
@@ -756,6 +823,7 @@ impl App {
                             .window
                             .set_can_use(!review.found.directory.entries.is_empty());
                         search.review = Some(review);
+                        history::publish_window_history(search);
                     }
                     Err(error) => search.window.set_notice(error.to_string().into()),
                 }
@@ -784,6 +852,9 @@ impl App {
                 }
             }
             WindowAction::Configure(..) => {}
+            WindowAction::ResultAction(action, index) => {
+                self.separate_result_action(id, action, index)
+            }
         }
     }
 
@@ -795,6 +866,9 @@ impl App {
         password: Option<ArchivePassword>,
     ) -> io::Result<()> {
         let task = self.search_task(setup, options.clone(), password)?;
+        if let Some(search) = self.separate_search.as_mut() {
+            search.setup.search_password = task.password.clone();
+        }
         let working_base = if task.archive.is_some() {
             setup.location().display()
         } else {
@@ -838,6 +912,7 @@ impl App {
         search.window.set_metrics(Default::default());
         search.window.set_cancelling(false);
         search.cancel = Some(cancel);
+        search.criteria = options.clone();
         search.review = None;
         self.profile.search_last = options;
         self.save();
@@ -845,29 +920,92 @@ impl App {
     }
 
     pub(super) fn show_search_review(&mut self, review: Box<Review>) {
-        let (title, list) = review_text(&review);
-        let options = if review.duplicate_groups.is_some() {
-            std::iter::once("Treffer übernehmen")
-                .chain(DUPLICATE_MARK_OPTIONS.iter().map(|(label, _)| *label))
-                .map(crate::locale::tr)
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        self.ui().set_review_rows(review_rows(&review));
-        self.ui()
-            .set_review_can_confirm(!review.found.directory.entries.is_empty());
-        self.ui().set_review_can_edit(false);
-        self.dialog("search-results", Pending::SearchReview(review), Dialog {
-            title: &title, description: "Übernimm die Treffer als Dateiliste oder behalte die vorherige Ansicht.",
-            value: &list, options: &options, ..Default::default()
-        });
+        if review.duplicate_groups.is_some() {
+            self.show_duplicate_selection(review);
+            return;
+        }
+        let review = Arc::from(review);
+        self.search_history.push(Arc::clone(&review));
+        self.show_stored_search_review(review);
     }
 
     pub(crate) fn use_search_results(&mut self, review: Review, option: usize) {
+        if review
+            .found
+            .directory
+            .entries
+            .iter()
+            .any(|entry| entry.archive_file.is_some())
+        {
+            if self.job.is_some() {
+                self.status("Ein Auftrag läuft bereits.");
+                return;
+            }
+            self.start_operation_job(
+                "Suchtreffer übernehmen",
+                false,
+                super::JobDescription::new(
+                    crate::OperationKind::Search,
+                    review.setup.location().display(),
+                    String::new(),
+                ),
+                move |job| {
+                    let (review, archive) = global_archives::prepare_feed(review, &job.cancel)?;
+                    Ok(Outcome::SearchFeed(Box::new(review), archive))
+                },
+            );
+            return;
+        }
+        self.apply_search_results(review, option);
+    }
+
+    pub(super) fn apply_search_feed(&mut self, mut review: Review, archive: Option<ArchiveTab>) {
+        let side = review.setup.side;
+        if self.panels[side].request != review.setup.request
+            || self.panels[side].current().location() != review.setup.location()
+        {
+            self.status("Ansicht hat sich während der Suche geändert.");
+            return;
+        }
+        if let Some(archive) = archive {
+            let location = Location::Archive {
+                file: archive.file.clone(),
+                folder: archive.folder.clone(),
+            };
+            let panel = &mut self.panels[side];
+            let mut tab = crate::panel::Tab::new(panel.current().path.clone());
+            tab.change_location(&location, Some(archive.clone()));
+            panel.tabs.push(tab);
+            panel.tab = panel.tabs.len() - 1;
+            self.next_request += 1;
+            panel.request = self.next_request;
+            review.setup.request = panel.request;
+            review.setup.archive = Some(archive);
+        }
+        self.apply_search_results(review, 0);
+    }
+
+    fn apply_search_results(&mut self, review: Review, option: usize) {
         let side = review.setup.side;
         let location = review.setup.location();
         let request = review.setup.request;
+        let grouped_paths = review.duplicate_groups.as_ref().map(|groups| {
+            let mut start = 0usize;
+            groups
+                .iter()
+                .map(|count| {
+                    let end = start
+                        .saturating_add(*count)
+                        .min(review.found.directory.entries.len());
+                    let paths = review.found.directory.entries[start..end]
+                        .iter()
+                        .map(|entry| entry.path.clone())
+                        .collect();
+                    start = end;
+                    paths
+                })
+                .collect::<Vec<_>>()
+        });
         let marks = review.duplicate_groups.as_deref().and_then(|groups| {
             let (_, rule) = DUPLICATE_MARK_OPTIONS.get(option.checked_sub(1)?)?;
             Some(duplicate_marks(
@@ -891,6 +1029,9 @@ impl App {
             },
         });
         let panel = &mut self.panels[side];
+        if panel.request == request && panel.current().location() == location {
+            panel.current_mut().duplicate_groups = grouped_paths;
+        }
         if let Some(marks) = marks
             && panel.request == request
             && panel.current().location() == location
@@ -1176,7 +1317,7 @@ fn review_rows(review: &Review) -> slint::ModelRc<crate::ReviewRow> {
                         display_path(&entry.path)
                     )
                 } else {
-                    display_path(&entry.path)
+                    global_archives::entry_path(entry)
                 }
                 .into(),
                 kind: if entry.kind == Kind::Directory {
@@ -1220,7 +1361,7 @@ fn review_text(review: &Review) -> (String, String) {
         }
     } else {
         for entry in entries {
-            writeln!(list, "{}", display_path(&entry.path)).unwrap();
+            writeln!(list, "{}", global_archives::entry_path(entry)).unwrap();
         }
     }
     if found.directory.entries.len() > 1000 {
@@ -1284,10 +1425,18 @@ fn to_draft(options: &Options) -> SearchDraft {
         content_mode: i32::from(options.content_mode),
         encoding: i32::from(options.encoding),
         match_case: options.match_case,
+        whole_words: options.whole_words,
+        content_not: options.content_not,
+        office_xml: options.office_xml,
+        archives: options.archives,
+        partner_extensions: options.partner_extensions.as_str().into(),
+        partner_not: options.partner_not,
         minimum_bytes: options.minimum_bytes.as_str().into(),
         maximum_bytes: options.maximum_bytes.as_str().into(),
         modified_from: options.modified_from.as_str().into(),
         modified_to: options.modified_to.as_str().into(),
+        minimum_age: options.minimum_age.as_str().into(),
+        maximum_age: options.maximum_age.as_str().into(),
         attributes: options.attributes.as_str().into(),
         depth: options.depth.as_str().into(),
         roots: options.roots.as_str().into(),
@@ -1302,12 +1451,20 @@ fn from_draft(data: SearchDraft) -> Options {
         names: data.names.to_string(),
         content: data.content.to_string(),
         content_mode: data.content_mode.clamp(0, 3) as u8,
-        encoding: data.encoding.clamp(0, 4) as u8,
+        encoding: data.encoding.clamp(0, 7) as u8,
         match_case: data.match_case,
+        whole_words: data.whole_words,
+        content_not: data.content_not,
+        office_xml: data.office_xml,
+        archives: data.archives,
+        partner_extensions: data.partner_extensions.to_string(),
+        partner_not: data.partner_not,
         minimum_bytes: data.minimum_bytes.to_string(),
         maximum_bytes: data.maximum_bytes.to_string(),
         modified_from: data.modified_from.to_string(),
         modified_to: data.modified_to.to_string(),
+        minimum_age: data.minimum_age.to_string(),
+        maximum_age: data.maximum_age.to_string(),
         attributes: data.attributes.to_string(),
         depth: data.depth.to_string(),
         roots: data.roots.to_string(),
@@ -1400,6 +1557,7 @@ mod tests {
                 ignore: None,
                 executable: None,
                 archive,
+                archive_scopes: Vec::new(),
                 password: password.clone(),
                 wdx: Some(
                     super::super::wdx::search::ProfileFilter::compile(
