@@ -83,7 +83,14 @@ pub(super) fn open(path: &Path, access: u32) -> io::Result<File> {
 }
 
 fn reopen(path: &Path, reference: &File, access: u32) -> io::Result<File> {
-    let file = open(path, access)?;
+    let file = if files::is_link(&reference.metadata()?) {
+        OpenOptions::new()
+            .access_mode(access | FILE_READ_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?
+    } else {
+        open(path, access)?
+    };
     if file_id(&file)? != file_id(reference)? {
         return Err(io::Error::other(
             "Der Pfad für die NTFS-Sicherheitsdaten hat sich geändert.",

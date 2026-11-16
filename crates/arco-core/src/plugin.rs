@@ -21,7 +21,7 @@ mod tc_names;
 #[allow(unsafe_code)] // Read-only Win32 metadata and locale APIs.
 mod tc_native;
 mod wdx;
-pub use tc_fields::{TC_METADATA_FIELDS, tc_field, tc_field_with_cancel};
+pub use tc_fields::{TC_METADATA_FIELDS, tc_entry_field, tc_field, tc_field_with_cancel};
 
 pub(crate) fn grouping_separator() -> String {
     #[cfg(windows)]

@@ -63,7 +63,11 @@ impl App {
                 value: &label,
                 placeholder: "Freigabename",
                 second_placeholder: "Konten und Gruppen, durch Semikolon getrennt (optional)",
-                options: &["Nur lesen", "Ändern", "Vollzugriff"],
+                options: &[
+                    crate::locale::tr("Nur lesen"),
+                    crate::locale::tr("Ändern"),
+                    crate::locale::tr("Vollzugriff"),
+                ],
                 ..Default::default()
             },
         );

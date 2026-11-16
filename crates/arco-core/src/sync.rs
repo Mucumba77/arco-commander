@@ -351,8 +351,36 @@ pub fn compare_ignoring_with_progress(
     selected: &[PathBuf],
     ignore: Option<&crate::ignore::IgnoreList>,
     cancel: &AtomicBool,
+    progress: impl FnMut(&Path, usize),
+) -> io::Result<Plan> {
+    let origins = [fs::canonicalize(roots[0])?, fs::canonicalize(roots[1])?];
+    compare_projected_ignoring_with_progress(
+        roots,
+        origins.each_ref().map(PathBuf::as_path),
+        options,
+        selected,
+        ignore,
+        cancel,
+        progress,
+    )
+}
+
+/// Compare staged trees while applying ignore rules to their original namespace
+/// (for example C:\\backup.zip\\documents), never the random staging directory.
+pub fn compare_projected_ignoring_with_progress(
+    roots: [&Path; 2],
+    origins: [&Path; 2],
+    options: &Options,
+    selected: &[PathBuf],
+    ignore: Option<&crate::ignore::IgnoreList>,
+    cancel: &AtomicBool,
     mut progress: impl FnMut(&Path, usize),
 ) -> io::Result<Plan> {
+    if origins.iter().any(|path| !path.is_absolute()) {
+        return Err(io::Error::other(
+            "Ignorierregeln benötigen absolute Ursprungspfade.",
+        ));
+    }
     let mut examined = 0;
     let roots = [fs::canonicalize(roots[0])?, fs::canonicalize(roots[1])?];
     let [left_key, right_key] = roots.each_ref().map(|root| key(root));
@@ -373,11 +401,11 @@ pub fn compare_ignoring_with_progress(
             &scope,
             |path, directory| {
                 ignore.is_some_and(|ignore| {
-                    let current = roots[side].join(path);
-                    let other = roots[1 - side].join(path);
+                    let current = origins[side].join(path);
+                    let other = origins[1 - side].join(path);
                     ignore.local(&current, directory)
                         || ignore.local(&other, false)
-                        || (ignore.local(&other, true) && other.is_dir())
+                        || (ignore.local(&other, true) && roots[1 - side].join(path).is_dir())
                 })
             },
             cancel,
@@ -1033,6 +1061,63 @@ mod tests {
         assert_eq!(plan.rows.len(), 1);
         assert_eq!(plan.rows[0].relative, Path::new("public.txt"));
         assert_eq!(fs::read(right).unwrap(), b"copy");
+    }
+
+    #[test]
+    fn projected_archive_ignores_protect_both_sides_of_a_mirror() {
+        let (fixture, roots, cancel) = setup();
+        let [left, right] = &roots;
+        for root in &roots {
+            fs::create_dir_all(root.join("cache/nested")).unwrap();
+            fs::write(root.join("cache/nested/private.txt"), b"private").unwrap();
+            fs::write(root.join("secret.txt"), b"protected").unwrap();
+            fs::write(root.join("ignore.tmp"), b"temporary").unwrap();
+        }
+        fs::write(left.join("public.txt"), b"public").unwrap();
+        fs::write(right.join("extra.txt"), b"remove").unwrap();
+        let archive_origin = fixture.path().join("backup.zip/documents");
+        let ignore = crate::ignore::IgnoreList::parse(&format!(
+            "{}\ncache\\\n*.tmp",
+            archive_origin.join("secret.txt").display()
+        ))
+        .unwrap();
+        let plan = compare_projected_ignoring_with_progress(
+            roots.each_ref().map(PathBuf::as_path),
+            [&archive_origin, right],
+            &Options {
+                mode: Mode::Mirror,
+                recursive: true,
+                ..Default::default()
+            },
+            &[],
+            Some(&ignore),
+            &cancel,
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(plan.rows.len(), 2);
+        assert!(
+            plan.rows
+                .iter()
+                .any(|row| row.relative == Path::new("public.txt")
+                    && row.action == Action::CopyRight)
+        );
+        assert!(
+            plan.rows
+                .iter()
+                .any(|row| row.relative == Path::new("extra.txt")
+                    && row.action == Action::DeleteRight)
+        );
+        let report = plan.apply(&cancel, |_| {});
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(fs::read(right.join("public.txt")).unwrap(), b"public");
+        assert!(!right.join("extra.txt").exists());
+        assert_eq!(fs::read(right.join("secret.txt")).unwrap(), b"protected");
+        assert_eq!(
+            fs::read(right.join("cache/nested/private.txt")).unwrap(),
+            b"private"
+        );
+        assert_eq!(fs::read(right.join("ignore.tmp")).unwrap(), b"temporary");
     }
 
     #[test]

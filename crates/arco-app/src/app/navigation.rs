@@ -81,13 +81,18 @@ fn button_form(button: &ButtonbarButton) -> NavigationForm {
         ButtonbarAction::Program {
             path,
             arguments,
+            raw_parameters,
             working_directory,
             window,
             tc_arguments,
             prompt_arguments,
         } => {
             form.command = display_path(path).into();
-            form.arguments = arguments.join("\n").into();
+            form.arguments = raw_parameters
+                .clone()
+                .unwrap_or_else(|| arguments.join("\n"))
+                .into();
+            form.raw = raw_parameters.is_some();
             form.args = !arguments.is_empty();
             form.working = working_directory
                 .as_deref()
@@ -126,7 +131,7 @@ impl App {
     ) -> Option<&'static str> {
         let mut data = NavigationData {
             title: tr(source.title).into(),
-            description: tr(source.description).into(),
+            description: crate::locale::message(source.description).as_ref().into(),
             primary: tr("Öffnen").into(),
             first_label: tr(source.placeholder).into(),
             second_label: tr(source.second_placeholder).into(),
@@ -613,7 +618,7 @@ impl App {
         match result {
             Err(error) => self
                 .ui()
-                .set_navigation_notice(tr(&error.to_string()).into()),
+                .set_navigation_notice(crate::locale::message(&error.to_string()).as_ref().into()),
             Ok(()) => {
                 if self.ui().get_dialog_revision() == revision {
                     self.close_dialog();
@@ -672,7 +677,7 @@ impl App {
         match result {
             Err(error) => self
                 .ui()
-                .set_navigation_notice(tr(&error.to_string()).into()),
+                .set_navigation_notice(crate::locale::message(&error.to_string()).as_ref().into()),
             Ok(()) if self.ui().get_dialog_revision() == revision => self.close_dialog(),
             _ => (),
         }
@@ -764,7 +769,11 @@ fn button_text(form: &NavigationForm, previous: Option<&ButtonbarButton>) -> io:
                 (2, _, true) => "tc-max-ask:",
                 _ => return Err(io::Error::other("Wähle einen gültigen Fensterzustand.")),
             };
-            format!("{prefix}{}", form.command.trim().trim_matches('"'))
+            format!(
+                "{}{prefix}{}",
+                if form.raw { "raw:" } else { "" },
+                form.command.trim().trim_matches('"')
+            )
         }
         2 => "Untermenü".into(),
         3 => "Leistenwechsel".into(),
@@ -828,6 +837,7 @@ mod tests {
             action: ButtonbarAction::Program {
                 path: std::env::temp_dir().join("Arco Test").join("editor.exe"),
                 arguments,
+                raw_parameters: None,
                 working_directory: Some("bin".into()),
                 window: ProgramWindow::Maximized,
                 tc_arguments: true,

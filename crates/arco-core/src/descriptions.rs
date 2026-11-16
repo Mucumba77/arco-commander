@@ -36,6 +36,16 @@ pub fn is_sidecar(entry: &Path) -> bool {
         .is_some_and(|name| name.eq_ignore_ascii_case(FILE_NAME))
 }
 
+pub(crate) fn entry_comment(entry: &Path) -> io::Result<Option<String>> {
+    if is_sidecar(entry) {
+        return Ok(None);
+    }
+    let (directory, name) = entry_name(entry)?;
+    Ok(read(directory)?
+        .remove(&key(name.as_ref()))
+        .filter(|value| !value.is_empty()))
+}
+
 pub(crate) fn copy_entry(
     source: &Path,
     target: &Path,

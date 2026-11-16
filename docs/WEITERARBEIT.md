@@ -1,8 +1,10 @@
-# Fortsetzung nach Arco Commander 1.3.0
+# Fortsetzung nach Arco Commander 1.4.0
 
-Stand: 16. November 2026. Dieses Dokument hält den nächsten Arbeitsblock über Sitzungen hinweg fest. Version 1.3.0 ergänzt den Bereich-3-Abschluss mit Suche, Lister und Werkzeugen. Version 1.2.0 bündelte die Dialogüberarbeitungen einschließlich Datei-/Binärvergleich, Einfg, Dateieigenschaften, Attributen, Berechtigungen, Dateiwerkzeugen, Tabs, Favoriten, Buttonbars, Starter, Ansichtsregeln, Spaltensätzen, Dateizuordnungen sowie Nebenfenstern und allgemeinen Fehler-/Ergebnisdialogen.
+Stand: 16. November 2026. Dieses Dokument hält den nächsten Arbeitsblock über Sitzungen hinweg fest. Version 1.4.0 ergänzt den Abschluss der Bereiche 1 und 2. Version 1.3.0 enthält den Bereich-3-Abschluss mit Suche, Lister und Werkzeugen. Version 1.2.0 bündelte die Dialogüberarbeitungen einschließlich Datei-/Binärvergleich, Einfg, Dateieigenschaften, Attributen, Berechtigungen, Dateiwerkzeugen, Tabs, Favoriten, Buttonbars, Starter, Ansichtsregeln, Spaltensätzen, Dateizuordnungen sowie Nebenfenstern und allgemeinen Fehler-/Ergebnisdialogen.
 
 ## Nächster Schritt
+
+**Bereiche 1 und 2 sind im definierten Matrixumfang abgeschlossen: jeweils 10/10 IDs, 100 % Implementierung.** Quellstand über Tag `v1.4.0`. [Nachweis](BEREICH1-2-ABSCHLUSS.md) und [Bedienung](NAVIGATION-UND-DATEIEN.md). Fensterprüfung und Rechte-/Hardware-/TC-Referenzen bleiben separat offen. Arco Commander weiterhin nicht starten. Version 1.4.0 wird als reguläre Windows-Version bereitgestellt. Weitere Bereiche erst nach neuem Auftrag beginnen.
 
 Bereich 3 ist nach der Veröffentlichung von 1.2.0 im definierten Matrixumfang implementiert. Der Abschlusskatalog in `FUNKTIONSMATRIX.md` hält die konkreten TOOL-01–TOOL-13-Varianten und die getrennten Nachweise fest. Arco Commander weiterhin nicht starten; Fenstertests bleiben beim Projektinhaber.
 
@@ -16,9 +18,9 @@ Neu sind erweiterte lokale/Archiv-Suchkriterien, Traverse-Filter, @Dateilisten, 
 
 Aktueller Prüfstand: 310 bestanden / 38 explizite Umgebungsfälle ausgelassen in 8 Suiten; zusätzlich 16 Referenz-Testläufe bestanden. Keine RichEdit-/Medien-/Plugin-Fenster, keine Wiedergabe und kein Drucker geöffnet. Der TC-Installer wurde nur als signiertes Referenzdatenpaket ausgewertet, nicht ausgeführt.
 
-Als nächstes gelten die Rückmeldungen aus den Fenstertests. Version 1.3.0 enthält diesen Entwicklungsblock. Keine weiteren Bereiche ohne neuen Auftrag beginnen.
+Als nächstes gelten die Rückmeldungen aus den Fenstertests. Version 1.4.0 enthält den aktuellen Entwicklungsblock. Keine weiteren Bereiche ohne neuen Auftrag beginnen.
 
-1. **Rückmeldungen aus den Fenstertests haben Vorrang.** Der Projektinhaber prüft Version 1.3.0 anhand von [UI-PRUEFUNG.md](UI-PRUEFUNG.md). Gemeldete Bedienungs-, Fokus-, Darstellungs- und Fortschrittsfehler zuerst beheben.
+1. **Rückmeldungen aus den Fenstertests haben Vorrang.** Der Projektinhaber prüft Version 1.4.0 anhand von [UI-PRUEFUNG.md](UI-PRUEFUNG.md). Gemeldete Bedienungs-, Fokus-, Darstellungs- und Fortschrittsfehler zuerst beheben.
 2. **Den durchgehenden Bedienungsabgleich anhand der Fenstertests abschließen.** Besonders lange Fehlerdetails, kleine Fenster, DPI-Skalierung, Fokuswechsel und Ergebnisse aus Hintergrundaufträgen prüfen. Die Quelltextüberarbeitung ist kein Nachweis bestandener Fensterprüfungen. Weitere Änderungen an tatsächlich gemeldeten Lücken ausrichten.
 3. **Verbliebene Oberflächenlücken nach den Fensterprüfungen nachziehen.** Erwartete Prüfungen sind keine abgeschlossenen visuellen Nachweise; insbesondere Skalierung, Fokus und reine Mausbedienung bleiben beim Projektinhaber.
 4. **Erst anschließend die Funktionsmatrix weiter ausbauen.** Die bisherigen offenen Paritäts- und Referenzfälle werden durch die Überarbeitung der Oberfläche nicht automatisch abgeschlossen.

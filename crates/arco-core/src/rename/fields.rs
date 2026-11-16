@@ -41,13 +41,18 @@ impl<'a> FieldReference<'a> {
             .split_once('.')
             .filter(|(plugin, field)| !plugin.is_empty() && !field.is_empty())
             .ok_or_else(invalid)?;
-        let (query, format) = if let Some((_, format)) = field.split_once('.').filter(|(_, f)| {
-            f.starts_with('_')
-                || ((f.contains(['Y', 'M', 'D'])
-                    || (f.contains('h') && f.contains('m'))
-                    || (f.contains('m') && f.contains('s')))
-                    && f.chars().all(|ch| "YyMDhmsuvapP .-_,/:".contains(ch)))
-        }) {
+        let formatted = field
+            .char_indices()
+            .filter(|(_, ch)| *ch == '.')
+            .map(|(i, _)| &field[i + 1..])
+            .find(|f| {
+                f.starts_with('_')
+                    || ((f.contains(['Y', 'M', 'D'])
+                        || (f.contains('h') && f.contains('m'))
+                        || (f.contains('m') && f.contains('s')))
+                        && f.chars().all(|ch| "YyMDhmsuvapP .-_,/:".contains(ch)))
+            });
+        let (query, format) = if let Some(format) = formatted {
             (&token[..token.len() - format.len() - 1], Some(format))
         } else {
             (token, None)
@@ -252,6 +257,12 @@ mod tests {
             assert_eq!(reference.query, "P.Size");
             assert_eq!(reference.render(Some(&value)).unwrap().unwrap(), expected);
         }
+        let unit = FieldReference::parse("P.Size.scaled._d3,").unwrap();
+        assert_eq!(unit.query, "P.Size.scaled");
+        assert_eq!(
+            unit.render(Some(&value)).unwrap().as_deref(),
+            Some("33,532,878")
+        );
         let reference = FieldReference::parse(r#""("P.Title:2-4")""#).unwrap();
         assert_eq!(reference.query, "P.Title");
         assert_eq!(reference.render(None).unwrap(), Some(String::new()));

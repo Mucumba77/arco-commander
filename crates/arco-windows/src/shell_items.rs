@@ -1,6 +1,6 @@
 use crate::{
-    SHELL_APPLICATIONS, SHELL_COMPUTER, SHELL_DESKTOP, SHELL_LIBRARIES, SHELL_NETWORK,
-    SHELL_RECYCLE_BIN, ShellFolder, ShellListing,
+    SHELL_APPLICATIONS, SHELL_COMPUTER, SHELL_CONTROLS, SHELL_DESKTOP, SHELL_FONTS,
+    SHELL_LIBRARIES, SHELL_NETWORK, SHELL_PRINTERS, SHELL_RECYCLE_BIN, ShellFolder, ShellListing,
 };
 use std::ffi::OsString;
 use std::io;
@@ -12,15 +12,16 @@ use windows::Win32::System::Ole::{OleInitialize, OleUninitialize};
 use windows::Win32::System::SystemServices::SFGAO_FOLDER;
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
-    FOLDERID_AppsFolder, FOLDERID_Desktop, FOLDERID_Libraries, FOLDERID_NetworkFolder,
-    FOLDERID_RecycleBinFolder, IEnumIDList, ILCombine, ILRemoveLastID, IShellFolder,
-    IShellItemArray, SHCONTF_FOLDERS, SHCONTF_INCLUDEHIDDEN, SHCONTF_NONFOLDERS,
-    SHCreateShellItemArrayFromIDLists, SHGetDesktopFolder, SHGetKnownFolderIDList,
-    SHGetNameFromIDList, SHParseDisplayName, SIGDN, SIGDN_DESKTOPABSOLUTEPARSING,
-    SIGDN_FILESYSPATH, SIGDN_NORMALDISPLAY,
+    FOLDERID_AppsFolder, FOLDERID_ControlPanelFolder, FOLDERID_Desktop, FOLDERID_Fonts,
+    FOLDERID_Libraries, FOLDERID_NetworkFolder, FOLDERID_PrintersFolder, FOLDERID_RecycleBinFolder,
+    IEnumIDList, ILCombine, ILRemoveLastID, IShellFolder, IShellItemArray, SHCONTF_FOLDERS,
+    SHCONTF_INCLUDEHIDDEN, SHCONTF_NONFOLDERS, SHCreateShellItemArrayFromIDLists,
+    SHGetDesktopFolder, SHGetKnownFolderIDList, SHGetNameFromIDList, SHParseDisplayName, SIGDN,
+    SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_FILESYSPATH, SIGDN_NORMALDISPLAY,
 };
 use windows::core::{GUID, PCWSTR};
 
+mod identity;
 mod operations;
 pub use operations::shell_transfer;
 
@@ -59,6 +60,9 @@ impl Drop for Pidl {
 
 fn parse_id(value: impl AsRef<std::ffi::OsStr>) -> io::Result<Pidl> {
     let value = value.as_ref();
+    if let Some(id) = identity::restore(value)? {
+        return Ok(id);
+    }
     if let Some((_, folder)) = known_virtual_folder(value) {
         let id =
             Pidl(unsafe { SHGetKnownFolderIDList(&folder, 0, None) }.map_err(io::Error::other)?);
@@ -84,6 +88,9 @@ fn known_virtual_folder(value: &std::ffi::OsStr) -> Option<(&'static str, GUID)>
         (SHELL_LIBRARIES, FOLDERID_Libraries),
         (SHELL_APPLICATIONS, FOLDERID_AppsFolder),
         (SHELL_RECYCLE_BIN, FOLDERID_RecycleBinFolder),
+        (SHELL_CONTROLS, FOLDERID_ControlPanelFolder),
+        (SHELL_FONTS, FOLDERID_Fonts),
+        (SHELL_PRINTERS, FOLDERID_PrintersFolder),
     ]
     .into_iter()
     .find(|(address, _)| value.eq_ignore_ascii_case(std::ffi::OsStr::new(address)))
@@ -222,7 +229,7 @@ fn describe(id: &Pidl) -> io::Result<(String, String)> {
         |_| address.clone(),
         |title| title.to_string_lossy().into_owned(),
     );
-    Ok((address, title))
+    Ok((identity::address(id, address)?, title))
 }
 
 pub fn open_shell_item(parsing_name: &str) -> io::Result<()> {
@@ -256,6 +263,9 @@ mod tests {
             SHELL_LIBRARIES,
             SHELL_APPLICATIONS,
             SHELL_RECYCLE_BIN,
+            SHELL_CONTROLS,
+            SHELL_FONTS,
+            SHELL_PRINTERS,
         ] {
             let id = parse_id(alias).unwrap_or_else(|error| panic!("{alias}: {error}"));
             assert!(!id_is_empty(&id), "{alias}");
@@ -278,5 +288,21 @@ mod tests {
                 .iter()
                 .any(|entry| entry.path.as_ref().is_some_and(|path| path.is_absolute()))
         );
+    }
+
+    #[test]
+    fn local_virtual_providers_keep_parseable_identities_and_ancestor_navigation() {
+        let _apartment = Ole::new().unwrap();
+        for address in [SHELL_CONTROLS, SHELL_FONTS, SHELL_LIBRARIES] {
+            let listing = shell_listing(address, false, &AtomicBool::new(false)).unwrap();
+            assert_eq!(listing.ancestors.last().unwrap().0, address);
+            for entry in listing.entries {
+                assert!(!entry.parsing_name.is_empty());
+                let id = parse_id(&entry.parsing_name)
+                    .unwrap_or_else(|error| panic!("{}: {error}", entry.parsing_name));
+                let (restored, _) = describe(&id).unwrap();
+                assert_eq!(restored, entry.parsing_name);
+            }
+        }
     }
 }

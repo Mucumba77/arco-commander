@@ -226,9 +226,9 @@ impl App {
                         Dialog {
                             title: name,
                             options: &[
-                                "Mit Vorlage umbenennen",
-                                "Vorlage bearbeiten",
-                                "Vorlage löschen",
+                                crate::locale::tr("Mit Vorlage umbenennen"),
+                                crate::locale::tr("Vorlage bearbeiten"),
+                                crate::locale::tr("Vorlage löschen"),
                             ],
                             ..Default::default()
                         },

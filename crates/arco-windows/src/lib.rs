@@ -76,6 +76,10 @@ pub const SHELL_NETWORK: &str = "shell:NetworkPlacesFolder";
 pub const SHELL_LIBRARIES: &str = "shell:Libraries";
 pub const SHELL_APPLICATIONS: &str = "shell:AppsFolder";
 pub const SHELL_RECYCLE_BIN: &str = "shell:RecycleBinFolder";
+pub const SHELL_CONTROLS: &str = "shell:ControlPanelFolder";
+pub const SHELL_FONTS: &str = "shell:Fonts";
+pub const SHELL_PRINTERS: &str = "shell:PrintersFolder";
+pub const SHELL_PIDL_PREFIX: &str = "shell:arco-pidl:";
 
 pub struct ShellListing {
     pub ancestors: Vec<(String, String)>,

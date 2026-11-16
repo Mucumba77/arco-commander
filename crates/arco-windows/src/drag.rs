@@ -26,6 +26,7 @@ use windows_sys::Win32::UI::Shell::{
     SHDoDragDrop,
 };
 
+mod data;
 mod source;
 
 pub fn file_drop_action() -> crate::FileDropAction {
@@ -38,7 +39,13 @@ pub fn drag_files(paths: &[PathBuf]) -> io::Result<FileDragOutcome> {
         return Ok(FileDragOutcome::NoConfirmedMove);
     }
     let _ole = Ole::new()?;
-    let (data, allowed) = prepare_drag_data(paths)?;
+    let captured = source::Sources::capture(paths).ok();
+    // Give the target the same physical parents that the snapshot protects.
+    // An alias in an ancestor must not redirect the target's copy to other data.
+    let drag_paths = captured
+        .as_ref()
+        .map_or(paths, source::Sources::exposed_paths);
+    let (data, allowed) = prepare_drag_data(drag_paths)?;
     let asynchronous = data.cast::<IDataObjectAsyncCapability>();
     let async_disabled = allowed & DROPEFFECT_MOVE != 0
         && match &asynchronous {
@@ -46,9 +53,7 @@ pub fn drag_files(paths: &[PathBuf]) -> io::Result<FileDragOutcome> {
             Ok(capability) => unsafe { capability.SetAsyncMode(false) }.is_ok(),
             Err(error) => error.code().0 == E_NOINTERFACE,
         };
-    let sources = async_disabled
-        .then(|| source::Sources::capture(paths).ok())
-        .flatten();
+    let sources = async_disabled.then_some(captured).flatten();
 
     // Use the raw HRESULT: the safe wrapper also treats a canceled drop as Ok.
     let mut effect = DROPEFFECT_NONE;
@@ -105,9 +110,12 @@ fn classic_move_confirmed(
 }
 
 fn prepare_drag_data(paths: &[PathBuf]) -> io::Result<(IDataObject, u32)> {
-    let items = item_array(paths)?;
-    let data: IDataObject = unsafe { items.BindToHandler(None::<&IBindCtx>, &BHID_DataObject) }
-        .map_err(io::Error::other)?;
+    let data: IDataObject = item_array(paths)
+        .and_then(|items| {
+            unsafe { items.BindToHandler(None::<&IBindCtx>, &BHID_DataObject) }
+                .map_err(io::Error::other)
+        })
+        .or_else(|_| data::new(paths))?;
     // Preserve copy as the default. If the data object cannot express that
     // preference, keep the previous copy/link-only effects.
     let mut allowed = DROPEFFECT_COPY | DROPEFFECT_LINK;
@@ -305,6 +313,71 @@ mod tests {
                 synchronous
             ));
         }
+    }
+
+    #[test]
+    fn native_drag_data_exposes_the_pinned_physical_parent_of_a_junction_alias() {
+        use std::os::windows::ffi::OsStringExt;
+        use std::os::windows::process::CommandExt;
+        let _ole = Ole::new().unwrap();
+        let fixture = tempfile::tempdir().unwrap();
+        let physical = fixture.path().join("physical");
+        std::fs::create_dir(&physical).unwrap();
+        let file = physical.join("selected.txt");
+        std::fs::write(&file, b"original").unwrap();
+        let alias = fixture.path().join("alias");
+        let command = std::process::Command::new("cmd.exe")
+            .creation_flags(0x0800_0000)
+            .args(["/d", "/v:off", "/c"])
+            .env("ARCO_DRAG_TEST_ALIAS", &alias)
+            .env("ARCO_DRAG_TEST_TARGET", &physical)
+            .raw_arg(r#"mklink /J "%ARCO_DRAG_TEST_ALIAS%" "%ARCO_DRAG_TEST_TARGET%""#)
+            .output()
+            .unwrap();
+        assert!(command.status.success(), "{command:?}");
+        let sources = source::Sources::capture(&[alias.join("selected.txt")]).unwrap();
+        let (data, _) = prepare_drag_data(sources.exposed_paths()).unwrap();
+        let format = FORMATETC {
+            cfFormat: windows_sys::Win32::System::Ole::CF_HDROP,
+            dwAspect: DVASPECT_CONTENT.0,
+            lindex: -1,
+            tymed: TYMED_HGLOBAL.0 as u32,
+            ..Default::default()
+        };
+        let medium = EffectMedium(unsafe { data.GetData(&format) }.unwrap());
+        let drop = unsafe { medium.0.u.hGlobal }.0;
+        let count =
+            unsafe { windows_sys::Win32::UI::Shell::DragQueryFileW(drop, u32::MAX, null_mut(), 0) };
+        assert_eq!(count, 1);
+        let length =
+            unsafe { windows_sys::Win32::UI::Shell::DragQueryFileW(drop, 0, null_mut(), 0) };
+        let mut buffer = vec![0_u16; length as usize + 1];
+        assert_eq!(
+            unsafe {
+                windows_sys::Win32::UI::Shell::DragQueryFileW(
+                    drop,
+                    0,
+                    buffer.as_mut_ptr(),
+                    buffer.len() as u32,
+                )
+            },
+            length
+        );
+        let exposed = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length as usize]));
+        assert_eq!(
+            std::fs::canonicalize(&exposed).unwrap(),
+            std::fs::canonicalize(&file).unwrap()
+        );
+        assert!(!exposed.ancestors().any(|part| {
+            part.file_name()
+                .is_some_and(|name| name.eq_ignore_ascii_case("alias"))
+        }));
+        // The target receives the physical path; changes to the former alias
+        // cannot redirect the data it will copy or the source cleanup.
+        std::fs::remove_dir(&alias).unwrap();
+        assert_eq!(sources.complete(), 1);
+        assert!(!file.exists());
+        assert!(physical.is_dir());
     }
 
     #[test]

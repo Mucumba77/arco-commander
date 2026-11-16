@@ -444,14 +444,14 @@ impl App {
             Dialog {
                 title: "WFX-Eintrag",
                 options: &[
-                    "Öffnen",
-                    "Vorschau",
-                    "Kopieren",
-                    "Verschieben",
-                    "Umbenennen",
-                    "Neuer Ordner",
-                    "Dauerhaft löschen",
-                    "Eigenschaften",
+                    crate::locale::tr("Öffnen"),
+                    crate::locale::tr("Vorschau"),
+                    crate::locale::tr("Kopieren"),
+                    crate::locale::tr("Verschieben"),
+                    crate::locale::tr("Umbenennen"),
+                    crate::locale::tr("Neuer Ordner"),
+                    crate::locale::tr("Dauerhaft löschen"),
+                    crate::locale::tr("Eigenschaften"),
                 ],
                 ..Dialog::default()
             },

@@ -14,8 +14,10 @@ struct ListOptions {
 
 pub(super) struct TcArguments<'a> {
     arguments: Vec<Vec<Part<'a>>>,
+    origins: Vec<usize>,
     lists: ListOptions,
     archive_paths: bool,
+    unquoted: bool,
 }
 
 enum Part<'a> {
@@ -31,7 +33,17 @@ enum Part<'a> {
 enum Value<'a> {
     Field(char),
     Environment(&'a str),
-    Compare { index: usize, short: bool },
+    Compare {
+        index: usize,
+        short: bool,
+    },
+    Folder {
+        target: bool,
+        panel: bool,
+        root: bool,
+        index: Option<u8>,
+        short: bool,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -57,14 +69,19 @@ enum SelectionRange {
 }
 
 impl<'a> TcArguments<'a> {
+    pub(super) fn marks_cursor(&self) -> bool {
+        self.lists.marked_only && self.lists.omit_empty
+    }
     pub(super) fn parse(arguments: &'a [String]) -> io::Result<Self> {
         let mut parsed = Self {
             arguments: Vec::with_capacity(arguments.len()),
+            origins: Vec::with_capacity(arguments.len()),
             lists: ListOptions::default(),
             archive_paths: false,
+            unquoted: false,
         };
         let mut list_count = 0;
-        for argument in arguments {
+        for (origin, argument) in arguments.iter().enumerate() {
             let parts = parsed.parse_argument(argument)?;
             list_count += parts
                 .iter()
@@ -82,6 +99,7 @@ impl<'a> TcArguments<'a> {
             }
             if !parts.is_empty() || argument.is_empty() {
                 parsed.arguments.push(parts);
+                parsed.origins.push(origin);
             }
         }
         if list_count > 1 || (list_count == 0 && parsed.lists.both_panels) {
@@ -102,11 +120,20 @@ impl<'a> TcArguments<'a> {
                 return Err(invalid(parameter));
             };
             let remainder = &parameter[1..];
+            if first == b'Y'
+                && let Some(rest) = remainder.strip_prefix("&y")
+            {
+                self.lists.marked_only = true;
+                self.lists.omit_empty = true;
+                argument = rest;
+                continue;
+            }
             match first {
                 b'a' => self.lists.both_panels = true,
                 b'Y' => self.lists.marked_only = true,
                 b'y' => self.lists.omit_empty = true,
                 b'Z' => self.archive_paths = true,
+                b'Q' => self.unquoted = true,
                 b'%' => parts.push(Part::Text("%")),
                 b'X' | b'x' => parts.push(Part::PanelOrder(first == b'X')),
                 b'q' => parts.push(Part::StripEnvironmentQuotes),
@@ -130,11 +157,56 @@ impl<'a> TcArguments<'a> {
         tabs: [&Tab; 2],
         active: usize,
     ) -> io::Result<(Vec<String>, Option<tempfile::TempPath>)> {
+        let (arguments, list) = self.expand_indexed(tabs, active)?;
+        Ok((
+            arguments.into_iter().map(|(value, _)| value).collect(),
+            list,
+        ))
+    }
+
+    pub(super) fn expand_raw(
+        raw: &str,
+        tabs: [&Tab; 2],
+        active: usize,
+    ) -> io::Result<(String, Option<tempfile::TempPath>)> {
+        let manual = super::raw_arguments::manual_quotes(raw)?;
+        let arguments = arco_windows::parse_windows_arguments(raw)?;
+        if arguments.len() != manual.len() {
+            return Err(io::Error::other(
+                "Die Windows-Parameterzeile ist nicht eindeutig aufteilbar.",
+            ));
+        }
+        let parsed = TcArguments::parse(&arguments)?;
+        let (expanded, list) = parsed.expand_indexed(tabs, active)?;
+        let command = expanded
+            .into_iter()
+            .map(|(value, index)| {
+                if !parsed.unquoted || manual[index] {
+                    super::quote_argument(&value)
+                } else {
+                    value
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        if command.encode_utf16().count() > 32767 {
+            return Err(io::Error::other(
+                "Die aufgelösten Windows-Parameter überschreiten 32767 Zeichen.",
+            ));
+        }
+        Ok((command, list))
+    }
+
+    fn expand_indexed(
+        &self,
+        tabs: [&Tab; 2],
+        active: usize,
+    ) -> io::Result<(Vec<(String, usize)>, Option<tempfile::TempPath>)> {
         let mut arguments = Vec::new();
         let mut list_file = None;
         let mut source = active;
         let mut strip_quotes = false;
-        for parts in &self.arguments {
+        for (origin, parts) in self.arguments.iter().enumerate() {
             let list_entries = self.list_entries(parts, tabs, active, source)?;
             let omit_argument =
                 self.lists.omit_empty && list_entries.as_ref().is_some_and(Vec::is_empty);
@@ -183,22 +255,20 @@ impl<'a> TcArguments<'a> {
             }
             if let Some((selection, side)) = selection {
                 let tab = local_tab(tabs[side])?;
-                let paths = if self.lists.marked_only && !self.lists.omit_empty {
+                let paths = if self.lists.marked_only ^ self.lists.omit_empty {
                     tab.marked_paths()
                 } else {
                     tab.paths()
                 };
                 for path in selection.range.select(paths) {
                     let name = selection.name(&path)?;
-                    arguments.push(decorate_selection(
-                        &prefix,
-                        &name,
-                        before_extension.as_deref(),
-                        &text,
+                    arguments.push((
+                        decorate_selection(&prefix, &name, before_extension.as_deref(), &text),
+                        self.origins[origin],
                     ));
                 }
             } else if emitted && !omit_argument {
-                arguments.push(text);
+                arguments.push((text, self.origins[origin]));
             }
         }
         Ok((arguments, list_file))
@@ -247,6 +317,37 @@ fn parse_placeholder(parameter: &str) -> io::Result<(Part<'_>, &str)> {
         }
     }
     let (value, rest) = match parameter.as_bytes().first().copied() {
+        Some(key @ (b'B' | b'b')) => {
+            let mut rest = &parameter[1..];
+            let target = rest.starts_with(['T', 't']);
+            if target {
+                rest = &rest[1..];
+            }
+            let panel = rest.starts_with('-');
+            let root = rest.starts_with('+');
+            if panel || root {
+                rest = &rest[1..];
+            }
+            let index = rest
+                .as_bytes()
+                .first()
+                .copied()
+                .filter(u8::is_ascii_digit)
+                .map(|digit| digit - b'0');
+            if index.is_some() {
+                rest = &rest[1..];
+            }
+            (
+                Value::Folder {
+                    target,
+                    panel,
+                    root,
+                    index,
+                    short: key == b'b',
+                },
+                rest,
+            )
+        }
         Some(
             key @ (b'P' | b'T' | b'N' | b'M' | b'O' | b'E' | b'p' | b't' | b'n' | b'm' | b'o'
             | b'e' | b'v' | b'V'),
@@ -470,6 +571,22 @@ fn expand_value(
             });
         }
         Value::Compare { index, short } => return compare_path(tabs, source, index, short),
+        Value::Folder {
+            target,
+            panel,
+            root,
+            index,
+            short,
+        } => {
+            return folder_argument(
+                tabs[source ^ usize::from(target)],
+                target,
+                panel,
+                root,
+                index,
+                short,
+            );
+        }
         Value::Field(field) => field,
     };
     if matches!(field, 'v' | 'V') {
@@ -479,6 +596,9 @@ fn expand_value(
     let short = field.is_ascii_lowercase();
     let tab = tabs[source ^ usize::from(matches!(upper, 'T' | 'M'))];
     if matches!(upper, 'P' | 'T') {
+        if short && let Some(ftp) = &tab.ftp {
+            return Ok(ftp.location.directory.as_str().into());
+        }
         if archive_paths && let Location::Archive { file, .. } = tab.location() {
             return format_path(file, short);
         }
@@ -506,6 +626,56 @@ fn expand_value(
         _ => Some(name.as_os_str()),
     };
     checked_path(Path::new(component.unwrap_or_default())).map(str::to_owned)
+}
+
+fn folder_argument(
+    tab: &Tab,
+    target: bool,
+    panel: bool,
+    root: bool,
+    index: Option<u8>,
+    short: bool,
+) -> io::Result<String> {
+    use arco_core::view_settings::Scope;
+    local_tab(tab)?;
+    if panel && tab.view_scope == Some(Scope::Search) {
+        return Ok(String::new());
+    }
+    let folder =
+        if !target && !panel && matches!(tab.view_scope, Some(Scope::Search | Scope::Branch)) {
+            tab.current()
+                .and_then(|entry| entry.path.parent())
+                .unwrap_or(&tab.path)
+        } else {
+            &tab.path
+        };
+    let short_path = short
+        .then(|| arco_windows::short_path(folder))
+        .transpose()?;
+    let folder = short_path.as_deref().unwrap_or(folder);
+    if !root {
+        return Ok(folder
+            .ancestors()
+            .nth(usize::from(index.unwrap_or(0)))
+            .and_then(Path::file_name)
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned());
+    }
+    let display = display_path(folder);
+    let parts: Vec<_> = display
+        .split(['\\', '/'])
+        .filter(|part| !part.is_empty())
+        .collect();
+    let part = parts
+        .get(usize::from(index.unwrap_or(0)))
+        .copied()
+        .unwrap_or_default();
+    Ok(if index == Some(0) {
+        part.trim_end_matches(':').into()
+    } else {
+        part.into()
+    })
 }
 
 fn wfx_argument(tab: &Tab, full_path: bool) -> io::Result<String> {
@@ -657,6 +827,79 @@ mod tests {
                 "pre_Datei %T mit Leerzeichen_tag.txt.bak",
                 "%"
             ]
+        );
+    }
+
+    #[test]
+    fn raw_tc_quoting_distinguishes_percent_q_from_explicit_quotes() {
+        let left = panel("C:/Src", Some("A B.txt"));
+        let right = panel("C:/Target", None);
+        let (raw, _) =
+            TcArguments::expand_raw(r#"%P%N "%P%N" "" /name="%N" %Q %N"#, [&left, &right], 0)
+                .unwrap();
+        assert_eq!(
+            arco_windows::parse_windows_arguments(&raw).unwrap(),
+            [
+                r"C:/Src\A",
+                "B.txt",
+                r"C:/Src\A B.txt",
+                "",
+                "/name=A B.txt",
+                "A",
+                "B.txt"
+            ]
+        );
+        let (raw, _) =
+            TcArguments::expand_raw(r#"%P%N "" /name="%N""#, [&left, &right], 0).unwrap();
+        assert_eq!(
+            arco_windows::parse_windows_arguments(&raw).unwrap(),
+            [r"C:/Src\A B.txt", "", "/name=A B.txt"]
+        );
+    }
+
+    #[test]
+    fn directory_placeholders_obey_target_root_branch_and_search_variants() {
+        use arco_core::view_settings::Scope;
+        let mut left = panel("C:/Root/Sub", Some("A.txt"));
+        let right = panel("C:/Target/Other", None);
+        let input = arguments(&["%B|%B1|%B9|%BT|%BT1|%B+|%B+0|%B+1|%B+2"]);
+        assert_eq!(
+            TcArguments::parse(&input)
+                .unwrap()
+                .expand([&left, &right], 0)
+                .unwrap()
+                .0,
+            ["Sub|Root||Other|Target|C:|C|Root|Sub"]
+        );
+        left.populate(
+            vec![Entry::from_remote(
+                "C:/Root/Sub/deep/inner/A.txt".into(),
+                Kind::File,
+                Some(1),
+                None,
+            )],
+            true,
+            String::new(),
+        );
+        left.select_row(1, false, false);
+        left.view_scope = Some(Scope::Branch);
+        let input = arguments(&["%B|%B1|%B-"]);
+        assert_eq!(
+            TcArguments::parse(&input)
+                .unwrap()
+                .expand([&left, &right], 0)
+                .unwrap()
+                .0,
+            ["inner|deep|Sub"]
+        );
+        left.view_scope = Some(Scope::Search);
+        assert_eq!(
+            TcArguments::parse(&input)
+                .unwrap()
+                .expand([&left, &right], 0)
+                .unwrap()
+                .0,
+            ["inner|deep|"]
         );
     }
 

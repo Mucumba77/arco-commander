@@ -48,6 +48,8 @@ export struct PathItem {
     locked: bool,
     has-tint: bool,
     tint: color,
+    has-icon: bool,
+    custom-icon: image,
 }
 
 export struct TreeRow {
@@ -126,6 +128,9 @@ export struct PanelData {
     local: bool,
     custom-columns: [FileColumn],
     custom-width: int,
+    custom-name-width: int,
+    custom-reference-width: int,
+    custom-horizontal-scroll: bool,
     custom-extension: bool,
     wdx-headings: [string],
 }
@@ -1655,6 +1660,8 @@ component FolderTree inherits Rectangle {
 component FilePanel inherits Rectangle {
     in property <TreeData> tree-data;
     property <bool> custom-view: root.data.custom-columns.length > 0;
+    property <float> custom-requested-scale: root.data.custom-reference-width > 0 ? (root.width - 12px) / (root.data.custom-reference-width * 1px) : 1;
+    property <float> custom-column-scale: root.data.custom-horizontal-scroll || root.data.custom-width <= 0 ? root.custom-requested-scale : min(root.custom-requested-scale, max(0.05, (root.width - 112px) / (root.data.custom-width * 1px)));
     out property <int> first-visible-row: max(0, floor(-listing.viewport-y / root.row-height));
     out property <int> visible-row-count: max(1, ceil(listing.visible-height / root.row-height));
     property <bool> show-wdx: !root.custom-view && root.data.local && root.data.detailed && root.data.wdx-headings.length > 0;
@@ -1854,7 +1861,7 @@ component FilePanel inherits Rectangle {
                             Button {
                                 text: tab.label;
                                 width: 108px; elide-text: true;
-                                icon: tab.locked ? @image-url("icons/lock.svg") : @image-url("");
+                                icon: tab.has-icon ? tab.custom-icon : tab.locked ? @image-url("icons/lock.svg") : @image-url("");
                                 checkable: true;
                                 checked: root.data.tab == i;
                                 accessible-label: tab.path;
@@ -1891,7 +1898,7 @@ component FilePanel inherits Rectangle {
             vertical-stretch: 1;
             min-width: 0px;
             min-height: 0px;
-            viewport-width: max(root.width - 12px, root.data.custom-width * 1px + 150px);
+            viewport-width: root.data.custom-horizontal-scroll ? max(root.width - 12px, root.data.custom-width * root.custom-column-scale * 1px + max(100px, root.data.custom-name-width * root.custom-column-scale * 1px)) : root.width - 12px;
             viewport-height: self.visible-height;
             Rectangle {
                 width: parent.viewport-width;
@@ -1921,7 +1928,7 @@ component FilePanel inherits Rectangle {
                         }
                         for column in root.data.custom-columns : ColumnButton {
                             label: column.title;
-                            width: column.width * 1px;
+                            width: column.width * root.custom-column-scale * 1px;
                             enabled: column.action != "";
                             sorted: column.action != "" && (column.wdx-index >= 0 ? root.data.wdx-sort-index == column.wdx-index : root.data.sort-column == column.key);
                             descending: root.data.descending;
@@ -1981,7 +1988,7 @@ component FilePanel inherits Rectangle {
                                 font-size: root.list-size;
                             }
                             for column in root.data.custom-columns : DetailCell { color: row-box.tinted ? row-box.ink : Colors.muted;
-                                width: column.width * 1px;
+                                width: column.width * root.custom-column-scale * 1px;
                                 text: column.expression-index >= 0 ? (column.expression-index < row.expression-values.length ? row.expression-values[column.expression-index] : "")
                                     : column.key == "extension" ? row.extension
                                     : column.key == "size" ? row.info
@@ -2383,7 +2390,8 @@ component SettingsCard inherits Rectangle {
                                 CheckBox { text: @tr("Hardlink-Gruppen im Ziel erhalten"); checked <=> root.ntfs-hardlinks; }
                                 CheckBox { text: @tr("Nur belegte Bereiche von Sparse-Dateien kopieren"); checked <=> root.ntfs-sparse; }
                                 CheckBox { text: @tr("Erstellungszeit übernehmen"); checked <=> root.ntfs-creation-time; }
-                                CheckBox { text: @tr("Ausgewählte Verzeichnisjunctions als Links kopieren"); checked <=> root.ntfs-copy-links; }
+                                CheckBox { text: @tr("Symbolische Links und Junctions als Links kopieren"); checked <=> root.ntfs-copy-links; }
+                                Text { text: @tr("Verschieben erhält Links. Metadatenoptionen gelten für das Linkobjekt; sein Ziel wird nicht durchlaufen. Symbolische Links benötigen die passende Windows-Berechtigung oder den Entwicklermodus."); wrap: word-wrap; color: Colors.muted; }
                             }
                         }
                     }
@@ -2756,6 +2764,7 @@ export component MainWindow inherits Window {
     property <bool> modal-open: root.dialog-open || root.job-activity-open;
     property <int> dialog-focus-cycle;
     in-out property <float> split-ratio: 0.5;
+    in-out property <int> full-panel: -1;
     in property <bool> quick-open;
     in property <string> quick-title;
     in property <string> quick-note;
@@ -3077,7 +3086,7 @@ export component MainWindow inherits Window {
                 }
                 left-view := FilePanel {
                     tree-data: root.separate-tree-mode == 1 ? {} : root.left-tree;
-                    visible: !root.quick-open || root.active-panel == 0;
+                    visible: (!root.quick-open || root.active-panel == 0) && root.full-panel != 1;
                     data: root.left;
                     cursor: root.left-cursor;
                     summary: root.left-summary;
@@ -3087,8 +3096,8 @@ export component MainWindow inherits Window {
                     drives: root.drives;
                     settings: root.settings;
                     x: panels.sidebar; y: 0px;
-                    width: root.stacked ? panels.files-width : (panels.files-width - panels.gap) * root.split-ratio;
-                    height: root.stacked ? (parent.height - panels.gap) * root.split-ratio : parent.height;
+                    width: root.stacked || root.full-panel == 0 ? panels.files-width : (panels.files-width - panels.gap) * root.split-ratio;
+                    height: root.stacked && root.full-panel < 0 ? (parent.height - panels.gap) * root.split-ratio : parent.height;
                     action(command) => { root.panel-action(0, command); }
                     navigate(path) => { root.navigate(0, path); }
                     select-crumb(index) => { root.select-crumb(0, index); }
@@ -3102,7 +3111,7 @@ export component MainWindow inherits Window {
                 }
                 right-view := FilePanel {
                     tree-data: root.separate-tree-mode == 1 ? {} : root.right-tree;
-                    visible: !root.quick-open || root.active-panel == 1;
+                    visible: (!root.quick-open || root.active-panel == 1) && root.full-panel != 0;
                     data: root.right;
                     cursor: root.right-cursor;
                     summary: root.right-summary;
@@ -3111,8 +3120,8 @@ export component MainWindow inherits Window {
                     side: @tr("RECHTS");
                     drives: root.drives;
                     settings: root.settings;
-                    x: root.stacked ? panels.sidebar : left-view.x + left-view.width + panels.gap;
-                    y: root.stacked ? left-view.height + panels.gap : 0px;
+                    x: root.stacked || root.full-panel == 1 ? panels.sidebar : left-view.x + left-view.width + panels.gap;
+                    y: root.stacked && root.full-panel < 0 ? left-view.height + panels.gap : 0px;
                     width: parent.width - self.x;
                     height: root.stacked ? parent.height - self.y : parent.height;
                     action(command) => { root.panel-action(1, command); }
@@ -3145,6 +3154,7 @@ export component MainWindow inherits Window {
                     width: root.stacked ? panels.files-width : panels.gap;
                     height: root.stacked ? panels.gap : panels.height;
                     mouse-cursor: root.stacked ? MouseCursor.row-resize : MouseCursor.col-resize;
+                    visible: root.full-panel < 0;
                     double-clicked => { root.split-ratio = 0.5; }
                     moved => {
                         if (self.pressed) {

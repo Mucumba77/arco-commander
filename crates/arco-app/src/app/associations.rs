@@ -186,7 +186,12 @@ impl App {
                         Pending::Associations(Setup::Manage(option - 1)),
                         Dialog {
                             title: &title,
-                            options: &["Bearbeiten", "Nach oben", "Nach unten", "Entfernen"],
+                            options: &[
+                                crate::locale::tr("Bearbeiten"),
+                                crate::locale::tr("Nach oben"),
+                                crate::locale::tr("Nach unten"),
+                                crate::locale::tr("Entfernen"),
+                            ],
                             ..Default::default()
                         },
                     );

@@ -13,71 +13,65 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-
+mod columns;
+use columns::ValueColumn;
 mod duplicates;
 mod edit;
 pub(super) mod search;
 pub(crate) use edit::{EditInput, EditTarget};
 pub(crate) use search::SearchTarget;
-
 const DEFAULT_COLUMNS: usize = 3;
 const VALUE_BATCH: usize = 96;
 pub(super) struct SortRequest {
     side: usize,
     source: Rc<Vec<Entry>>,
 }
-
 pub(super) struct Running {
     side: usize,
     model: Rc<FileModel>,
     cancel: Arc<AtomicBool>,
 }
-
 pub(super) struct Values {
     rows: Vec<(usize, Vec<String>)>,
     error: Option<String>,
 }
-
 impl App {
     fn wdx_plugin(&self, column: &WdxColumn) -> Option<&Registration> {
-        self.profile.plugins.iter().find(|entry| {
+        if let Some(exact) = self.profile.plugins.iter().find(|entry| {
             entry.enabled && entry.interface == Interface::Wdx && entry.path == column.plugin
-        })
-    }
-
-    pub(super) fn active_wdx_columns(&self, side: usize) -> Vec<(usize, WdxColumn, Registration)> {
-        if !self.panels[side].current().is_local() {
-            return Vec::new();
+        }) {
+            return Some(exact);
         }
-        if let Some(columns) = self.active_columns(side) {
-            columns
-                .iter()
-                .filter_map(|column| match &column.field {
-                    Field::Wdx(column) => Some(column),
-                    _ => None,
-                })
-                .take(MAX_COLUMNS)
-                .enumerate()
-                .filter_map(|(index, column)| {
-                    self.wdx_plugin(column)
-                        .map(|plugin| (index, column.clone(), plugin.clone()))
-                })
-                .collect()
+        // Portable views may come from another install directory. Bind only a
+        // unique, explicitly enabled registration; never load the imported path.
+        let find = |full_name: bool| {
+            let name = if full_name {
+                column.plugin.file_name()?
+            } else {
+                column.plugin.file_stem()?
+            };
+            let mut matches = self.profile.plugins.iter().filter(|entry| {
+                entry.enabled
+                    && entry.interface == Interface::Wdx
+                    && (if full_name {
+                        entry.path.file_name()
+                    } else {
+                        entry.path.file_stem()
+                    })
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+            });
+            let candidate = matches.next()?;
+            matches.next().is_none().then_some(candidate)
+        };
+        find(true).or_else(|| find(false))
+    }
+    pub(super) fn active_wdx_columns(&self, side: usize) -> Vec<(usize, ValueColumn)> {
+        if self.panels[side].current().is_local() {
+            self.value_columns(side)
         } else {
-            self.profile
-                .wdx_columns
-                .iter()
-                .filter_map(|column| {
-                    self.wdx_plugin(column)
-                        .map(|plugin| (column.clone(), plugin.clone()))
-                })
-                .take(DEFAULT_COLUMNS)
-                .enumerate()
-                .map(|(index, (column, plugin))| (index, column, plugin))
-                .collect()
+            Vec::new()
         }
     }
-
     pub(super) fn invalidate_wdx_columns(&mut self) {
         self.wdx_sort_request = None;
         if let Some(running) = &self.wdx_pending {
@@ -93,11 +87,9 @@ impl App {
             self.publish(side);
         }
     }
-
     pub(super) fn query_wdx_fields(&mut self, entry: Registration) {
         self.read_wdx_fields(entry, None);
     }
-
     pub(crate) fn read_wdx_fields(&mut self, entry: Registration, search: Option<SearchTarget>) {
         self.close_dialog();
         self.start_job("Lese WDX-Felder …", false, move |job| {
@@ -105,7 +97,6 @@ impl App {
             Ok(Outcome::WdxFields(Box::new(entry), rows, search))
         });
     }
-
     pub(super) fn choose_wdx_field(
         &mut self,
         entry: Registration,
@@ -168,7 +159,6 @@ impl App {
             },
         );
     }
-
     pub(crate) fn sort_wdx(&mut self, index: usize) {
         if !self.can_read_wdx(self.active) {
             return;
@@ -188,9 +178,9 @@ impl App {
             return;
         }
         if !self
-            .active_wdx_columns(self.active)
+            .value_columns(self.active)
             .into_iter()
-            .any(|(position, _, _)| position == index)
+            .any(|(position, _)| position == index)
         {
             return;
         }
@@ -199,7 +189,6 @@ impl App {
             .set_sort(SortKey::Wdx(index as u8), show_hidden);
         self.save();
     }
-
     pub(super) fn update_wdx_sort(&mut self) {
         if self.job.is_some()
             || !self.ui().get_dialog_kind().is_empty()
@@ -220,21 +209,17 @@ impl App {
         };
         let tab = self.panels[side].current();
         let orders = tab.current_sort_orders().to_vec();
-        if let Some(location) = &tab.wfx {
-            self.sort_wfx_columns(side, location.clone(), orders);
-            return;
-        }
-        let columns = self.active_wdx_columns(side);
+        let location = tab.wfx.clone();
+        let local = tab.is_local();
+        let columns = self.value_columns(side);
         let specs: Vec<_> = orders
             .iter()
             .filter_map(|order| {
                 let SortKey::Wdx(index) = order.key else {
                     return None;
                 };
-                let (_, column, plugin) = columns
-                    .iter()
-                    .find(|(pos, _, _)| *pos == usize::from(index))?;
-                Some((index, column.clone(), plugin.clone()))
+                let (_, column) = columns.iter().find(|(pos, _)| *pos == usize::from(index))?;
+                Some((usize::from(index), column.clone()))
             })
             .collect();
         if specs.is_empty() {
@@ -246,13 +231,36 @@ impl App {
         self.wdx_sort_request = Some(SortRequest { side, source });
         self.start_job("Lese WDX-Sortierwerte …", false, move |job| {
             let mut values = HashMap::<u8, HashMap<PathBuf, WdxValue>>::new();
-            let paths = entry_paths(&entries);
-            for (index, column, plugin) in specs {
-                let mut field = HashMap::new();
-                scan_paths(&plugin, &column.selection, &paths, &job, |path, value| {
-                    field.insert(path.to_path_buf(), value);
-                })?;
-                values.insert(index, field);
+            for (batch_index, batch) in entries.chunks(VALUE_BATCH).enumerate() {
+                files::check_cancel(&job.cancel)?;
+                job.progress(format!(
+                    "Spaltenwerte · {}/{}",
+                    batch_index * VALUE_BATCH + batch.len(),
+                    entries.len()
+                ));
+                let mut prompt = |prompt| {
+                    job.prompt(
+                        location
+                            .as_ref()
+                            .map_or("WDX", |loc| loc.plugin.name.as_str()),
+                        prompt,
+                    )
+                };
+                for (index, row) in columns::read_columns(
+                    &specs,
+                    batch,
+                    location.as_ref(),
+                    local,
+                    &job.cancel,
+                    Some(&mut prompt),
+                )? {
+                    let field = values.entry(index as u8).or_default();
+                    for (entry, value) in batch.iter().zip(row) {
+                        if let Some(value) = value {
+                            field.insert(entry.path.clone(), value);
+                        }
+                    }
+                }
             }
             files::sort_by_columns_with(&mut entries, &orders, |index, left, right, descending| {
                 let field = values.get(&index);
@@ -265,7 +273,6 @@ impl App {
             Ok(Outcome::WdxSorted(entries))
         });
     }
-
     pub(super) fn apply_wdx_order(&mut self, entries: Vec<Entry>) {
         let Some(request) = self.wdx_sort_request.take() else {
             return;
@@ -278,7 +285,6 @@ impl App {
             self.publish(request.side);
         }
     }
-
     pub(super) fn finish_wdx_sort_attempt(&mut self) {
         if let Some(request) = self.wdx_sort_request.take() {
             let panel = &mut self.panels[request.side];
@@ -287,7 +293,6 @@ impl App {
             }
         }
     }
-
     pub(crate) fn copy_details_with_wdx(&mut self, entries: Vec<Entry>, mut lines: Vec<String>) {
         let columns = self.active_wdx_columns(self.active);
         if columns.is_empty() {
@@ -295,12 +300,26 @@ impl App {
             return;
         }
         self.start_job("Kopiere WDX-Dateidetails …", false, move |job| {
-            let paths = entry_paths(&entries);
-            for (_, column, plugin) in columns {
+            for (index, column) in columns {
                 let mut values = HashMap::new();
-                scan_paths(&plugin, &column.selection, &paths, &job, |path, value| {
-                    values.insert(path.to_path_buf(), value.display);
-                })?;
+                for batch in entries.chunks(VALUE_BATCH) {
+                    if let Some(row) = columns::read_columns(
+                        &[(index, column.clone())],
+                        batch,
+                        None,
+                        true,
+                        &job.cancel,
+                        None,
+                    )?
+                    .remove(&index)
+                    {
+                        for (entry, value) in batch.iter().zip(row) {
+                            if let Some(value) = value {
+                                values.insert(entry.path.clone(), value.display);
+                            }
+                        }
+                    }
+                }
                 for (entry, line) in entries.iter().zip(&mut lines) {
                     line.push('\t');
                     if let Some(value) = values.get(&entry.path) {
@@ -317,7 +336,6 @@ impl App {
             Ok(Outcome::ClipboardText(lines.join("\r\n")))
         });
     }
-
     pub(super) fn resolve_wdx_token(&self, token: &str) -> io::Result<(Registration, WdxField)> {
         let (name, field) = token
             .split_once('.')
@@ -359,7 +377,6 @@ impl App {
             },
         ))
     }
-
     pub(crate) fn plan_wdx_rename(
         &mut self,
         paths: Vec<PathBuf>,
@@ -457,7 +474,6 @@ impl App {
         );
         Ok(())
     }
-
     pub(crate) fn add_wdx_column(
         &mut self,
         plugin: PathBuf,
@@ -482,7 +498,6 @@ impl App {
         self.status(format!("WDX-Spalte hinzugefügt · {field}"));
         Ok(())
     }
-
     pub(crate) fn show_wdx_columns(&mut self) {
         let columns = self.profile.wdx_columns.clone();
         if columns.is_empty() {
@@ -513,7 +528,6 @@ impl App {
             },
         );
     }
-
     pub(crate) fn remove_wdx_column(&mut self, column: &WdxColumn) -> io::Result<()> {
         let mut columns = self.profile.wdx_columns.clone();
         columns.retain(|item| item != column);
@@ -524,7 +538,6 @@ impl App {
         ));
         Ok(())
     }
-
     fn commit_wdx_columns(&mut self, columns: Vec<WdxColumn>) -> io::Result<()> {
         if !self.save_profile {
             return Err(io::Error::other(
@@ -538,23 +551,18 @@ impl App {
         self.invalidate_wdx_columns();
         Ok(())
     }
-
     fn can_read_wdx(&self, side: usize) -> bool {
         let panel = &self.panels[side];
         let tab = panel.current();
         !panel.loading
             && tab.loaded
             && (tab.is_local()
-                || (tab.wfx.is_some()
-                    && self.active_columns(side).is_some_and(|columns| {
-                        columns
-                            .iter()
-                            .any(|column| matches!(column.field, Field::Wfx(_)))
-                    })))
+                || self.active_columns(side).is_some_and(|columns| {
+                    columns.iter().any(|column| column.field.requires_values())
+                }))
             && tab.detailed()
             && (!self.quick_open || self.active == side)
     }
-
     pub(super) fn update_wdx_columns(&mut self) {
         self.update_wfx_default_views();
         if let Some(running) = &self.wdx_pending {
@@ -569,39 +577,36 @@ impl App {
             return;
         }
         let ui = self.ui();
-        let Some((side, model, rows, columns, wfx)) = [self.wdx_next_side, 1 - self.wdx_next_side]
-            .into_iter()
-            .filter(|&side| self.can_read_wdx(side))
-            .find_map(|side| {
-                let columns = self.active_wdx_columns(side);
-                let wfx = self.panels[side]
-                    .current()
-                    .wfx
-                    .as_ref()
-                    .map(|location| (location.clone(), self.active_wfx_columns(side)));
-                if columns.is_empty() && wfx.as_ref().is_none_or(|(_, fields)| fields.is_empty()) {
-                    return None;
-                }
-                let (first, count) = if side == 0 {
-                    (ui.get_left_wdx_first(), ui.get_left_wdx_count())
-                } else {
-                    (ui.get_right_wdx_first(), ui.get_right_wdx_count())
-                };
-                let model = self.panels[side].current().file_model();
-                let rows = model.wdx_missing(
-                    first.saturating_sub(4).max(0) as usize,
-                    count.clamp(1, 512) as usize + 8,
-                );
-                (!rows.is_empty()).then(|| {
-                    (
-                        side,
-                        model,
-                        rows.into_iter().take(VALUE_BATCH).collect::<Vec<_>>(),
-                        columns,
-                        wfx,
-                    )
+        let Some((side, model, rows, columns, location)) =
+            [self.wdx_next_side, 1 - self.wdx_next_side]
+                .into_iter()
+                .filter(|&side| self.can_read_wdx(side))
+                .find_map(|side| {
+                    let columns = self.value_columns(side);
+                    let location = self.panels[side].current().wfx.clone();
+                    if columns.is_empty() {
+                        return None;
+                    }
+                    let (first, count) = if side == 0 {
+                        (ui.get_left_wdx_first(), ui.get_left_wdx_count())
+                    } else {
+                        (ui.get_right_wdx_first(), ui.get_right_wdx_count())
+                    };
+                    let model = self.panels[side].current().file_model();
+                    let rows = model.wdx_missing(
+                        first.saturating_sub(4).max(0) as usize,
+                        count.clamp(1, 512) as usize + 8,
+                    );
+                    (!rows.is_empty()).then(|| {
+                        (
+                            side,
+                            model,
+                            rows.into_iter().take(VALUE_BATCH).collect::<Vec<_>>(),
+                            columns,
+                            location,
+                        )
+                    })
                 })
-            })
         else {
             return;
         };
@@ -612,15 +617,20 @@ impl App {
             model,
             cancel: cancel.clone(),
         });
+        let entries: Vec<_> = rows
+            .iter()
+            .filter_map(|(row, _)| {
+                self.panels[side]
+                    .current()
+                    .file_model()
+                    .entry(*row)
+                    .cloned()
+            })
+            .collect();
+        let local = self.panels[side].current().is_local();
         let sender = self.sender.clone();
         std::thread::spawn(move || {
-            if let Some((location, fields)) = wfx {
-                let _ = sender.send(Event::WdxValues(read_wfx_rows(
-                    &location, fields, &rows, &cancel,
-                )));
-                return;
-            }
-            let width = columns.last().map_or(0, |(index, _, _)| index + 1);
+            let width = columns.last().map_or(0, |(index, _)| index + 1);
             let mut result = Values {
                 rows: rows
                     .iter()
@@ -628,35 +638,22 @@ impl App {
                     .collect(),
                 error: None,
             };
-            for (index, column, plugin) in columns {
-                if cancel.load(Ordering::Relaxed) {
-                    break;
-                }
-                let (targets, files): (Vec<_>, Vec<_>) = rows
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, (_, path))| plugin.matches(Interface::Wdx, path))
-                    .map(|(row, (_, path))| (row, path.clone()))
-                    .unzip();
-                if files.is_empty() {
-                    continue;
-                }
-                match plugin::wdx_typed_field_values(&plugin.path, column.selection, files, &cancel)
-                {
-                    Ok(values) => {
-                        for (row, value) in values {
-                            if let Some(target) = targets.get(row) {
-                                result.rows[*target].1[index] = value.display;
-                            }
-                        }
-                    }
-                    Err(error) => result.error = Some(format!("WDX · {} · {error}", plugin.name)),
+            let (values, error) = columns::read_display_columns(
+                &columns,
+                &entries,
+                location.as_ref(),
+                local,
+                &cancel,
+            );
+            result.error = error;
+            for (index, values) in values {
+                for (row, value) in result.rows.iter_mut().zip(values) {
+                    row.1[index] = value.map_or_else(String::new, |value| value.display);
                 }
             }
             let _ = sender.send(Event::WdxValues(result));
         });
     }
-
     pub(super) fn apply_wdx_values(&mut self, values: Values) {
         let Some(running) = self.wdx_pending.take() else {
             return;
@@ -674,141 +671,13 @@ impl App {
             }
         }
     }
-
-    fn sort_wfx_columns(
-        &mut self,
-        side: usize,
-        location: crate::panel::WfxLocation,
-        orders: Vec<files::SortOrder>,
-    ) {
-        let fields = self.active_wfx_columns(side);
-        let specs: Vec<_> = orders
-            .iter()
-            .filter_map(|order| {
-                let SortKey::Wdx(index) = order.key else {
-                    return None;
-                };
-                Some((index, fields.get(usize::from(index))?.selection.clone()))
-            })
-            .collect();
-        if specs.is_empty() {
-            self.panels[side].current_mut().wdx_sorted = true;
-            return;
-        }
-        let source = self.panels[side].current().entry_model();
-        let mut entries = source.as_ref().clone();
-        self.wdx_sort_request = Some(SortRequest { side, source });
-        self.start_job("Lese WFX-Sortierwerte …", false, move |job| {
-            let fields = specs
-                .iter()
-                .map(|(_, field)| field.clone())
-                .collect::<Vec<_>>();
-            let mut values = HashMap::<u8, HashMap<PathBuf, WdxValue>>::new();
-            for (index, batch) in entries.chunks(plugin::WFX_CONTENT_BATCH).enumerate() {
-                files::check_cancel(&job.cancel)?;
-                let names = batch
-                    .iter()
-                    .map(|entry| wfx_name(&entry.path))
-                    .collect::<io::Result<Vec<_>>>()?;
-                job.progress(format!(
-                    "WFX · {}/{}",
-                    index * plugin::WFX_CONTENT_BATCH + batch.len(),
-                    entries.len()
-                ));
-                let rows = plugin::wfx_content_values(
-                    &location.plugin.path,
-                    &location.directory,
-                    names,
-                    fields.clone(),
-                    &job.cancel,
-                    Some(&mut |prompt| job.prompt(&location.plugin.name, prompt)),
-                )?;
-                for (entry, row) in batch.iter().zip(rows) {
-                    for ((index, _), value) in specs.iter().zip(row) {
-                        if let Some(value) = value {
-                            values
-                                .entry(*index)
-                                .or_default()
-                                .insert(entry.path.clone(), value);
-                        }
-                    }
-                }
-            }
-            files::sort_by_columns_with(&mut entries, &orders, |index, left, right, descending| {
-                let field = values.get(&index);
-                plugin::wdx_order(
-                    field.and_then(|values| values.get(&left.path)),
-                    field.and_then(|values| values.get(&right.path)),
-                    descending,
-                )
-            });
-            Ok(Outcome::WdxSorted(entries))
-        });
-    }
 }
-
-fn read_wfx_rows(
-    location: &crate::panel::WfxLocation,
-    fields: Vec<plugin::WfxField>,
-    rows: &[(usize, PathBuf)],
-    cancel: &AtomicBool,
-) -> Values {
-    let fields: Vec<_> = fields.into_iter().map(|field| field.selection).collect();
-    let mut result = Values {
-        rows: rows
-            .iter()
-            .map(|(row, _)| (*row, vec![String::new(); fields.len()]))
-            .collect(),
-        error: None,
-    };
-    for (batch_index, batch) in rows.chunks(plugin::WFX_CONTENT_BATCH).enumerate() {
-        if cancel.load(Ordering::Relaxed) {
-            break;
-        }
-        let values = batch
-            .iter()
-            .map(|(_, path)| wfx_name(path))
-            .collect::<io::Result<Vec<_>>>()
-            .and_then(|names| {
-                plugin::wfx_content_values(
-                    &location.plugin.path,
-                    &location.directory,
-                    names,
-                    fields.clone(),
-                    cancel,
-                    None,
-                )
-            });
-        match values {
-            Ok(values) => {
-                let offset = batch_index * plugin::WFX_CONTENT_BATCH;
-                for (row, fields) in values.into_iter().enumerate() {
-                    result.rows[offset + row].1 = fields
-                        .into_iter()
-                        .map(|value| value.map_or_else(String::new, |value| value.display))
-                        .collect();
-                }
-            }
-            Err(error) => {
-                result.error = Some(format!("WFX · {} · {error}", location.plugin.name));
-                break;
-            }
-        }
-    }
-    result
-}
-
 fn wfx_name(path: &Path) -> io::Result<String> {
     path.file_name()
         .and_then(|name| name.to_str())
         .map(str::to_owned)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Ungültiger WFX-Name."))
 }
-
-fn entry_paths(entries: &[Entry]) -> Vec<&Path> {
-    entries.iter().map(|entry| entry.path.as_path()).collect()
-}
-
 fn scan_paths(
     plugin: &Registration,
     field: &WdxField,
@@ -825,7 +694,6 @@ fn scan_paths(
         read,
     )
 }
-
 fn scan_paths_with(
     plugin: &Registration,
     field: &WdxField,

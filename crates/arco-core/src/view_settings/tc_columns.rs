@@ -1,6 +1,9 @@
 use crate::files::{Entry, Kind, SortKey};
+use crate::plugin::{WdxKey, WdxValue};
+use crate::rename::FieldReference;
 use chrono::{DateTime, Datelike, Local, Timelike};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::io;
 use std::path::Path;
@@ -15,6 +18,7 @@ pub struct TcColumnExpression {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Part {
     Text(String),
+    Reference(String),
     Value {
         field: NativeField,
         range: Option<String>,
@@ -80,9 +84,16 @@ impl TcColumnExpression {
     }
 
     pub fn sort_key(&self) -> Option<SortKey> {
+        if self
+            .parts
+            .iter()
+            .any(|part| matches!(part, Part::Reference(_)))
+        {
+            return None;
+        }
         let mut fields = self.parts.iter().filter_map(|part| match part {
             Part::Value { field, .. } => Some(field),
-            Part::Text(_) => None,
+            Part::Text(_) | Part::Reference(_) => None,
         });
         let field = fields.next()?;
         if fields.next().is_some() {
@@ -112,10 +123,68 @@ impl TcColumnExpression {
     }
 
     pub fn render(&self, entry: &Entry, local: bool) -> String {
+        self.render_parts(entry, local, &BTreeMap::new())
+            .unwrap_or_default()
+    }
+
+    pub fn references(&self) -> Vec<&str> {
+        let mut fields = Vec::new();
+        for part in &self.parts {
+            if let Part::Reference(token) = part {
+                let reference = FieldReference::parse(token).expect("validated column reference");
+                if !fields.contains(&reference.query) {
+                    fields.push(reference.query);
+                }
+            }
+        }
+        fields
+    }
+
+    pub fn background(&self) -> bool {
+        self.sort_key().is_none()
+    }
+
+    pub fn render_value(
+        &self,
+        entry: &Entry,
+        local: bool,
+        values: &BTreeMap<String, WdxValue>,
+    ) -> io::Result<Option<WdxValue>> {
+        let display = self.render_parts(entry, local, values)?;
+        if display.is_empty() {
+            return Ok(None);
+        }
+        let fields: Vec<_> = self
+            .parts
+            .iter()
+            .filter(|part| !matches!(part, Part::Text(_)))
+            .collect();
+        let key = if let [Part::Reference(token)] = fields.as_slice() {
+            let reference = FieldReference::parse(token)?;
+            values.get(reference.query).map(|value| value.key.clone())
+        } else {
+            None
+        }
+        .unwrap_or_else(|| WdxKey::Text(display.to_lowercase()));
+        Ok(Some(WdxValue { display, key }))
+    }
+
+    fn render_parts(
+        &self,
+        entry: &Entry,
+        local: bool,
+        values: &BTreeMap<String, WdxValue>,
+    ) -> io::Result<String> {
         let mut output = String::new();
         for part in &self.parts {
             match part {
                 Part::Text(text) => output.push_str(text),
+                Part::Reference(token) => {
+                    let field = FieldReference::parse(token)?;
+                    if let Some(value) = field.render(values.get(field.query))? {
+                        output.push_str(&value);
+                    }
+                }
                 Part::Value {
                     field,
                     range,
@@ -144,7 +213,7 @@ impl TcColumnExpression {
                 .replace(['\r', '\n'], " · ")
                 .replace('\t', " ");
         }
-        output
+        Ok(output)
     }
 }
 
@@ -163,6 +232,7 @@ impl From<TcColumnExpression> for String {
 }
 
 fn parse_token(token: &str) -> io::Result<Part> {
+    let original = token;
     let (prefix, token) = if let Some(rest) = token.strip_prefix('"') {
         rest.split_once('"').ok_or_else(invalid)?
     } else {
@@ -184,8 +254,36 @@ fn parse_token(token: &str) -> io::Result<Part> {
         .rsplit_once(':')
         .filter(|(_, range)| crate::rename::name_range("", range).is_ok())
         .map_or((field, None), |(field, range)| (field, Some(range.into())));
+    let native = match NativeField::parse(field) {
+        Ok(native) => native,
+        Err(_) => {
+            let reference = FieldReference::parse(original)?;
+            let (plugin, field) = reference.query.split_once('.').ok_or_else(invalid)?;
+            if plugin.eq_ignore_ascii_case("tc") {
+                let (name, unit) = field
+                    .split_once('.')
+                    .map_or((field, None), |(n, u)| (n, Some(u)));
+                if !crate::plugin::TC_METADATA_FIELDS
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(name))
+                    || unit.is_some_and(|unit| {
+                        !name.eq_ignore_ascii_case("size")
+                            || ![
+                                "bytes", "kbytes", "mbytes", "gbytes", "tbytes", "b", "kb", "mb",
+                                "gb", "tb",
+                            ]
+                            .iter()
+                            .any(|u| u.eq_ignore_ascii_case(unit))
+                    })
+                {
+                    return Err(invalid());
+                }
+            }
+            return Ok(Part::Reference(original.into()));
+        }
+    };
     Ok(Part::Value {
-        field: NativeField::parse(field)?,
+        field: native,
         range,
         prefix: prefix.into(),
         suffix: suffix.into(),
@@ -374,7 +472,55 @@ mod tests {
             serde_json::from_str::<TcColumnExpression>(&json).unwrap(),
             expression
         );
-        assert!(TcColumnExpression::parse("[=wdx.Title]").is_err());
+        assert!(TcColumnExpression::parse("[=wdx.Title]").is_ok());
         assert!(TcColumnExpression::parse("[=tc.size.unknown]").is_err());
+    }
+
+    #[test]
+    fn resolves_composite_fields_formats_units_and_preserves_typed_single_field_sorting() {
+        let entry = Entry::from_remote(PathBuf::from("sample.txt"), Kind::File, Some(12), None);
+        let expression = TcColumnExpression::parse(
+            r#"[=tc.name]: [="("P.Score.scaled._d3,")"] [=<fs>.Author:1-2]"#,
+        )
+        .unwrap();
+        assert_eq!(expression.references(), ["P.Score.scaled", "<fs>.Author"]);
+        assert!(expression.background());
+        let mut values = BTreeMap::new();
+        values.insert(
+            "P.Score.scaled".into(),
+            WdxValue {
+                display: "1000".into(),
+                key: WdxKey::Integer(1000),
+            },
+        );
+        values.insert(
+            "<fs>.Author".into(),
+            WdxValue {
+                display: "A😀BC".into(),
+                key: WdxKey::Text("a😀bc".into()),
+            },
+        );
+        assert_eq!(
+            expression
+                .render_value(&entry, false, &values)
+                .unwrap()
+                .unwrap()
+                .display,
+            "sample: (1,000) A😀"
+        );
+        let single = TcColumnExpression::parse(r#"[="("P.Score.scaled._d3,")"]"#).unwrap();
+        let value = single.render_value(&entry, true, &values).unwrap().unwrap();
+        assert_eq!(value.key, WdxKey::Integer(1000));
+        assert_eq!(value.display, "(1,000)");
+        assert!(
+            single
+                .render_value(&entry, true, &BTreeMap::new())
+                .unwrap()
+                .is_none()
+        );
+        assert!(TcColumnExpression::parse("[=tc.creationdate.Y-M-D]").is_ok());
+        assert!(TcColumnExpression::parse("[=tc.does-not-exist]").is_err());
+        assert!(TcColumnExpression::parse("[=tc.partner file with other extension]").is_err());
+        assert!(TcColumnExpression::parse("[=tc.size.not-a-unit._d3]").is_err());
     }
 }

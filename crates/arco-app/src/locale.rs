@@ -2,6 +2,7 @@ use arco_core::profile::Language;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::OnceLock;
+mod messages;
 
 thread_local! {
     static LANGUAGE: Cell<Language> = const { Cell::new(Language::German) };
@@ -31,7 +32,19 @@ pub fn tr(text: &str) -> &str {
     translate(LANGUAGE.get(), text)
 }
 
+pub fn message(text: &str) -> std::borrow::Cow<'_, str> {
+    messages::message(LANGUAGE.get(), text)
+}
+
+/// Worker formatting uses the same language without changing Slint's UI locale.
+pub(crate) fn worker_language(language: Language) {
+    LANGUAGE.set(language);
+}
+
 fn translate(language: Language, text: &str) -> &str {
+    if let Some(translated) = messages::exact(language, text) {
+        return translated;
+    }
     static ENGLISH: OnceLock<HashMap<&str, &str>> = OnceLock::new();
     static FRENCH: OnceLock<HashMap<&str, &str>> = OnceLock::new();
     let (translations, catalog) = match language {

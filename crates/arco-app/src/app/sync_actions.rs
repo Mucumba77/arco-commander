@@ -756,6 +756,12 @@ impl App {
                     })));
                 };
                 let mut stages = [None, None];
+                let origins: [PathBuf; 2] = std::array::from_fn(|side| {
+                    archives[side].as_ref().map_or_else(
+                        || roots[side].clone(),
+                        |source| source.file.join(&source.folder),
+                    )
+                });
                 for (side, (source, password)) in archives.into_iter().zip(passwords).enumerate() {
                     if let Some(source) = source {
                         job.phase("Archivdaten für den Vergleich bereitstellen …");
@@ -771,11 +777,12 @@ impl App {
                     }
                 }
                 job.phase("Verzeichnisse erfassen und vergleichen …");
-                let mut plan = sync::compare_ignoring_with_progress(
+                let mut plan = sync::compare_projected_ignoring_with_progress(
                     roots.each_ref().map(PathBuf::as_path),
+                    origins.each_ref().map(PathBuf::as_path),
                     &options,
                     &setup.selected,
-                    if has_archive { None } else { ignore.as_deref() },
+                    ignore.as_deref(),
                     &job.cancel,
                     |path, examined| {
                         if let Ok(mut slot) = feed.lock() {
@@ -1380,6 +1387,64 @@ mod tests {
             fs::metadata(restored).unwrap().modified().unwrap(),
             timestamp
         );
+    }
+
+    #[test]
+    fn zip_sync_uses_original_archive_paths_for_ignore_rules_and_keeps_excluded_local_files() {
+        let fixture = tempfile::tempdir().unwrap();
+        let input = fixture.path().join("input");
+        let local = fixture.path().join("local");
+        fs::create_dir_all(input.join("docs/cache")).unwrap();
+        fs::create_dir(&local).unwrap();
+        for (name, contents) in [
+            ("docs/public.txt", b"public".as_slice()),
+            ("docs/private.txt", b"private"),
+            ("docs/cache/private.txt", b"cache"),
+        ] {
+            fs::write(input.join(name), contents).unwrap();
+        }
+        fs::write(local.join("private.txt"), b"local private").unwrap();
+        let file = fixture.path().join("sample.zip");
+        let cancel = AtomicBool::new(false);
+        create_zip(&[input.join("docs")], &input, &file, None, &cancel).unwrap();
+        let source = ArchiveTab {
+            password: None,
+            catalog: Arc::new(Catalog::read(&file, &cancel).unwrap()),
+            file: file.clone(),
+            folder: "docs".into(),
+        };
+        let options = Options {
+            mode: Mode::Mirror,
+            recursive: true,
+            ..Default::default()
+        };
+        let stage = stage_archive(source, &options, &[], None, &cancel).unwrap();
+        let origin = file.join("docs");
+        let ignore = arco_core::ignore::IgnoreList::parse(&format!(
+            "{}\ncache\\",
+            origin.join("private.txt").display()
+        ))
+        .unwrap();
+        let plan = sync::compare_projected_ignoring_with_progress(
+            [stage.storage.path(), &local],
+            [&origin, &local],
+            &options,
+            &[],
+            Some(&ignore),
+            &cancel,
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(plan.rows.len(), 1);
+        assert_eq!(plan.rows[0].relative, Path::new("public.txt"));
+        let report = plan.apply(&cancel, |_| {});
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(fs::read(local.join("public.txt")).unwrap(), b"public");
+        assert_eq!(
+            fs::read(local.join("private.txt")).unwrap(),
+            b"local private"
+        );
+        assert!(!local.join("cache").exists());
     }
 
     #[test]

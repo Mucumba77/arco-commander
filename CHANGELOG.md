@@ -1,5 +1,27 @@
 # Änderungen
 
+
+## 1.4.0 · 16. November 2026
+
+### Oberfläche, Navigation und Dateioperationen
+
+- Portable WDX-/WFX-Spalten, Layoutoptionen, Sortierung und getrennte Standard-/Plugin-/eigene Ansichten pro Tab. Native TC-WFX-Spaltennummern werden unabhängig von lokalen Spaltensätzen importiert und exportiert.
+- Zusammengesetzte native/WDX-/WFX-Spalten über einen gemeinsamen Hintergrundleser, typgerechte Einzelwerte, SDK-Abfragebündelung, Abbruch und begrenzte Caches. Zusätzliche TC-Spaltenoptionen, automatische Modusbefehle und Tab-Symbole.
+- Windows-Orte für Systemsteuerung, Schriftarten und Drucker. Stabile gespeicherte Shell-Identitäten auch für Anbieter ohne erneut auflösbaren Anzeigenamen.
+- Ignorierregeln beim Archivabgleich beziehen sich auf ursprüngliche Archivpfade. Ignorierte Gegenstücke werden beim Spiegeln erhalten.
+- Unveränderte Windows-Parameterzeilen bei `.bar`-Import/-Export und im Buttoneditor, `%Q`, `%B`-Varianten, `%Y&y` und FTP-Pfadparameter.
+- Rekursives Kopieren/Verschieben von Junctions und symbolischen Datei-/Verzeichnislinks ohne Traversierung ihrer Ziele. Metadatenoptionen behandeln das Linkobjekt; Linkerstellung benötigt passende Windows-Rechte.
+- Klassische OLE-Verschiebungen mit geschützten Verzeichnis-/Hardlink-Snapshots, stabilen Identitäten und geprüftem Rückmeldeprotokoll. CF_HDROP-Fallback für nicht vom Shell-Parser akzeptierte Dateipfade.
+- Ergänzte englische/französische Fachdialoge, Hilfetexte, Auswahlaktionen und dynamische Meldungen. Dateinamen und technische Eingabeformate bleiben erhalten.
+
+
+### Veröffentlichung und Prüfung
+
+- UI-01–UI-10 und FILE-01–FILE-10 sind im definierten Matrixumfang implementiert: jeweils 10/10 IDs. Die ersten drei Bereiche sind damit in der Implementierung abgeschlossen.
+- 343 automatisierte Tests in acht Suiten bestanden; 41 explizite Umgebungsfälle im Standardlauf ausgelassen. Zusätzlich vier SDK-Referenztests für ANSI-/Unicode-WFX und zusammengesetzte WDX-/WFX-Spalten bestanden.
+- Portables Windows-x64-Paket mit aktuellen Plugin-Hosts beider Architekturen (Protokoll 13), ZIP-SFX, Bedienungsanleitung und Abschlussnachweis für die Bereiche 1 und 2.
+- Paketierung mit `--no-app-run`: kein Start von Arco Commander, auch nicht für `--version` oder `--help`. Fenster-, Rechte- und Hardwareabnahme bleiben separat offen. Der Symlink-Referenzlauf konnte seine Quellen hier wegen Windows-Fehler 1314 nicht anlegen.
+
 ## 1.3.0 · 16. November 2026
 
 - Erweiterte Suchkriterien mit relativen Altersgrenzen, Uhrzeiten, Größeneinheiten, ganzen Wörtern, inverser Inhaltssuche, gemischten Hex-/Textbytes, DOS-Kodierungen und Office-/EPUB-Text.

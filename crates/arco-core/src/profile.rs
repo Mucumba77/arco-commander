@@ -234,7 +234,87 @@ impl TcTabs {
         &mut self,
         columns: &mut BTreeMap<String, Vec<Column>>,
     ) -> io::Result<()> {
-        std::mem::take(&mut self.portable_views).install(&mut self.panels, columns)
+        std::mem::take(&mut self.portable_views)
+            .install(&mut self.panels, columns)
+            .map(|_| ())
+    }
+
+    pub fn install_embedded_views(
+        &mut self,
+        settings: &mut crate::view_settings::Settings,
+    ) -> io::Result<()> {
+        let mut views = std::mem::take(&mut self.portable_views);
+        let portable_wfx = std::mem::take(&mut views.wfx);
+        let options = std::mem::take(&mut views.options);
+        let mut staged = settings.clone();
+        let mut panels = self.panels.clone();
+        let names = views.install(&mut panels, &mut staged.columns)?;
+        for (name, options) in options {
+            if let Some(name) = names.get(&name) {
+                staged.column_options.insert(name.clone(), options);
+            }
+        }
+        for (plugin, imported) in portable_wfx {
+            let key = staged
+                .portable_wfx
+                .keys()
+                .find(|name| name.eq_ignore_ascii_case(&plugin))
+                .cloned()
+                .unwrap_or_else(|| plugin.clone());
+            let target = staged.portable_wfx.entry(key).or_default();
+            let mut names = BTreeMap::new();
+            for (name, columns) in imported.sets {
+                let stem = name.chars().take(64).collect::<String>();
+                let candidate = std::iter::once(name.clone())
+                    .chain((1..).map(|n| format!("{stem} (Arco {n})")))
+                    .find(|name| {
+                        target
+                            .sets
+                            .get(name)
+                            .is_none_or(|existing| *existing == columns)
+                    })
+                    .expect("finite names");
+                target.sets.insert(candidate.clone(), columns);
+                names.insert(name, candidate);
+            }
+            for (name, options) in imported.options {
+                if let Some(name) = names.get(&name) {
+                    target.options.insert(name.clone(), options);
+                }
+            }
+            for (id, mut layout) in imported.tc_layouts {
+                if let Some(mapped) = names.get(&layout.name) {
+                    layout.name.clone_from(mapped);
+                    target.tc_layouts.entry(id).or_insert(layout);
+                }
+            }
+            if target.sets.len() > 128 {
+                return Err(io::Error::other(
+                    "Mehr als 128 WFX-Spaltensätze für ein Plugin.",
+                ));
+            }
+            for tab in panels.iter_mut().flat_map(|panel| &mut panel.tab_options) {
+                if let Some(selection) = &mut tab.wfx_view
+                    && selection.plugin.eq_ignore_ascii_case(&plugin)
+                {
+                    if let WfxView::Custom(name) = &mut selection.view
+                        && let Some(mapped) = names.get(name)
+                    {
+                        name.clone_from(mapped);
+                    }
+                }
+            }
+            target.active = imported.active.and_then(|name| names.remove(&name));
+            target.plugin_default = imported.plugin_default;
+        }
+        if staged.portable_wfx.len() > 128 {
+            return Err(io::Error::other(
+                "Mehr als 128 portable WFX-Konfigurationen.",
+            ));
+        }
+        *settings = staged;
+        self.panels = panels;
+        Ok(())
     }
 }
 
@@ -405,6 +485,26 @@ pub fn write_tc_tabs_with_views(
     layouts: &BTreeMap<u16, TcColumnLayout>,
     columns: &BTreeMap<String, Vec<Column>>,
 ) -> io::Result<()> {
+    write_tc_tabs_with_portable_views(
+        path,
+        panels,
+        source,
+        layouts,
+        columns,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+    )
+}
+
+pub fn write_tc_tabs_with_portable_views(
+    path: &Path,
+    panels: &[SavedPanel; 2],
+    source: usize,
+    layouts: &BTreeMap<u16, TcColumnLayout>,
+    columns: &BTreeMap<String, Vec<Column>>,
+    column_options: &BTreeMap<String, crate::view_settings::ColumnOptions>,
+    wfx: &BTreeMap<String, crate::view_settings::WfxColumnSets>,
+) -> io::Result<()> {
     if !path.is_absolute()
         || !path
             .extension()
@@ -419,6 +519,21 @@ pub fn write_tc_tabs_with_views(
     let source = source.min(1);
     let mut text = String::new();
     let mut views = PortableViews::default();
+    for plugin in panels
+        .iter()
+        .flat_map(|panel| &panel.tab_options)
+        .filter_map(|tab| match &tab.virtual_tab {
+            Some(VirtualTab::Wfx { plugin, .. }) => Some(plugin),
+            _ => None,
+        })
+    {
+        let sets = wfx
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(plugin))
+            .map(|(_, sets)| sets.clone())
+            .unwrap_or_default();
+        views.wfx.insert(plugin.clone(), sets);
+    }
     use std::fmt::Write as _;
     for (relative, (section, panel)) in [
         ("activetabs", &panels[source]),
@@ -432,6 +547,11 @@ pub fn write_tc_tabs_with_views(
             let options = panel.tab_options.get(index);
             if let Some(tab) = options {
                 views.record(relative, index, tab, columns);
+                if let Some(name) = &tab.column_set
+                    && let Some(options) = column_options.get(name)
+                {
+                    views.options.insert(name.clone(), options.clone());
+                }
             }
             let virtual_name = options
                 .and_then(|options| options.virtual_tab.as_ref())
@@ -483,11 +603,30 @@ pub fn write_tc_tabs_with_views(
             } else {
                 0
             };
-            let layout = options
-                .filter(|tab| tab.view == TabView::Details)
-                .and_then(|tab| tab.column_set.as_deref())
-                .and_then(|name| layouts.iter().find(|(_, layout)| layout.name == name))
-                .and_then(|(id, layout)| Some((id.checked_add(5)?, layout)));
+            let selected_layout =
+                options
+                    .filter(|tab| tab.view == TabView::Details)
+                    .and_then(|tab| {
+                        if let Some(VirtualTab::Wfx { plugin, .. }) = &tab.virtual_tab {
+                            let sets = wfx
+                                .iter()
+                                .find(|(name, _)| name.eq_ignore_ascii_case(plugin))
+                                .map(|(_, sets)| sets)?;
+                            let name = match tab.wfx_selection(plugin) {
+                                Some(WfxView::Custom(name)) => Some(name.as_str()),
+                                Some(_) => None,
+                                None => sets.active.as_deref(),
+                            }?;
+                            sets.tc_layouts
+                                .iter()
+                                .find(|(_, layout)| layout.name == name)
+                        } else {
+                            let name = tab.column_set.as_deref()?;
+                            layouts.iter().find(|(_, layout)| layout.name == name)
+                        }
+                    });
+            let layout =
+                selected_layout.and_then(|(id, layout)| Some((id.checked_add(5)?, layout)));
             let view = layout.map_or_else(
                 || u16::from(options.map_or(TabView::Details, |tab| tab.view).tc_id()),
                 |(id, _)| id,
@@ -604,6 +743,24 @@ pub fn read_tc_tabs_with_columns(
     source: usize,
     resolve_variable: impl Fn(&str) -> Option<OsString>,
     layouts: &BTreeMap<u16, TcColumnLayout>,
+) -> io::Result<TcTabs> {
+    read_tc_tabs_with_all_columns(
+        path,
+        bases,
+        source,
+        resolve_variable,
+        layouts,
+        &BTreeMap::new(),
+    )
+}
+
+pub fn read_tc_tabs_with_all_columns(
+    path: &Path,
+    bases: [&Path; 2],
+    source: usize,
+    resolve_variable: impl Fn(&str) -> Option<OsString>,
+    layouts: &BTreeMap<u16, TcColumnLayout>,
+    wfx_sets: &BTreeMap<String, crate::view_settings::WfxColumnSets>,
 ) -> io::Result<TcTabs> {
     let text = read_tc_text(path)?;
     let mut sections: [BTreeMap<u32, TcTab>; 2] = Default::default();
@@ -732,14 +889,25 @@ pub fn read_tc_tabs_with_columns(
                 continue;
             }
             let mut fields = tab.options.split('|');
-            let embedded_view = !matches!(virtual_tab, Some(VirtualTab::Wfx { .. }))
-                && portable_views.contains(side, index);
+            let embedded_view = portable_views.contains(side, index);
             let mut view_warnings = 0;
             let view_id = fields.next().filter(|id| !id.is_empty()).unwrap_or("1");
+            // WFX and local custom columns have independent numeric IDs in TC.
+            let wfx_plugin = match &virtual_tab {
+                Some(VirtualTab::Wfx { plugin, .. }) => Some(plugin),
+                _ => None,
+            };
+            let layouts = match wfx_plugin {
+                Some(plugin) => wfx_sets
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case(plugin))
+                    .map(|(_, sets)| &sets.tc_layouts),
+                None => Some(layouts),
+            };
             let layout = view_id
                 .parse::<u16>()
                 .ok()
-                .and_then(|id| layouts.get(&id.checked_sub(5)?));
+                .and_then(|id| layouts?.get(&id.checked_sub(5)?));
             let view = if layout.is_some() {
                 TabView::Details
             } else {
@@ -867,7 +1035,16 @@ pub fn read_tc_tabs_with_columns(
                     .collect(),
                 lock,
                 view,
-                column_set: layout.map(|layout| layout.name.clone()),
+                column_set: wfx_plugin
+                    .is_none()
+                    .then(|| layout.map(|layout| layout.name.clone()))
+                    .flatten(),
+                wfx_view: wfx_plugin.and_then(|plugin| {
+                    layout.map(|layout| WfxTabView {
+                        plugin: plugin.clone(),
+                        view: WfxView::Custom(layout.name.clone()),
+                    })
+                }),
                 view_colors,
                 sort,
                 file_filter,
@@ -1145,6 +1322,95 @@ pub fn read_tc_ftp_ini(path: &Path) -> io::Result<Vec<(String, TcFtpSite)>> {
 
 #[cfg(test)]
 mod tests {
+    use crate::view_settings::Field;
+    #[test]
+    fn native_wfx_tabs_use_provider_specific_column_ids_and_sort_maps() {
+        use crate::view_settings::{Field, WfxColumnSets};
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("remote.tab");
+        fs::write(
+            &input,
+            "[activetabs]\n0_path=\\\\\\ShelfPlugin\\Shelf\n0_options=6|0|1|0|0|0|100|-3\n",
+        )
+        .unwrap();
+        let remote_layout = TcColumnLayout {
+            name: "Remote".into(),
+            sort_keys: vec![Some(SortKey::Wdx(0))],
+        };
+        let local = BTreeMap::from([(
+            1,
+            TcColumnLayout {
+                name: "Local".into(),
+                sort_keys: vec![Some(SortKey::Size)],
+            },
+        )]);
+        let sets = BTreeMap::from([(
+            "ShelfPlugin".into(),
+            WfxColumnSets {
+                sets: BTreeMap::from([(
+                    "Remote".into(),
+                    vec![Column {
+                        field: Field::Size,
+                        title: "Remote size".into(),
+                        width: 90,
+                        right_aligned: None,
+                    }],
+                )]),
+                tc_layouts: BTreeMap::from([(1, remote_layout)]),
+                ..Default::default()
+            },
+        )]);
+        let imported = read_tc_tabs_with_all_columns(
+            &input,
+            [dir.path(), dir.path()],
+            0,
+            |_| None,
+            &local,
+            &sets,
+        )
+        .unwrap();
+        let tab = &imported.panels[0].tab_options[0];
+        assert!(tab.column_set.is_none());
+        assert_eq!(
+            tab.wfx_selection("shelfplugin"),
+            Some(&WfxView::Custom("Remote".into()))
+        );
+        assert_eq!(
+            tab.sort[0],
+            SortOrder {
+                key: SortKey::Wdx(0),
+                descending: true
+            }
+        );
+        let output = dir.path().join("export.tab");
+        write_tc_tabs_with_portable_views(
+            &output,
+            &imported.panels,
+            0,
+            &local,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &sets,
+        )
+        .unwrap();
+        assert!(read_tc_text(&output).unwrap().contains("0_options=6|"));
+        let restored = read_tc_tabs_with_all_columns(
+            &output,
+            [dir.path(), dir.path()],
+            0,
+            |_| None,
+            &local,
+            &sets,
+        )
+        .unwrap();
+        assert_eq!(restored.panels[0].tab_options[0].sort, tab.sort);
+        let no_provider =
+            read_tc_tabs_with_columns(&input, [dir.path(), dir.path()], 0, |_| None, &local)
+                .unwrap();
+        assert!(no_provider.panels[0].tab_options[0].column_set.is_none());
+        assert!(no_provider.unhandled_options > 0);
+    }
+
     #[test]
     fn expands_hotlist_variables_on_both_sides_and_skips_unresolved_paths() {
         let fixture = tempfile::tempdir().unwrap();
@@ -1381,12 +1647,12 @@ cmd5=cd %COMMANDER_PATH
 
     #[cfg(windows)]
     #[test]
-    fn arco_tab_import_rejects_untrusted_plugin_columns_and_keeps_standard_tabs() {
+    fn arco_tab_import_preserves_plugin_definitions_without_registering_or_loading_them() {
         let fixture = tempfile::tempdir().unwrap();
         let source = fixture.path().join("External.tab");
         let untrusted = serde_json::json!({
             "sets": {"External": [{
-                "field": {"wdx": {"plugin": "C:/fake.wdx64", "selection": {"field": "Field"}}},
+                "field": {"wdx": {"plugin": "C:/fake.wdx64", "field": "Field"}},
                 "title": "External", "width": 90
             }]},
             "tabs": [{"0": {"columns": "External", "sort": []}}, {}]
@@ -1394,14 +1660,213 @@ cmd5=cd %COMMANDER_PATH
         fs::write(&source, format!("[activetabs]\n0_path=C:\\Docs\n0_options=0|3|0|0|0|2|0\n[ArcoTabViews]\nV1={untrusted}\n")).unwrap();
         let mut imported =
             read_tc_tabs(&source, [Path::new(r"C:\"), Path::new(r"C:\")], 0).unwrap();
-        assert_eq!(imported.unhandled_options, 1);
-        assert_eq!(imported.embedded_column_count(), 0);
+        assert_eq!(imported.unhandled_options, 0);
+        assert_eq!(imported.embedded_column_count(), 1);
         let mut columns = BTreeMap::new();
         imported.install_embedded_columns(&mut columns).unwrap();
         let tab = &imported.panels[0].tab_options[0];
-        assert_eq!(tab.view, TabView::Short);
+        assert_eq!(tab.view, TabView::Details);
         assert_eq!(tab.lock, TabLock::ReturnToBase);
-        assert!(columns.is_empty());
+        assert_eq!(tab.column_set.as_deref(), Some("External"));
+        assert!(
+            matches!(&columns["External"][0].field, Field::Wdx(column) if column.plugin == Path::new("C:/fake.wdx64"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn portable_tab_round_trip_keeps_wfx_bindings_layout_and_plugin_sort_without_a_profile() {
+        use crate::plugin::{WdxField, WfxField};
+        use crate::view_settings::{ColumnOptions, Settings, WfxColumnSets};
+        let fixture = tempfile::tempdir().unwrap();
+        let file = fixture.path().join("Remote.tab");
+        let column = Column {
+            field: Field::Wfx(WfxField {
+                selection: WdxField {
+                    field: "Owner".into(),
+                    unit: None,
+                },
+                descending: true,
+            }),
+            title: "Owner".into(),
+            width: 160,
+            right_aligned: None,
+        };
+        let options = ColumnOptions {
+            reference_width: Some(800),
+            name_width: 240,
+            horizontal_scroll: true,
+        };
+        let sets = WfxColumnSets {
+            sets: BTreeMap::from([("Remote".into(), vec![column.clone()])]),
+            active: Some("Remote".into()),
+            options: BTreeMap::from([("Remote".into(), options.clone())]),
+            plugin_default: Some(false),
+            ..Default::default()
+        };
+        let sort = vec![SortOrder {
+            key: SortKey::Wdx(0),
+            descending: true,
+        }];
+        let panels = [
+            SavedPanel {
+                tabs: vec![fixture.path().into()],
+                tab_options: vec![SavedTab {
+                    virtual_tab: Some(VirtualTab::Wfx {
+                        plugin: "Example".into(),
+                        directory: r"\folder".into(),
+                    }),
+                    sort: sort.clone(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            SavedPanel::default(),
+        ];
+        write_tc_tabs_with_portable_views(
+            &file,
+            &panels,
+            0,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::from([("Example".into(), sets)]),
+        )
+        .unwrap();
+        let mut imported = read_tc_tabs(&file, [fixture.path(), fixture.path()], 0).unwrap();
+        assert_eq!(imported.embedded_column_count(), 1);
+        let mut settings = Settings::default();
+        imported.install_embedded_views(&mut settings).unwrap();
+        let remote = &settings.portable_wfx["Example"];
+        assert_eq!(remote.active_columns().unwrap(), [column]);
+        assert_eq!(remote.options["Remote"], options);
+        assert!(settings.wfx_columns.is_empty());
+        assert_eq!(imported.panels[0].tab_options[0].sort, sort);
+        assert_eq!(
+            imported.panels[0].tab_options[0].wfx_selection("Example"),
+            Some(&WfxView::Custom("Remote".into()))
+        );
+        assert!(
+            matches!(&imported.panels[0].tab_options[0].virtual_tab, Some(VirtualTab::Wfx { plugin, .. }) if plugin == "Example")
+        );
+        // An oversized extension cannot replace existing settings.
+        let mut text = read_tc_text(&file).unwrap();
+        text = text.replace("\"width\":160", "\"width\":65000");
+        fs::write(&file, text).unwrap();
+        let rejected = read_tc_tabs(&file, [fixture.path(), fixture.path()], 0).unwrap();
+        assert_eq!(rejected.embedded_column_count(), 0);
+        assert_eq!(rejected.unhandled_options, 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn portable_wfx_tabs_keep_distinct_view_choices_and_remap_colliding_set_names() {
+        use crate::plugin::{WdxField, WfxField};
+        use crate::view_settings::{Field, Settings, WfxColumnSets};
+        let fixture = tempfile::tempdir().unwrap();
+        let export = fixture.path().join("Views.tab");
+        let column = Column {
+            field: Field::Wfx(WfxField {
+                selection: WdxField {
+                    field: "Count".into(),
+                    unit: None,
+                },
+                descending: false,
+            }),
+            title: "Count".into(),
+            width: 110,
+            right_aligned: Some(true),
+        };
+        let sets = WfxColumnSets {
+            sets: BTreeMap::from([("Remote".into(), vec![column.clone()])]),
+            active: Some("Remote".into()),
+            ..Default::default()
+        };
+        let selections = [
+            WfxView::Standard,
+            WfxView::PluginDefault,
+            WfxView::Custom("Remote".into()),
+        ];
+        let orders: Vec<_> = selections
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                vec![SortOrder {
+                    key: if index == 2 {
+                        SortKey::Wdx(0)
+                    } else {
+                        SortKey::Modified
+                    },
+                    descending: index != 0,
+                }]
+            })
+            .collect();
+        let options = selections
+            .into_iter()
+            .enumerate()
+            .map(|(index, view)| SavedTab {
+                virtual_tab: Some(VirtualTab::Wfx {
+                    plugin: "Example".into(),
+                    directory: format!(r"\folder{index}"),
+                }),
+                wfx_view: Some(WfxTabView {
+                    plugin: "Example".into(),
+                    view,
+                }),
+                sort: orders[index].clone(),
+                ..Default::default()
+            })
+            .collect();
+        let panels = [
+            SavedPanel {
+                tabs: vec![fixture.path().into(); 3],
+                tab_options: options,
+                ..Default::default()
+            },
+            SavedPanel::default(),
+        ];
+        write_tc_tabs_with_portable_views(
+            &export,
+            &panels,
+            0,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::from([("Example".into(), sets)]),
+        )
+        .unwrap();
+        let mut imported = read_tc_tabs(&export, [fixture.path(), fixture.path()], 0).unwrap();
+        let mut settings = Settings::default();
+        let mut existing = column.clone();
+        existing.title = "Existing different column".into();
+        settings.portable_wfx.insert(
+            "Example".into(),
+            WfxColumnSets {
+                sets: BTreeMap::from([("Remote".into(), vec![existing.clone()])]),
+                ..Default::default()
+            },
+        );
+        imported.install_embedded_views(&mut settings).unwrap();
+        let tabs = &imported.panels[0].tab_options;
+        assert_eq!(tabs[0].wfx_selection("example"), Some(&WfxView::Standard));
+        assert_eq!(
+            tabs[1].wfx_selection("Example"),
+            Some(&WfxView::PluginDefault)
+        );
+        assert_eq!(
+            tabs[2].wfx_selection("Example"),
+            Some(&WfxView::Custom("Remote (Arco 1)".into()))
+        );
+        assert!(tabs[2].wfx_selection("Another plugin").is_none());
+        assert_eq!(
+            tabs.iter().map(|tab| tab.sort.clone()).collect::<Vec<_>>(),
+            orders
+        );
+        assert_eq!(settings.portable_wfx["Example"].sets["Remote"], [existing]);
+        assert_eq!(
+            settings.portable_wfx["Example"].sets["Remote (Arco 1)"],
+            [column]
+        );
     }
 
     #[cfg(windows)]
@@ -1706,6 +2171,8 @@ pub struct SavedPanel {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SavedTab {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wfx_view: Option<WfxTabView>,
     pub title: String,
     pub lock: TabLock,
     pub view: TabView,
@@ -1731,6 +2198,29 @@ pub enum TabView {
     Short,
     Thumbnails,
     Comments,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct WfxTabView {
+    pub plugin: String,
+    pub view: WfxView,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WfxView {
+    Standard,
+    PluginDefault,
+    Custom(String),
+}
+
+impl SavedTab {
+    pub fn wfx_selection(&self, plugin: &str) -> Option<&WfxView> {
+        self.wfx_view
+            .as_ref()
+            .filter(|selection| selection.plugin.eq_ignore_ascii_case(plugin))
+            .map(|selection| &selection.view)
+    }
 }
 
 impl TabView {
@@ -2018,6 +2508,8 @@ pub enum ButtonbarAction {
     Program {
         path: PathBuf,
         arguments: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        raw_parameters: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         working_directory: Option<PathBuf>,
         #[serde(default)]

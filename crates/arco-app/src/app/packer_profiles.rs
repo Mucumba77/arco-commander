@@ -31,7 +31,10 @@ impl App {
                 Dialog {
                     title: "Packerprofil verwalten",
                     description: name,
-                    options: &["Bearbeiten", "Löschen"],
+                    options: &[
+                        crate::locale::tr("Bearbeiten"),
+                        crate::locale::tr("Löschen"),
+                    ],
                     ..Dialog::default()
                 },
             );
