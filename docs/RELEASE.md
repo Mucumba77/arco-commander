@@ -2,6 +2,8 @@
 
 Ein Release besteht aus einem portablen Windows-x64-ZIP, einer SHA-256-Prüfsumme, dem zugehörigen Git-Tag und den GitHub-Release-Hinweisen. Die [Änderungshistorie](../CHANGELOG.md) beschreibt die Version. Die [Funktionsmatrix](../FUNKTIONSMATRIX.md) führt die offenen Paritätsfälle.
 
+Die MSVC-Binärdateien benötigen die aktuelle Microsoft Visual C++ v14-Laufzeit: x64 für die Anwendung und x86 für den 32-Bit-Plugin-Host. README, Kurzanleitung und Release-Hinweise müssen auf die [offiziellen Microsoft-Downloads](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist/) verweisen. Die Installer werden nicht automatisch ausgeführt oder im ZIP gebündelt.
+
 ## Build und Paket
 
 Setze zuerst die Workspace-Version in `Cargo.toml`, aktualisiere `Cargo.lock` und ergänze den Changelog. Der Release-Build verwendet den eingecheckten Lockfile. Benötigt werden Rust, das Windows SDK, die MSVC-Tools für x64 und x86, Python 3.10 oder neuer sowie Zugriff auf NuGet für die Lizenztexte des WebView2 SDK.

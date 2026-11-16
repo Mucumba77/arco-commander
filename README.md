@@ -15,6 +15,8 @@ Das portable ZIP ist für Windows 10 22H2 und Windows 11 vorgesehen. Entpacke es
 
 Für ein Update entpacke die neue Version in einen eigenen Ordner. Arco verwendet das bisherige Standardprofil weiter. Bei Verwendung von `--portable` übernimm zusätzlich die Profildatei `arco-commander.json` aus dem bisherigen Programmordner.
 
+Voraussetzung ist die aktuelle **Microsoft Visual C++ v14-Laufzeit (x64)**; für den 32-Bit-Plugin-Host zusätzlich **x86**. Beide Pakete gibt es bei den [offiziellen Microsoft-Downloads](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist/). Wenn Windows eine fehlende `VCRUNTIME140.dll` oder `VCRUNTIME140_1.dll` meldet, installiere das passende Paket.
+
 ![Arco Commander mit Arbeitsstand und Archiv nebeneinander](docs/screenshots/hauptfenster.jpg)
 
 ## Schnellstart
