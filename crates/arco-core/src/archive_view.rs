@@ -241,7 +241,9 @@ pub fn append(
 }
 
 pub fn supports_text_search(path: &Path) -> bool {
-    is_zip_container(path) || is_brotli(path) || seven_zip::can_read(path)
+    // The same bounded selection/extraction adapter is available for every readable
+    // catalog, including TAR/compressed streams and configured legacy adapters.
+    is_openable(path)
 }
 
 pub fn is_brotli(path: &Path) -> bool {
@@ -805,18 +807,40 @@ impl Catalog {
         mut progress: impl FnMut(crate::advanced_search::Progress<'_>),
     ) -> io::Result<crate::advanced_search::Found> {
         self.check_unchanged()?;
+        let members = self
+            .folders
+            .values()
+            .flatten()
+            .map(|row| (row.path.as_path(), row.kind))
+            .collect::<std::collections::HashMap<_, _>>();
+        let partner_files = query.has_partner_filter().then(|| {
+            members
+                .iter()
+                .filter(|(_, kind)| **kind == files::Kind::File)
+                .map(|(path, _)| path.to_string_lossy().to_lowercase())
+                .collect::<std::collections::HashSet<_>>()
+        });
+        files::check_cancel(cancel)?;
+        let mut directory_roots = std::collections::HashSet::new();
+        let mut file_roots = std::collections::HashSet::new();
+        let mut scopes = std::collections::HashMap::new();
         for root in roots {
-            if !self.folders.contains_key(root)
-                && !root
-                    .parent()
-                    .and_then(|parent| self.folders.get(parent))
-                    .is_some_and(|rows| rows.iter().any(|row| row.path == *root))
-            {
+            files::check_cancel(cancel)?;
+            let scope = if self.folders.contains_key(root) {
+                directory_roots.insert(root.as_path());
+                root.as_path()
+            } else if members.contains_key(root.as_path()) {
+                file_roots.insert(root.as_path());
+                root.parent().unwrap_or(root)
+            } else {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!("Suchort fehlt im Archiv: {}", root.display()),
                 ));
-            }
+            };
+            scopes
+                .entry(scope.to_path_buf())
+                .or_insert_with(|| query.scoped(scope));
         }
         let mut entries = Vec::new();
         let mut errors = Vec::new();
@@ -827,14 +851,34 @@ impl Catalog {
                 if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                     break 'folders;
                 }
-                let in_scope = roots.iter().any(|root| {
-                    row.path == *root && row.kind == files::Kind::File
-                        || parent.strip_prefix(root).ok().is_some_and(|relative| {
-                            query
-                                .max_depth
-                                .is_none_or(|depth| relative.components().count() <= depth)
-                        })
-                });
+                let mut in_scope = file_roots.contains(row.path.as_path());
+                let mut matched = in_scope
+                    && scopes
+                        .get(parent)
+                        .is_some_and(|query| query.matches_metadata(row));
+                if query.searches_only_roots() {
+                    if directory_roots.contains(row.path.as_path()) {
+                        in_scope = true;
+                        matched |= scopes
+                            .get(&row.path)
+                            .is_some_and(|query| query.matches_metadata(row));
+                    }
+                } else {
+                    for ancestor in parent.ancestors() {
+                        if directory_roots.contains(ancestor)
+                            && parent.strip_prefix(ancestor).ok().is_some_and(|relative| {
+                                query
+                                    .max_depth
+                                    .is_none_or(|depth| relative.components().count() <= depth)
+                            })
+                        {
+                            in_scope = true;
+                            matched |= scopes
+                                .get(ancestor)
+                                .is_some_and(|query| query.matches_metadata(row));
+                        }
+                    }
+                }
                 if !in_scope || !(show_hidden || !row.hidden) {
                     continue;
                 }
@@ -848,11 +892,18 @@ impl Catalog {
                     interrupted = true;
                     break 'folders;
                 }
-                let result = if query.matches_metadata(row) {
+                let result = (|| {
+                    if !matched
+                        || !query.matches_partner(row, |path| {
+                            Ok(partner_files.as_ref().is_some_and(|files| {
+                                files.contains(&path.to_string_lossy().to_lowercase())
+                            }))
+                        })?
+                    {
+                        return Ok(false);
+                    }
                     inspect(row)
-                } else {
-                    Ok(false)
-                };
+                })();
                 match result {
                     Ok(true) => entries.push(row.clone()),
                     Ok(false) => (),
@@ -875,6 +926,7 @@ impl Catalog {
             }
         }
         self.check_unchanged()?;
+        query.filter_empty_directories(&mut entries);
         Ok(crate::advanced_search::Found {
             directory: files::Directory { entries, errors },
             cancelled: interrupted || cancel.load(std::sync::atomic::Ordering::Relaxed),
@@ -1242,6 +1294,102 @@ fn extract_brotli(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn archive_partner_search_uses_siblings_in_catalog_without_extracting_or_including_directories()
+    {
+        use super::*;
+        use crate::advanced_search::Options;
+        let fixture = tempfile::tempdir().unwrap();
+        let base = fixture.path().join("input");
+        fs::create_dir_all(base.join("nested")).unwrap();
+        for name in ["one.cr2", "one.JPG", "two.cr2", "nested/two.jpg"] {
+            fs::write(base.join(name), b"image").unwrap();
+        }
+        let archive = fixture.path().join("test.zip");
+        let cancel = AtomicBool::new(false);
+        archives::create_zip(&[base.clone()], fixture.path(), &archive, None, &cancel).unwrap();
+        let catalog = Catalog::read(&archive, &cancel).unwrap();
+        for (missing, expected) in [(false, "one.cr2"), (true, "two.cr2")] {
+            let query = Options {
+                names: "*.cr2".into(),
+                partner_extensions: "jpg".into(),
+                partner_not: missing,
+                ..Default::default()
+            }
+            .compile()
+            .unwrap();
+            let found = catalog
+                .search_candidates(&[PathBuf::new()], &query, true, &cancel, |_| Ok(true))
+                .unwrap();
+            assert!(found.directory.errors.is_empty());
+            assert_eq!(found.directory.entries.len(), 1);
+            assert_eq!(found.directory.entries[0].name, expected);
+        }
+    }
+
+    #[test]
+    fn overlapping_search_roots_keep_each_member_once_and_refinement_depth_zero_keeps_only_roots() {
+        use super::*;
+        use crate::advanced_search::Options;
+        let fixture = tempfile::tempdir().unwrap();
+        let base = fixture.path().join("input");
+        fs::create_dir_all(base.join("docs/nested")).unwrap();
+        fs::write(base.join("docs/a.txt"), b"a").unwrap();
+        fs::write(base.join("docs/nested/deep.txt"), b"deep").unwrap();
+        fs::write(base.join("outside.txt"), b"outside").unwrap();
+        let archive = fixture.path().join("test.zip");
+        let cancel = AtomicBool::new(false);
+        archives::create_zip(
+            &[base.join("docs"), base.join("outside.txt")],
+            &base,
+            &archive,
+            None,
+            &cancel,
+        )
+        .unwrap();
+        let catalog = Catalog::read(&archive, &cancel).unwrap();
+        let roots = [
+            PathBuf::new(),
+            PathBuf::from("docs"),
+            PathBuf::from("docs/a.txt"),
+        ];
+        let query = Options {
+            names: r"\*.txt".into(),
+            ..Default::default()
+        }
+        .compile()
+        .unwrap();
+        let found = catalog
+            .search_candidates(&roots, &query, true, &cancel, |_| Ok(true))
+            .unwrap();
+        let paths = found
+            .directory
+            .entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(paths.len(), 2);
+        assert!(paths.contains(Path::new("docs/a.txt")));
+        assert!(paths.contains(Path::new("outside.txt")));
+        let query = Options::default().compile().unwrap().only_roots();
+        let roots = [
+            PathBuf::from("docs"),
+            PathBuf::from("docs/a.txt"),
+            PathBuf::from("docs"),
+        ];
+        let found = catalog
+            .search_candidates(&roots, &query, true, &cancel, |_| Ok(true))
+            .unwrap();
+        assert_eq!(found.directory.entries.len(), 2);
+        assert!(
+            found
+                .directory
+                .entries
+                .iter()
+                .all(|entry| entry.path == roots[0] || entry.path == roots[1])
+        );
+    }
+
     #[test]
     fn archive_progress_obeys_scope_and_cancels_before_inspection() {
         use super::*;

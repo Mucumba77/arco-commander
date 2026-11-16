@@ -115,6 +115,10 @@ fn read_raw_with_metadata(
     }
 }
 
+pub(crate) fn internal_multimedia(path: &Path) -> bool {
+    image_extension(path) || rich::is_media(path)
+}
+
 fn image_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|value| value.to_str())

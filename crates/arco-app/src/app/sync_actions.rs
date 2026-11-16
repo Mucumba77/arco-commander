@@ -1239,6 +1239,66 @@ mod tests {
     use std::time::SystemTime;
 
     #[test]
+    fn identical_reference_tree_has_same_sync_decisions_for_disk_zip_and_seven_zip() {
+        let fixture = tempfile::tempdir().unwrap();
+        let left = fixture.path().join("left");
+        let right = fixture.path().join("right");
+        for root in [&left, &right] {
+            fs::create_dir_all(root.join("nested/empty")).unwrap();
+            fs::write(root.join("equal.txt"), b"equal").unwrap();
+            fs::write(root.join("ignored.bin"), b"ignored").unwrap();
+        }
+        fs::write(left.join("nested/Grüße.txt"), b"new content").unwrap();
+        fs::write(right.join("nested/Grüße.txt"), b"old content").unwrap();
+        fs::write(left.join("left.txt"), b"left only").unwrap();
+        fs::write(right.join("right.txt"), b"right only").unwrap();
+        let options = Options {
+            by_content: true,
+            ignore_date: true,
+            masks: "*.txt".into(),
+            ..Default::default()
+        };
+        let cancel = AtomicBool::new(false);
+        let signature = |plan: &Plan| {
+            plan.rows
+                .iter()
+                .map(|row| (row.relative.clone(), row.comparison, row.action))
+                .collect::<Vec<_>>()
+        };
+        let local = sync::compare([&left, &right], &options, &[], &cancel).unwrap();
+        let expected = signature(&local);
+        let sources = fs::read_dir(&right)
+            .unwrap()
+            .map(|item| item.unwrap().path())
+            .collect::<Vec<_>>();
+        for seven_zip in [false, true] {
+            let file = fixture
+                .path()
+                .join(if seven_zip { "probe.7z" } else { "probe.zip" });
+            if seven_zip {
+                archive_view::pack_7z(&sources, &right, &file, None, &cancel).unwrap();
+            } else {
+                create_zip(&sources, &right, &file, None, &cancel).unwrap();
+            }
+            let source = ArchiveTab {
+                catalog: Arc::new(Catalog::read(&file, &cancel).unwrap()),
+                file: file.clone(),
+                folder: PathBuf::new(),
+                password: None,
+            };
+            let before = fs::read(&file).unwrap();
+            let stage = stage_archive(source, &options, &[], None, &cancel).unwrap();
+            let plan =
+                sync::compare([&left, stage.storage.path()], &options, &[], &cancel).unwrap();
+            assert_eq!(signature(&plan), expected, "{file:?}");
+            let mut readonly = plan;
+            readonly.disable_actions();
+            assert!(readonly.rows.iter().all(|row| row.action == Action::Skip));
+            assert_eq!(fs::read(file).unwrap(), before);
+        }
+    }
+
+    #[test]
     fn archive_sync_uses_selected_members_and_protects_its_own_source_archive() {
         let fixture = tempfile::tempdir().unwrap();
         let source = fixture.path().join("source");

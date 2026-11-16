@@ -1,7 +1,7 @@
 use crate::files::{self, Directory, Entry, Kind};
 use crate::ignore::IgnoreList;
-use crate::{sync::FileMasks, tools};
-use chrono::{DateTime, Local, NaiveDate};
+use crate::tools;
+use chrono::{DateTime, Local, NaiveDate, NaiveDateTime};
 use regex::{Regex, RegexBuilder, bytes};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -12,6 +12,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use walkdir::WalkDir;
 
 const CONTENT_LIMIT: u64 = 64 * 1024 * 1024;
+mod content;
+mod locations;
+mod names;
+mod partner;
+pub use locations::{list_marker, search_locations};
+use names::SearchMasks;
 
 #[cfg(test)]
 mod tests {
@@ -103,10 +109,18 @@ pub struct Options {
     pub content_mode: u8,
     pub encoding: u8,
     pub match_case: bool,
+    pub whole_words: bool,
+    pub content_not: bool,
+    pub office_xml: bool,
+    pub archives: bool,
+    pub partner_extensions: String,
+    pub partner_not: bool,
     pub minimum_bytes: String,
     pub maximum_bytes: String,
     pub modified_from: String,
     pub modified_to: String,
+    pub minimum_age: String,
+    pub maximum_age: String,
     pub attributes: String,
     pub depth: String,
     pub roots: String,
@@ -115,23 +129,35 @@ pub struct Options {
     pub wdx_profile: String,
 }
 
+#[derive(Clone)]
 enum Name {
-    Masks(FileMasks),
+    Masks(SearchMasks),
     Regex(Regex),
 }
 
+#[derive(Clone)]
 enum Content {
     Text(Regex, u8),
     Hex(bytes::Regex),
 }
 
+#[derive(Clone)]
 pub struct Query {
     name: Name,
     content: Option<Content>,
     minimum_bytes: Option<u64>,
     maximum_bytes: Option<u64>,
-    from: Option<NaiveDate>,
-    to: Option<NaiveDate>,
+    from: Option<NaiveDateTime>,
+    to: Option<NaiveDateTime>,
+    minimum_age: Option<std::time::Duration>,
+    maximum_age: Option<std::time::Duration>,
+    now: std::time::SystemTime,
+    content_not: bool,
+    office_xml: bool,
+    root: Option<PathBuf>,
+    match_case: bool,
+    only_roots: bool,
+    partner: Option<partner::Partner>,
     required: u32,
     excluded: u32,
     pub max_depth: Option<usize>,
@@ -156,16 +182,21 @@ impl Options {
                     .map_err(io::Error::other)?,
             )
         } else {
-            Name::Masks(FileMasks::new(&self.names)?)
+            Name::Masks(SearchMasks::new(&self.names)?)
         };
         let content = match (self.content.is_empty(), self.content_mode) {
             (true, _) | (_, 0) => None,
-            (false, 3) => Some(Content::Hex(hex_pattern(&self.content)?)),
+            (false, 3) => Some(Content::Hex(hex_pattern(&self.content, !self.match_case)?)),
             _ => {
                 let expression = if self.content_mode == 1 {
-                    regex::escape(&self.content)
+                    regex::escape(&content::unescape(&self.content)?)
                 } else {
                     self.content.clone()
+                };
+                let expression = if self.whole_words {
+                    format!(r"(?:^|[^\p{{L}}])(?:{expression})(?:$|[^\p{{L}}])")
+                } else {
+                    expression
                 };
                 let regex = RegexBuilder::new(&expression)
                     .case_insensitive(!self.match_case)
@@ -177,29 +208,45 @@ impl Options {
         let parse_bytes = |text: &str| -> io::Result<Option<u64>> {
             let text = text.trim();
             (!text.is_empty())
-                .then(|| {
-                    text.parse()
-                        .map_err(|_| io::Error::other("Gib Größen als ganze Byte-Anzahl ein."))
-                })
+                .then(|| content::quantity(text, false))
                 .transpose()
         };
-        let parse_date = |text: &str| -> io::Result<Option<NaiveDate>> {
+        let parse_date = |text: &str, end: bool| -> io::Result<Option<NaiveDateTime>> {
             let text = text.trim();
             (!text.is_empty())
                 .then(|| {
-                    NaiveDate::parse_from_str(text, "%Y-%m-%d")
-                        .map_err(|_| io::Error::other("Verwende für das Datum JJJJ-MM-TT."))
+                    NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S")
+                        .or_else(|_| NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M"))
+                        .or_else(|_| {
+                            NaiveDate::parse_from_str(text, "%Y-%m-%d").map(|date| {
+                                if end {
+                                    date.and_hms_nano_opt(23, 59, 59, 999999999).unwrap()
+                                } else {
+                                    date.and_hms_opt(0, 0, 0).unwrap()
+                                }
+                            })
+                        })
+                        .map_err(|_| {
+                            io::Error::other(
+                                "Verwende JJJJ-MM-TT, optional mit HH:MM oder HH:MM:SS.",
+                            )
+                        })
                 })
                 .transpose()
         };
         let minimum_bytes = parse_bytes(&self.minimum_bytes)?;
         let maximum_bytes = parse_bytes(&self.maximum_bytes)?;
-        let from = parse_date(&self.modified_from)?;
-        let to = parse_date(&self.modified_to)?;
+        let from = parse_date(&self.modified_from, false)?;
+        let to = parse_date(&self.modified_to, true)?;
+        let minimum_age = content::age(&self.minimum_age)?;
+        let maximum_age = content::age(&self.maximum_age)?;
         if minimum_bytes
             .zip(maximum_bytes)
             .is_some_and(|(minimum, maximum)| minimum > maximum)
             || from.zip(to).is_some_and(|(from, to)| from > to)
+            || minimum_age
+                .zip(maximum_age)
+                .is_some_and(|(min, max)| min > max)
         {
             return Err(io::Error::other(
                 "Der untere Grenzwert liegt über dem oberen.",
@@ -221,6 +268,15 @@ impl Options {
             maximum_bytes,
             from,
             to,
+            minimum_age,
+            maximum_age,
+            now: std::time::SystemTime::now(),
+            content_not: self.content_not,
+            office_xml: self.office_xml,
+            root: None,
+            match_case: self.match_case,
+            only_roots: false,
+            partner: partner::Partner::compile(&self.partner_extensions, self.partner_not)?,
             required,
             excluded,
             max_depth,
@@ -229,13 +285,42 @@ impl Options {
 }
 
 impl Query {
+    pub fn only_roots(&self) -> Self {
+        let mut query = self.clone();
+        query.only_roots = true;
+        query.name = Name::Masks(SearchMasks::new("*").expect("fixed mask"));
+        query
+    }
+    pub fn searches_only_roots(&self) -> bool {
+        self.only_roots
+    }
+    pub fn scoped(&self, root: &Path) -> Self {
+        let mut query = self.clone();
+        query.root = Some(root.to_path_buf());
+        query
+    }
+
+    pub fn filter_empty_directories(&self, entries: &mut Vec<Entry>) {
+        if !matches!(&self.name, Name::Masks(masks) if masks.remove_empty) {
+            return;
+        }
+        let parents = entries
+            .iter()
+            .filter(|entry| entry.kind == Kind::File)
+            .flat_map(|entry| entry.path.parent().into_iter().flat_map(Path::ancestors))
+            .map(Path::to_path_buf)
+            .collect::<std::collections::HashSet<_>>();
+        entries.retain(|entry| entry.kind != Kind::Directory || parents.contains(&entry.path));
+    }
+
     pub fn requires_content(&self) -> bool {
         self.content.is_some()
     }
 
     pub fn matches_metadata(&self, entry: &Entry) -> bool {
+        let flags = entry.attributes | if entry.kind == Kind::Directory { 16 } else { 0 };
         let named = match &self.name {
-            Name::Masks(masks) => masks.includes(&entry.path),
+            Name::Masks(masks) => masks.matches(entry, self.root.as_deref()),
             Name::Regex(regex) => regex.is_match(&entry.name.to_string_lossy()),
         };
         if !named
@@ -245,19 +330,33 @@ impl Query {
             || self
                 .maximum_bytes
                 .is_some_and(|size| entry.size.is_none_or(|actual| actual > size))
-            || entry.attributes & self.required != self.required
-            || entry.attributes & self.excluded != 0
+            || flags & self.required != self.required
+            || flags & self.excluded != 0
         {
             return false;
         }
         if self.from.is_some() || self.to.is_some() {
             let date = entry
                 .modified
-                .map(|time| DateTime::<Local>::from(time).date_naive());
+                .map(|time| DateTime::<Local>::from(time).naive_local());
             if self
                 .from
                 .is_some_and(|from| date.is_none_or(|date| date < from))
                 || self.to.is_some_and(|to| date.is_none_or(|date| date > to))
+            {
+                return false;
+            }
+        }
+        if self.minimum_age.is_some() || self.maximum_age.is_some() {
+            let age = entry
+                .modified
+                .map(|date| self.now.duration_since(date).unwrap_or_default());
+            if self
+                .minimum_age
+                .is_some_and(|min| age.is_none_or(|age| age < min))
+                || self
+                    .maximum_age
+                    .is_some_and(|max| age.is_none_or(|age| age > max))
             {
                 return false;
             }
@@ -269,6 +368,20 @@ impl Query {
         if !self.matches_metadata(entry) {
             return Ok(false);
         }
+        if !self.matches_partner(entry, |path| {
+            files::check_cancel(cancel)?;
+            match files::regular_metadata(path) {
+                Ok(metadata) => Ok(metadata.is_file()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(error),
+            }
+        })? {
+            return Ok(false);
+        }
+        self.matches_content(entry, cancel)
+    }
+
+    pub fn matches_content(&self, entry: &Entry, cancel: &AtomicBool) -> io::Result<bool> {
         let Some(content) = &self.content else {
             return Ok(true);
         };
@@ -289,25 +402,29 @@ impl Query {
             cancel,
         )?;
         files::ensure_unchanged(&entry.path, &metadata)?;
-        let found = match content {
-            Content::Hex(regex) => regex.is_match(&data),
-            Content::Text(regex, encoding) => {
-                use encoding_rs::{UTF_8, UTF_16BE, UTF_16LE, WINDOWS_1252};
-                let text = match encoding {
-                    1 => UTF_8.decode_with_bom_removal(&data).0,
-                    2 => UTF_16LE.decode_with_bom_removal(&data).0,
-                    3 => UTF_16BE.decode_with_bom_removal(&data).0,
-                    4 => WINDOWS_1252.decode_without_bom_handling(&data).0,
-                    _ => tools::decode_text(&data).into(),
-                };
-                regex.is_match(&text)
+        let found = if self.office_xml && content::is_office(&entry.path) {
+            content::office_matches(
+                &data,
+                |text| match content {
+                    Content::Text(regex, _) => regex.is_match(text),
+                    Content::Hex(regex) => regex.is_match(text.as_bytes()),
+                },
+                cancel,
+            )?
+        } else {
+            match content {
+                Content::Hex(regex) => regex.is_match(&data),
+                Content::Text(regex, encoding) => {
+                    content::decoded_matches(&data, *encoding, |text| regex.is_match(text))
+                }
             }
         };
         files::check_cancel(cancel)?;
-        Ok(found)
+        Ok(found != self.content_not)
     }
 }
 
+#[derive(Clone)]
 pub struct Found {
     pub directory: Directory,
     pub cancelled: bool,
@@ -356,20 +473,59 @@ pub fn search_with_progress(
         cancelled: false,
     };
     let mut seen = BTreeSet::new();
+    let mut empty_candidates = std::collections::HashSet::new();
     let mut examined = 0;
-    for root in roots {
+    let (locations, errors) = locations::expand(roots, include_roots, query.max_depth, cancel);
+    found.directory.errors.extend(errors);
+    for location in locations {
+        let root = &location.path;
+        let override_query = location
+            .names
+            .as_ref()
+            .map(|names| {
+                let mut scoped = query.clone();
+                scoped.name = if let Some(regex) = names.strip_prefix('<') {
+                    Name::Regex(
+                        RegexBuilder::new(regex)
+                            .case_insensitive(!query.match_case)
+                            .build()
+                            .map_err(io::Error::other)?,
+                    )
+                } else {
+                    Name::Masks(SearchMasks::new(names)?)
+                };
+                Ok::<_, io::Error>(scoped)
+            })
+            .transpose();
+        let override_query = match override_query {
+            Ok(value) => value,
+            Err(error) => {
+                found.directory.errors.push(error.to_string());
+                continue;
+            }
+        };
+        let mut scoped = override_query.unwrap_or_else(|| query.clone());
+        scoped.root = Some(if root.is_dir() {
+            root.clone()
+        } else {
+            root.parent().unwrap_or(root).to_path_buf()
+        });
+        let query = &scoped;
         let mut walk = WalkDir::new(root)
             .follow_links(false)
             .follow_root_links(false);
-        if !include_roots && root.is_dir() {
+        if !location.include_self && root.is_dir() {
             walk = walk.min_depth(1);
         }
-        if let Some(depth) = query.max_depth {
+        if location.self_only || query.only_roots {
+            walk = walk.max_depth(0);
+        } else if let Some(depth) = query.max_depth {
             walk = walk.max_depth(depth.saturating_add(1));
         }
         for item in walk.into_iter().filter_entry(|item| {
             item.depth() == 0
                 || (!ignore.is_some_and(|list| list.local(item.path(), item.file_type().is_dir()))
+                    && (!item.file_type().is_dir() || !matches!(&query.name, Name::Masks(masks) if !masks.visits(item.path(), query.root.as_deref())))
                     && item
                         .metadata()
                         .is_ok_and(|metadata| !files::is_link(&metadata)))
@@ -412,7 +568,10 @@ pub fn search_with_progress(
                 Ok::<_, io::Error>(seen.insert(key).then_some(entry))
             })();
             match result {
-                Ok(Some(entry)) => found.directory.entries.push(entry),
+                Ok(Some(entry)) => {
+                    if entry.kind == Kind::Directory && matches!(&query.name, Name::Masks(masks) if masks.remove_empty) { empty_candidates.insert(entry.path.clone()); }
+                    found.directory.entries.push(entry);
+                },
                 Ok(None) => (),
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {
                     found.cancelled = true;
@@ -428,6 +587,20 @@ pub fn search_with_progress(
                 errors: found.directory.errors.len(),
             });
         }
+    }
+    found.cancelled |= cancel.load(Ordering::Relaxed);
+    if !empty_candidates.is_empty() {
+        let parents = found
+            .directory
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == Kind::File)
+            .flat_map(|entry| entry.path.parent().into_iter().flat_map(Path::ancestors))
+            .map(Path::to_path_buf)
+            .collect::<std::collections::HashSet<_>>();
+        found.directory.entries.retain(|entry| {
+            !empty_candidates.contains(&entry.path) || parents.contains(&entry.path)
+        });
     }
     found
 }
@@ -447,7 +620,16 @@ pub fn attributes(value: &str) -> io::Result<(u32, u32)> {
                 'h' => 2,
                 's' => 4,
                 'a' => 32,
-                _ => return Err(io::Error::other("Attributregeln verwenden r, h, s oder a.")),
+                'd' => 16,
+                'c' => 2048,
+                'e' => 16384,
+                'o' => 4096,
+                't' => 256,
+                _ => {
+                    return Err(io::Error::other(
+                        "Attributregeln verwenden r, h, s, a, d (Ordner), c (komprimiert), e (verschlüsselt), o (offline) oder t (temporär).",
+                    ));
+                }
             };
         }
     }
@@ -459,24 +641,61 @@ pub fn attributes(value: &str) -> io::Result<(u32, u32)> {
     Ok((required, excluded))
 }
 
-fn hex_pattern(value: &str) -> io::Result<bytes::Regex> {
-    let value: String = value.chars().filter(|c| !c.is_whitespace()).collect();
-    if value.len() > 8192
-        || value.is_empty()
-        || value.len() % 2 != 0
-        || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
+fn hex_pattern(value: &str, ignore_case: bool) -> io::Result<bytes::Regex> {
+    if value.len() > 8192 || value.trim().is_empty() {
         return Err(io::Error::other(
-            "Gib vollständige Hex-Bytes wie 4D 5A ein.",
+            "Gib Hex-Bytes oder Text in Anführungszeichen ein.",
         ));
     }
-    let mut expression = String::with_capacity(value.len() * 2);
-    for index in (0..value.len()).step_by(2) {
-        expression.push_str("\\x");
-        expression.push_str(&value[index..index + 2]);
+    let mut chars = value.chars().peekable();
+    let mut data = Vec::new();
+    while let Some(ch) = chars.next() {
+        if ch.is_whitespace() {
+            continue;
+        }
+        if ch == '"' {
+            let mut text = String::new();
+            let mut closed = false;
+            for ch in chars.by_ref() {
+                if ch == '"' {
+                    closed = true;
+                    break;
+                }
+                text.push(ch);
+            }
+            if !closed {
+                return Err(io::Error::other(
+                    "Ein Anführungszeichen in der Hex-Suche ist offen.",
+                ));
+            }
+            let (bytes, _, errors) = encoding_rs::WINDOWS_1252.encode(&text);
+            if errors {
+                return Err(io::Error::other(
+                    "Text der Hex-Suche ist nicht in Windows-1252 darstellbar.",
+                ));
+            }
+            data.extend_from_slice(&bytes);
+        } else {
+            let first = ch
+                .to_digit(16)
+                .ok_or_else(|| io::Error::other("Ungültiges Hex-Byte."))?;
+            while chars.peek().is_some_and(|ch| ch.is_whitespace()) {
+                chars.next();
+            }
+            let second = chars
+                .next()
+                .and_then(|ch| ch.to_digit(16))
+                .ok_or_else(|| io::Error::other("Ein Hex-Byte ist unvollständig."))?;
+            data.push((first * 16 + second) as u8);
+        }
     }
+    if data.is_empty() {
+        return Err(io::Error::other("Die Hex-Suche ist leer."));
+    }
+    let expression: String = data.iter().map(|byte| format!("\\x{byte:02x}")).collect();
     bytes::RegexBuilder::new(&expression)
         .unicode(false)
+        .case_insensitive(ignore_case)
         .build()
         .map_err(io::Error::other)
 }

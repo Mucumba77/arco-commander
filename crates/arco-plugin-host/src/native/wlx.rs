@@ -46,6 +46,7 @@ pub fn view(
     library: &Library,
     file: &Path,
     embedded: Option<usize>,
+    force: bool,
     ready: impl FnOnce(Option<usize>) -> io::Result<()>,
 ) -> io::Result<()> {
     if !file.is_file() {
@@ -58,11 +59,23 @@ pub fn view(
     let parent = Window::new(file, embedded)?;
     let child = if let Some(load) = symbol::<Load<u16>>(library, b"ListLoadW") {
         let mut filename = wide(file.as_os_str());
-        unsafe { load(parent.0, filename.as_mut_ptr(), FORCE_SHOW) }
+        unsafe {
+            load(
+                parent.0,
+                filename.as_mut_ptr(),
+                if force { FORCE_SHOW } else { 0 },
+            )
+        }
     } else {
         let load: Load<u8> = required(library, b"ListLoad")?;
         let mut filename = ansi(file.as_os_str())?;
-        unsafe { load(parent.0, filename.as_mut_ptr(), FORCE_SHOW) }
+        unsafe {
+            load(
+                parent.0,
+                filename.as_mut_ptr(),
+                if force { FORCE_SHOW } else { 0 },
+            )
+        }
     };
     if child.is_null() || unsafe { IsChild(parent.0, child) } == 0 {
         return Err(io::Error::other(

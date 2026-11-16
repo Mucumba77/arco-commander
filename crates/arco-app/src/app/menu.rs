@@ -106,6 +106,7 @@ const MENU: &[Category] = &[
         primary: &[
             ("Alles markieren", "select-all"),
             ("Nach Maske markieren", "mask"),
+            ("Duplikatgruppen markieren …", "duplicate-select"),
             ("Auswahl umkehren", "invert"),
             ("Markierung aufheben", "clear-selection"),
             ("Auswahl wiederherstellen", "restore-selection"),

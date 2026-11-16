@@ -1,5 +1,5 @@
 #[cfg(windows)]
-use arco_core::plugin::{Interface, Operation};
+use arco_core::plugin::{Interface, Operation, ReadyMessage};
 use arco_core::plugin::{MAX_REQUEST, PROTOCOL_VERSION, Reply, Request, Row};
 use std::io::{self, BufRead, Read, Write};
 
@@ -13,7 +13,7 @@ fn main() -> io::Result<()> {
         && matches!(request.interface, Interface::Wlx)
         && matches!(
             request.operation,
-            Operation::Run | Operation::WlxEmbedded { .. }
+            Operation::Run | Operation::WlxEmbedded { .. } | Operation::WlxDetected { .. }
         )
     {
         let mut ready = false;
@@ -37,6 +37,21 @@ fn main() -> io::Result<()> {
         };
     }
     send_reply(request.and_then(inspect))
+}
+
+#[cfg(windows)]
+fn send_ready() -> io::Result<()> {
+    let mut output = io::stdout().lock();
+    serde_json::to_writer(
+        &mut output,
+        &ReadyMessage {
+            version: PROTOCOL_VERSION,
+            ready: true,
+        },
+    )
+    .map_err(io::Error::other)?;
+    output.write_all(b"\n")?;
+    output.flush()
 }
 
 fn send_reply(result: io::Result<Vec<Row>>) -> io::Result<()> {

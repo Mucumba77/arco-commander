@@ -17,6 +17,7 @@ enum Field {
     WriteTime,
     CreationDate,
     AccessDate,
+    Native(String),
     Plugin(Registration, WdxField),
 }
 
@@ -126,6 +127,21 @@ fn parse_criteria(
             "tc.writetime" => Field::WriteTime,
             "tc.creationdate" => Field::CreationDate,
             "tc.accessdate" => Field::AccessDate,
+            _ if token
+                .split_once('.')
+                .is_some_and(|(p, _)| p.eq_ignore_ascii_case("tc")) =>
+            {
+                let field = token.split_once('.').unwrap().1.split('.').next().unwrap();
+                if !arco_core::plugin::TC_METADATA_FIELDS
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(field))
+                {
+                    return Err(io::Error::other(format!(
+                        "Unbekanntes internes Dateifeld: {token}"
+                    )));
+                }
+                Field::Native(token.into())
+            }
             _ => resolve(token)?,
         };
         criteria.push(Criterion { field, range });
@@ -157,7 +173,7 @@ fn key(value: WdxValue, range: Option<&str>) -> Option<WdxKey> {
 
 fn builtin(field: &Field, candidate: &Candidate) -> Option<WdxValue> {
     let value = match field {
-        Field::Name => candidate.path.file_name()?.to_str()?,
+        Field::Name => candidate.path.file_stem()?.to_str()?,
         Field::Extension => candidate.path.extension()?.to_str()?,
         Field::Size => {
             let size = i64::try_from(candidate.metadata.len()).ok()?;
@@ -186,7 +202,7 @@ fn builtin(field: &Field, candidate: &Candidate) -> Option<WdxValue> {
                 display,
             });
         }
-        Field::Plugin(..) => return None,
+        Field::Plugin(..) | Field::Native(_) => return None,
     };
     Some(WdxValue {
         display: value.into(),
@@ -230,14 +246,31 @@ fn find(
                 })
             });
         } else {
-            candidates.retain_mut(|candidate| {
-                builtin(&criterion.field, candidate)
-                    .and_then(|value| key(value, range))
-                    .is_some_and(|key| {
-                        candidate.keys.push(key);
-                        true
+            let mut filtered = Vec::with_capacity(candidates.len());
+            for mut candidate in candidates {
+                files::check_cancel(&job.cancel)?;
+                let value = if let Field::Native(token) = &criterion.field {
+                    let value = arco_core::plugin::tc_field_with_cancel(
+                        token,
+                        &candidate.path,
+                        &candidate.metadata,
+                        &job.cancel,
+                    )?;
+                    value.map(|mut value| {
+                        if matches!(value.key, WdxKey::DateTime(_)) {
+                            value.key = WdxKey::Text(value.display.to_lowercase());
+                        }
+                        value
                     })
-            });
+                } else {
+                    builtin(&criterion.field, &candidate)
+                };
+                if let Some(key) = value.and_then(|value| key(value, range)) {
+                    candidate.keys.push(key);
+                    filtered.push(candidate);
+                }
+            }
+            candidates = filtered;
         }
         files::check_cancel(&job.cancel)?;
     }

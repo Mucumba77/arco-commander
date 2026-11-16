@@ -13,18 +13,56 @@ const RTF_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 
 pub(crate) enum Rich {
     Html(String),
-    Rtf(String),
+    Rtf {
+        html: String,
+        document: Vec<u8>,
+    },
     Media {
         element: &'static str,
         mime: &'static str,
+        native: bool,
     },
+}
+
+pub(super) fn is_media(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "wav"
+                    | "mp3"
+                    | "m4a"
+                    | "aac"
+                    | "flac"
+                    | "oga"
+                    | "ogg"
+                    | "opus"
+                    | "mp4"
+                    | "m4v"
+                    | "webm"
+                    | "ogv"
+                    | "avi"
+                    | "wmv"
+                    | "wma"
+                    | "asf"
+                    | "mov"
+                    | "mkv"
+                    | "mpg"
+                    | "mpeg"
+                    | "m2v"
+                    | "3gp"
+                    | "3g2"
+                    | "adts"
+            )
+        })
 }
 
 impl Rich {
     pub(crate) fn label(&self) -> &'static str {
         match self {
             Self::Html(_) => "HTML",
-            Self::Rtf(_) => "RTF",
+            Self::Rtf { .. } => "RTF",
             Self::Media {
                 element: "video", ..
             } => "Video",
@@ -61,17 +99,120 @@ pub(super) fn read(path: &Path, metadata: &Metadata) -> io::Result<Option<Rich>>
                 return Ok(None);
             }
             return Ok(if extension == "rtf" {
-                rtf_html(&data).map(Rich::Rtf)
+                match (rtf_html(&data), filtered_rtf(&data)) {
+                    (Some(html), Some(document)) => Some(Rich::Rtf { html, document }),
+                    _ => None,
+                }
             } else {
                 Some(Rich::Html(sanitize_html(&data)))
             });
+        }
+        "avi" | "wmv" | "asf" | "mov" | "mkv" | "mpg" | "mpeg" | "m2v" | "3gp" | "3g2" => {
+            return Ok(Some(Rich::Media {
+                element: "video",
+                mime: "application/octet-stream",
+                native: true,
+            }));
+        }
+        "wma" | "adts" => {
+            return Ok(Some(Rich::Media {
+                element: "audio",
+                mime: "application/octet-stream",
+                native: true,
+            }));
         }
         _ => return Ok(None),
     };
     Ok(Some(Rich::Media {
         element: media.0,
         mime: media.1,
+        native: false,
     }))
+}
+
+fn filtered_rtf(mut input: &[u8]) -> Option<Vec<u8>> {
+    input = input.strip_prefix(b"\xef\xbb\xbf").unwrap_or(input);
+    if !input.starts_with(b"{\\rtf") {
+        return None;
+    }
+    let mut output = Vec::new();
+    let mut groups = Vec::new();
+    let mut hidden = None;
+    while !input.is_empty() {
+        let before = input;
+        let (remaining, token) = read_token(input).ok()?;
+        let raw = &before[..before.len() - remaining.len()];
+        input = remaining;
+        match &token {
+            Token::StartGroup => {
+                if groups.len() >= 256 {
+                    return None;
+                }
+                groups.push(output.len());
+            }
+            Token::ControlWord { name, .. }
+                if matches!(
+                    name.as_str(),
+                    "object" | "objdata" | "filetbl" | "fldinst" | "datafield"
+                ) =>
+            {
+                if hidden.is_none() {
+                    output.truncate(*groups.last()?);
+                    hidden = Some(groups.len());
+                }
+            }
+            Token::EndGroup => {
+                let depth = groups.len();
+                groups.pop()?;
+                if hidden == Some(depth) {
+                    hidden = None;
+                    continue;
+                }
+            }
+            _ => (),
+        }
+        if hidden.is_none() {
+            output.extend_from_slice(raw);
+        }
+    }
+    (groups.is_empty() && output.starts_with(b"{\\rtf")).then_some(output)
+}
+
+#[cfg(test)]
+#[test]
+fn native_rtf_keeps_tables_lists_and_images_but_discards_objects_and_field_instructions() {
+    let original = br#"{\rtf1{\*\listtable{\list{\listlevel\levelnfc0\levelstartat1{\leveltext\'02\'00.;}}\listid10}}\ls1 Numbered\par\trowd\cellx1000\intbl Outer\pard\intbl\itap2 Inner\nestcell{\*\nesttableprops\trowd\itap2\cellx500\nestrow}\cell\row{\pict\pngblip 89504e47}{\object\objdata SECRET}{\field{\*\fldinst DDEAUTO SECRET2}{\fldrslt Visible}}}"#;
+    let safe = filtered_rtf(original).unwrap();
+    let text = String::from_utf8(safe).unwrap();
+    for preserved in [
+        "\\listtable",
+        "\\leveltext",
+        "\\nesttableprops",
+        "\\nestrow",
+        "\\pngblip",
+        "Visible",
+    ] {
+        assert!(text.contains(preserved), "{preserved}");
+    }
+    for discarded in ["\\object", "\\objdata", "SECRET", "DDEAUTO", "\\fldinst"] {
+        assert!(!text.contains(discarded), "{discarded}");
+    }
+    assert!(filtered_rtf(br"{\rtf1 unclosed").is_none());
+}
+
+#[cfg(test)]
+#[test]
+fn additional_media_types_are_classified_without_starting_a_player() {
+    let root = tempfile::tempdir().unwrap();
+    for extension in ["avi", "wmv", "wma", "mov", "mkv", "3gp", "adts"] {
+        let path = root.path().join(format!("neutral.{extension}"));
+        std::fs::write(&path, b"fixture").unwrap();
+        assert!(is_media(&path));
+        assert!(matches!(
+            read(&path, &path.metadata().unwrap()).unwrap(),
+            Some(Rich::Media { native: true, .. })
+        ));
+    }
 }
 
 fn sanitize_html(data: &[u8]) -> String {

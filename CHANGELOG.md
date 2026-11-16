@@ -1,5 +1,27 @@
 # Änderungen
 
+## 1.3.0 · 16. November 2026
+
+- Erweiterte Suchkriterien mit relativen Altersgrenzen, Uhrzeiten, Größeneinheiten, ganzen Wörtern, inverser Inhaltssuche, gemischten Hex-/Textbytes, DOS-Kodierungen und Office-/EPUB-Text.
+- Pfad- und Traverse-Filter, `@Dateilisten`, Partnerdateien anderer Erweiterung, Suchverlauf und F2-Nachsuche im Hauptdialog sowie im separaten Suchprozess.
+- Übergreifende Archivsuche mit getrennter Herkunft, Passwortunterstützung und sicherer Trefferübernahme für einzelne beziehungsweise gemischte Ursprünge.
+- Bzip2-/XZ-Streams ohne gespeicherten Mitgliedsnamen lassen sich auflisten und durchsuchen. Fehlende Größen werden begrenzt und abbrechbar ermittelt.
+- Eigener Duplikatauswahldialog mit Ordner-, Namens-, Suchprofil- und WDX-Filtern sowie priorisiertem Erhalt einer Kopie. Zusätzliche interne TC-Dateifelder einschließlich Windows- und Medienmetadaten.
+- Native schreibgeschützte RichEdit-RTF-Darstellung und zusätzliche Windows-Medienformate über optionales Media Foundation; sichtbare Fehler und erreichbare Mediensteuerung.
+- Vollständige dokumentierte WLX-Erkennungsgrammatik, geordnete Vorschau-Fallbacks und begrenzte Miniatur-Batches. Plugin-Protokoll **13** erfordert den Neubau beider Hosts.
+- Korrigierter Plugin-Broker für Prozesse ohne Konsoleneingabe: abgeschlossene Anfragen schließen ihre Eingabepipe, damit der Host zuverlässig beendet wird. Interaktive Anmeldungen bleiben während des Austauschs möglich.
+- Getrennte Zeitbudgets für das Laden einer Plugin-DLL und kurze SDK-Aufrufe. Eine Startmeldung beginnt das 10-Sekunden-Limit für Miniaturen und WFX-Standardansichten erst nach dem Laden; Abbruch bleibt auch während des Ladens möglich.
+- Erweiterte Umbenennmasken, globale Zähler, NFC, englische Titelschreibung, bedingte und formatierte WDX-Felder, relative Zielunterordner, automatische Kollisionsnummern sowie Umordnen/Entfernen in der Vorschau mit neu berechneten Zählern.
+- FTP-Inhaltsvergleich verarbeitet HASH-Antworten mit und ohne Bytebereich sowie mehrzeilige Antworten. Teilbereiche, unpassende Dateinamen oder Prüfsummen werden nicht als vollständiger Inhaltsnachweis verwendet.
+- Zusätzliche unabhängige Referenzdaten für Archive, Synchronisierung, Metadaten, Prüfsummen und Teil-/Kodierformate; reproduzierbare SDK-Testquellen und ergänzte englische/französische Übersetzungen. Fenstertests bleiben beim Projektinhaber.
+
+### Veröffentlichung und Prüfung
+
+- Bereich 3 ist im definierten Matrixumfang TOOL-01–TOOL-13 implementiert: 13/13 IDs. Fenster-, Codec-, Drucker- und direkte TC-Gegenprüfungen werden separat geführt.
+- 310 automatisierte Tests in acht Suiten bestanden; 38 explizite Umgebungsfälle im Standardlauf ausgelassen. Zusätzlich 16 erfolgreiche Referenz-Testläufe für SDK-Plugins, Archive, Medienmetadaten und lokalen FTP-Abgleich.
+- Portables Windows-x64-Paket mit beiden Plugin-Hosts (Protokoll 13), ZIP-SFX, neuer Werkzeuganleitung, Abschlussnachweis und Drittanbieterhinweisen.
+- Paketierung mit `--no-app-run`: kein Start von Arco Commander, auch nicht für `--version` oder `--help`. Fenster- und Windows-10-Abnahme bleiben beim Projektinhaber.
+
 ## 1.2.0 · 15. November 2026
 
 ### Dialoge und Bedienung

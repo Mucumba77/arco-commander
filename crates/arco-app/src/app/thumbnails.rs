@@ -62,13 +62,14 @@ impl App {
                     self.profile
                         .plugins
                         .iter()
-                        .filter(|entry| {
-                            entry.enabled
-                                && entry.interface == Interface::Wlx
-                                && !entry.masks.is_empty()
-                        })
+                        .filter(|entry| entry.enabled && entry.interface == Interface::Wlx)
                         .filter_map(|entry| {
-                            Some((entry.path.clone(), files::compile_masks(&entry.masks).ok()?))
+                            let masks = if entry.masks.is_empty() {
+                                "*"
+                            } else {
+                                &entry.masks
+                            };
+                            Some((entry.clone(), files::compile_masks(masks).ok()?))
                         })
                         .collect::<Vec<_>>()
                 })
@@ -99,6 +100,10 @@ impl App {
                     if cancel.load(Ordering::Relaxed) {
                         break;
                     }
+                    let Ok(detection) = plugin::WlxDetection::for_registration(&plugin, &cancel)
+                    else {
+                        continue;
+                    };
                     let pending: Vec<_> = requests
                         .iter()
                         .zip(&images)
@@ -107,26 +112,38 @@ impl App {
                             let path = request.path();
                             (image.is_none()
                                 && path.file_name().is_some_and(|name| masks.is_match(name)))
-                            .then(|| Some((index, request.snapshot()?)))
+                            .then(|| {
+                                let snapshot = request.snapshot()?;
+                                let detected = plugin::WlxFile::read(path, &cancel).ok()?;
+                                detection
+                                    .matches(&detected, false)
+                                    .then_some((index, snapshot))
+                            })
                             .flatten()
                         })
                         .collect();
                     if pending.is_empty() {
                         continue;
                     }
-                    let paths = pending
-                        .iter()
-                        .map(|(index, _)| requests[*index].1.path().to_path_buf())
-                        .collect();
-                    if let Ok(bitmaps) = plugin::wlx_thumbnails(&plugin, paths, &cancel) {
-                        for (index, bitmap) in bitmaps {
-                            let (row, before) = &pending[index];
-                            if files::ensure_unchanged(requests[*row].1.path(), before).is_ok() {
-                                images[*row].1 = image::RgbaImage::from_raw(
-                                    bitmap.width,
-                                    bitmap.height,
-                                    bitmap.rgba,
-                                );
+                    for batch in pending.chunks(plugin::WLX_BITMAP_BATCH) {
+                        if cancel.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let paths = batch
+                            .iter()
+                            .map(|(index, _)| requests[*index].1.path().to_path_buf())
+                            .collect();
+                        if let Ok(bitmaps) = plugin::wlx_thumbnails(&plugin.path, paths, &cancel) {
+                            for (index, bitmap) in bitmaps {
+                                let (row, before) = &batch[index];
+                                if files::ensure_unchanged(requests[*row].1.path(), before).is_ok()
+                                {
+                                    images[*row].1 = image::RgbaImage::from_raw(
+                                        bitmap.width,
+                                        bitmap.height,
+                                        bitmap.rgba,
+                                    );
+                                }
                             }
                         }
                     }

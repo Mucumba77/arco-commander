@@ -163,7 +163,36 @@ impl ExternalArchiver {
         command
             .args(["l", "-slt", "-ba", "-sccUTF-8", "--"])
             .arg(archive);
-        parse_list(&capture(command, LIST_LIMIT, cancel)?)
+        let listing = capture(command, LIST_LIMIT, cancel)?;
+        if let Some(name) = stream_name(archive)? {
+            let text = std::str::from_utf8(&listing).map_err(io::Error::other)?;
+            let sizes = text
+                .lines()
+                .filter_map(|line| line.strip_prefix("Size = "))
+                .collect::<Vec<_>>();
+            let size = match sizes.as_slice() {
+                [""] | [] => {
+                    let mut command = self.command();
+                    command.args(["x", "-so", "-spd", "--"]).arg(archive);
+                    measure_stream(command, cancel)?
+                }
+                [value] => value
+                    .parse::<u64>()
+                    .map_err(|_| io::Error::other("archive stream has no verified size"))?,
+                _ => {
+                    return Err(io::Error::other(
+                        "a compressed stream must have one payload",
+                    ));
+                }
+            };
+            let entries = parse_list_fallback(&listing, Some((&name, size)))?;
+            if entries.len() != 1 || entries[0].directory || entries[0].encrypted {
+                return Err(io::Error::other("invalid compressed-stream catalog"));
+            }
+            Ok(entries)
+        } else {
+            parse_list(&listing)
+        }
     }
 
     pub fn test(&self, archive: &Path, cancel: &AtomicBool) -> io::Result<usize> {
@@ -228,10 +257,10 @@ impl ExternalArchiver {
             }
             let output = NamedTempFile::new_in(current)?;
             let mut command = self.command();
-            command
-                .args(["x", "-so", "-spd", "--"])
-                .arg(archive)
-                .arg(&entry.raw_path);
+            command.args(["x", "-so", "-spd", "--"]).arg(archive);
+            if !entry.raw_path.is_empty() {
+                command.arg(&entry.raw_path);
+            }
             stream_to_file(command, output.reopen()?, entry.size, cancel)?;
             zone.apply(output.path())?;
             crate::archive_view::preserve_timestamp(output.as_file(), entry.modified)?;
@@ -364,7 +393,76 @@ fn parse_version(line: &str) -> Option<(u32, u32)> {
     Some((major.parse().ok()?, minor.parse().ok()?))
 }
 
+fn stream_name(path: &Path) -> io::Result<Option<String>> {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !matches!(
+        extension.as_str(),
+        "bz2" | "xz" | "gz" | "tgz" | "zst" | "tzst"
+    ) {
+        return Ok(None);
+    }
+    let mut magic = Vec::new();
+    File::open(path)?.take(6).read_to_end(&mut magic)?;
+    let recognized = match extension.as_str() {
+        "bz2" => {
+            magic.starts_with(b"BZh")
+                && magic
+                    .get(3)
+                    .is_some_and(|byte| (b'1'..=b'9').contains(byte))
+        }
+        "xz" => magic.starts_with(b"\xfd7zXZ\0"),
+        "gz" | "tgz" => magic.starts_with(&[0x1f, 0x8b, 8]),
+        "zst" | "tzst" => magic.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]),
+        _ => false,
+    };
+    if !recognized {
+        return Ok(None);
+    }
+    let mut name = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| io::Error::other("Der Stream benötigt einen gültigen Unicode-Dateinamen."))?
+        .to_owned();
+    if matches!(extension.as_str(), "tgz" | "tzst") {
+        name.push_str(".tar");
+    }
+    archives::checked_archive_path(&name)?;
+    Ok(Some(name))
+}
+
+fn measure_stream(mut command: Command, cancel: &AtomicBool) -> io::Result<u64> {
+    files::check_cancel(cancel)?;
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let output = child.stdout.take().expect("stdout piped");
+    let reader = std::thread::spawn(move || {
+        let size = io::copy(&mut output.take(EXTRACT_LIMIT + 1), &mut io::sink())?;
+        if size > EXTRACT_LIMIT {
+            return Err(io::Error::other(
+                "Der komprimierte Stream überschreitet das Größenlimit.",
+            ));
+        }
+        Ok(size)
+    });
+    let status = wait("7-Zip", &mut child, cancel);
+    let size = reader
+        .join()
+        .map_err(|_| io::Error::other("Stream-Größenprüfung fehlgeschlagen"))??;
+    status?;
+    Ok(size)
+}
+
 fn parse_list(bytes: &[u8]) -> io::Result<Vec<Entry>> {
+    parse_list_fallback(bytes, None)
+}
+
+fn parse_list_fallback(bytes: &[u8], fallback: Option<(&str, u64)>) -> io::Result<Vec<Entry>> {
     let text = std::str::from_utf8(bytes).map_err(io::Error::other)?;
     let mut entries = Vec::new();
     let mut fields = BTreeMap::new();
@@ -383,8 +481,9 @@ fn parse_list(bytes: &[u8]) -> io::Result<Vec<Entry>> {
         if fields.is_empty() {
             continue;
         }
-        let name = fields
-            .get("Path")
+        let original = fields.get("Path").copied().filter(|path| !path.is_empty());
+        let name = original
+            .or_else(|| fallback.map(|(name, _)| name))
             .ok_or_else(|| io::Error::other("archive entry has no path"))?;
         let attributes = fields.get("Attributes").copied().unwrap_or_default();
         let symbolic = ["Symbolic Link", "Hard Link", "Alternate Stream"]
@@ -408,7 +507,15 @@ fn parse_list(bytes: &[u8]) -> io::Result<Vec<Entry>> {
             || fields.get("Mode").is_some_and(|mode| mode.starts_with('d'));
         let size = fields
             .get("Size")
+            .filter(|value| !value.is_empty())
             .and_then(|value| value.parse::<u64>().ok())
+            .or_else(|| {
+                fields
+                    .get("Size")
+                    .is_none_or(|value| value.is_empty())
+                    .then(|| fallback.map(|(_, size)| size))
+                    .flatten()
+            })
             .ok_or_else(|| io::Error::other("archive entry has no verified size"))?;
         let normalized = name.replace('\\', "/");
         let normalized = if directory {
@@ -429,7 +536,7 @@ fn parse_list(bytes: &[u8]) -> io::Result<Vec<Entry>> {
             ));
         }
         entries.push(Entry {
-            raw_path: (*name).to_string(),
+            raw_path: original.unwrap_or_default().to_string(),
             path,
             directory,
             size,
@@ -551,6 +658,59 @@ fn wait(tool: &str, child: &mut Child, cancel: &AtomicBool) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires 7-Zip 26.05+ via ARCO_7ZIP_PATH"]
+    fn independent_nameless_bzip2_and_xz_streams_list_and_extract_with_verified_sizes() {
+        let fixture = tempfile::tempdir().unwrap();
+        let input = fixture.path().join("input");
+        fs::create_dir(&input).unwrap();
+        let name = "Grüße.txt";
+        let cancel = AtomicBool::new(false);
+        let archiver = ExternalArchiver::discover(&cancel).unwrap();
+        for (format, suffix) in [("bzip2", "bz2"), ("xz", "xz")] {
+            for (label, body) in [
+                ("text", b"independent stream payload".as_slice()),
+                ("empty", b"".as_slice()),
+            ] {
+                fs::write(input.join(name), body).unwrap();
+                let archive = fixture.path().join(format!("{label}-{name}.{suffix}"));
+                let mut command = archiver.command();
+                command
+                    .current_dir(&input)
+                    .args(["a", &format!("-t{format}"), "-y"])
+                    .arg(&archive)
+                    .arg(name);
+                capture(command, 64 * 1024, &cancel).unwrap();
+                let entries = archiver.list(&archive, &cancel).unwrap();
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].size, body.len() as u64);
+                assert!(entries[0].raw_path.is_empty());
+                let target = fixture.path().join(format!("{format}-{label}"));
+                fs::create_dir(&target).unwrap();
+                assert_eq!(archiver.extract(&archive, &target, &cancel).unwrap(), 1);
+                assert_eq!(
+                    fs::read(target.join(format!("{label}-{name}"))).unwrap(),
+                    body
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unnamed_streams_require_a_safe_name_and_verified_size_and_never_become_archive_members() {
+        use super::*;
+        let listing = b"Size = \nPacked Size = \n\n";
+        assert!(parse_list(listing).is_err());
+        let entries = parse_list_fallback(listing, Some(("payload.txt", 12))).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, Path::new("payload.txt"));
+        assert_eq!(entries[0].size, 12);
+        assert!(entries[0].raw_path.is_empty());
+        assert!(parse_list_fallback(listing, Some(("../escape", 12))).is_err());
+        assert!(parse_list_fallback(b"Size = invalid\n\n", Some(("payload.txt", 12))).is_err());
+        assert!(parse_list_fallback(listing, Some(("payload.txt", EXTRACT_LIMIT + 1))).is_err());
+    }
+
     use super::*;
 
     #[test]

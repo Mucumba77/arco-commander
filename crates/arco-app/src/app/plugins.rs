@@ -574,16 +574,46 @@ impl App {
     }
 
     pub(crate) fn preview_registered(&mut self, file: &Path) -> bool {
-        let Some(entry) = self
+        let entries = self
             .profile
             .plugins
             .iter()
-            .find(|entry| !entry.masks.is_empty() && entry.matches(Interface::Wlx, file))
+            .filter(|entry| entry.matches(Interface::Wlx, file))
             .cloned()
-        else {
+            .collect::<Vec<_>>();
+        if entries.is_empty() {
             return false;
-        };
-        self.run_plugin(entry.interface, entry.path, file.to_owned(), entry.name);
+        }
+        let file = file.to_owned();
+        self.viewer = None;
+        self.staged_preview = None;
+        self.start_job("Lese Vorschau …", false, move |job| {
+            let detected = plugin::WlxFile::read(&file, &job.cancel)?;
+            for entry in entries {
+                arco_core::files::check_cancel(&job.cancel)?;
+                let Ok(rule) = plugin::WlxDetection::for_registration(&entry, &job.cancel) else {
+                    continue;
+                };
+                if !rule.matches(&detected, false)
+                    || (crate::preview::internal_multimedia(&file) && !rule.multimedia)
+                {
+                    continue;
+                }
+                if let Ok(host) = plugin::detected_view(&entry.path, &file, &job.cancel) {
+                    return Ok(Outcome::PluginPreview(entry.name, host));
+                }
+            }
+            arco_core::files::check_cancel(&job.cancel)?;
+            match crate::preview::read(&file)? {
+                crate::preview::Content::Page(mode, page) => Ok(Outcome::Preview {
+                    path: file,
+                    mode,
+                    page,
+                }),
+                crate::preview::Content::Image(image) => Ok(Outcome::Image(file, image)),
+                crate::preview::Content::Rich(rich) => Ok(Outcome::RichPreview(file, rich)),
+            }
+        });
         true
     }
 

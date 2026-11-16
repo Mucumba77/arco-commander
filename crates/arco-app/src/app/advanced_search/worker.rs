@@ -15,19 +15,71 @@ use std::sync::{
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zeroize::{Zeroize, Zeroizing};
 
-const REQUEST_LIMIT: u64 = 4 * 1024 * 1024;
+const REQUEST_LIMIT: u64 = 64 * 1024 * 1024;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn refinement_scope_survives_request_serialization_and_ignores_the_name_at_depth_zero() {
+        let fixture = tempfile::tempdir().unwrap();
+        let directory = fixture.path().join("docs");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("child.txt"), b"child").unwrap();
+        let file = fixture.path().join("one.txt");
+        std::fs::write(&file, b"one").unwrap();
+        let task = SearchTask {
+            query: Options::default().compile().unwrap().only_roots(),
+            roots: vec![directory.clone(), file.clone()],
+            options: Options {
+                names: "~[invalid regex".into(),
+                selected_only: true,
+                depth: "0".into(),
+                ..Default::default()
+            },
+            indexed: None,
+            show_hidden: true,
+            ignore: None,
+            executable: None,
+            archive: None,
+            archive_scopes: Vec::new(),
+            password: None,
+            wdx: None,
+        };
+        let request = Request::from_task(&task, &Profile::default());
+        let encoded = serde_json::to_value(request).unwrap();
+        assert_eq!(encoded["only_roots"], true);
+        let request: Request = serde_json::from_value(encoded).unwrap();
+        let found = request.search(&AtomicBool::new(false), |_| {}).unwrap();
+        assert!(found.directory.errors.is_empty());
+        assert_eq!(found.directory.entries.len(), 2);
+        assert!(
+            found
+                .directory
+                .entries
+                .iter()
+                .all(|entry| entry.path == directory || entry.path == file)
+        );
+    }
+}
 const REPLY_LIMIT: u64 = 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct Request {
     #[serde(default)]
     progress: bool,
+    #[serde(default)]
+    only_roots: bool,
+    #[serde(default)]
+    scoped: bool,
     options: Options,
     roots: Vec<OsString>,
     show_hidden: bool,
     ignore: Option<String>,
     executable: Option<PathBuf>,
     archive: Option<Archive>,
+    #[serde(default)]
+    archive_scopes: Vec<super::global_archives::Scope>,
     password: Option<String>,
     wdx: Option<WdxSearchProfile>,
     plugins: Vec<Registration>,
@@ -53,6 +105,8 @@ impl Drop for Request {
 enum Reply {
     Progress(super::Update),
     Entry {
+        #[serde(default)]
+        archive_file: Option<OsString>,
         path: OsString,
         name: OsString,
         kind: Kind,
@@ -95,6 +149,8 @@ impl Request {
         });
         Self {
             progress: true,
+            only_roots: task.query.searches_only_roots(),
+            scoped: task.indexed.as_ref().is_some_and(|(scoped, _)| *scoped),
             options: task.options.clone(),
             roots: task
                 .roots
@@ -109,6 +165,7 @@ impl Request {
                 folder: archive.folder.clone(),
                 catalog_password: archive.password().map(str::to_owned),
             }),
+            archive_scopes: task.archive_scopes.clone(),
             password: task.password.as_ref().map(|password| password.to_string()),
             wdx,
             plugins,
@@ -147,13 +204,22 @@ impl Request {
             .map(|wdx| super::super::wdx::search::ProfileFilter::compile(wdx, &self.plugins))
             .transpose()?;
         SearchTask {
-            query: super::compile_search(&self.options)?,
+            query: if self.only_roots {
+                let mut options = self.options.clone();
+                options.names = "*".into();
+                super::compile_search(&options)?.only_roots()
+            } else {
+                super::compile_search(&self.options)?
+            },
             roots: self.roots.iter().map(PathBuf::from).collect(),
             options: self.options.clone(),
-            indexed: self
-                .options
-                .everything()
-                .map(|(scoped, expression)| (scoped, expression.to_owned())),
+            indexed: (!self.only_roots)
+                .then(|| {
+                    self.options
+                        .everything()
+                        .map(|(scoped, expression)| (scoped || self.scoped, expression.to_owned()))
+                })
+                .flatten(),
             show_hidden: self.show_hidden,
             ignore: self
                 .ignore
@@ -163,6 +229,7 @@ impl Request {
                 .map(Arc::new),
             executable: self.executable.clone(),
             archive,
+            archive_scopes: self.archive_scopes.clone(),
             password: password(self.password.as_ref()),
             wdx,
         }
@@ -245,6 +312,7 @@ pub(crate) fn run() -> io::Result<()> {
                 write_frame(
                     &mut output,
                     &Reply::Entry {
+                        archive_file: entry.archive_file.map(|file| file.as_os_str().to_owned()),
                         path: entry.path.into_os_string(),
                         name: entry.name,
                         kind: entry.kind,
@@ -400,12 +468,14 @@ fn read_reply(output: impl Read, mut progress: impl FnMut(super::Update)) -> io:
     let mut input = BufReader::new(output);
     let mut frame = Vec::new();
     let mut entries = Vec::new();
+    let mut origins = std::collections::BTreeMap::<PathBuf, Arc<PathBuf>>::new();
     let mut errors = Vec::new();
     loop {
         read_frame(&mut input, &mut frame, REPLY_LIMIT)?;
         match serde_json::from_slice(&frame).map_err(io::Error::other)? {
             Reply::Progress(update) => progress(update),
             Reply::Entry {
+                archive_file,
                 path,
                 name,
                 kind,
@@ -425,6 +495,13 @@ fn read_reply(output: impl Read, mut progress: impl FnMut(super::Update)) -> io:
                 let mut entry =
                     Entry::from_remote(path.into(), kind, size, modified).with_display_name(name);
                 entry.hidden = hidden;
+                entry.archive_file = archive_file.map(|file| {
+                    let path = PathBuf::from(file);
+                    origins
+                        .entry(path.clone())
+                        .or_insert_with(|| Arc::new(path))
+                        .clone()
+                });
                 entry.attributes = attributes;
                 entries.push(entry);
             }

@@ -18,6 +18,14 @@ use walkdir::WalkDir;
 const SEARCH_CONTENT_LIMIT: u64 = 64 * 1024 * 1024;
 const DIFF_LIMIT: u64 = 4 * 1024 * 1024;
 
+mod duplicate_selection;
+#[cfg(test)]
+mod reference;
+pub use duplicate_selection::{
+    DuplicateSelection, duplicate_folder_matches, select_duplicates,
+    select_duplicates_with_profiles,
+};
+
 pub struct Search {
     pub names: GlobSet,
     pub text: Option<Regex>,
@@ -708,10 +716,10 @@ impl Hash {
             "sha256" => Some(Self::Sha256),
             "sha384" => Some(Self::Sha384),
             "sha512" => Some(Self::Sha512),
-            "sha3_224" => Some(Self::Sha3_224),
-            "sha3_256" => Some(Self::Sha3_256),
-            "sha3_384" => Some(Self::Sha3_384),
-            "sha3_512" => Some(Self::Sha3_512),
+            "sha3_224" | "sha3224" => Some(Self::Sha3_224),
+            "sha3_256" | "sha3256" => Some(Self::Sha3_256),
+            "sha3_384" | "sha3384" => Some(Self::Sha3_384),
+            "sha3_512" | "sha3512" => Some(Self::Sha3_512),
             "blake3" | "bk3" => Some(Self::Blake3),
             _ => None,
         }

@@ -51,6 +51,7 @@ impl Options {
     }
 }
 
+#[derive(Clone)]
 pub struct FileMasks {
     include: globset::GlobSet,
     exclude: globset::GlobSet,

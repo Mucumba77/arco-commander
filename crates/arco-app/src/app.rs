@@ -70,6 +70,7 @@ mod wfx_panel;
 mod wfx_prompts;
 mod wlx;
 pub(crate) use administration::Setup as AdministrationSetup;
+pub(crate) use advanced_search::DuplicateSelectionState;
 pub(crate) use advanced_search::duplicate_result;
 pub(crate) use advanced_search::{Review as AdvancedSearchReview, Setup as AdvancedSearchSetup};
 pub(crate) use archive_actions::{ArchiveInput, StagedPreview};
@@ -111,6 +112,8 @@ pub enum Outcome {
     Notice(String),
     Text(String, String),
     SearchReview(Box<AdvancedSearchReview>),
+    SearchFeed(Box<AdvancedSearchReview>, Option<ArchiveTab>),
+    DuplicateSelection(i32, Result<std::collections::HashSet<PathBuf>, String>),
     FileComment(PathBuf, Option<String>),
     PrintPreview(String, String),
     TransferFinished(TransferReport),
@@ -562,6 +565,7 @@ pub struct App {
     pub(crate) configuration_draft: Option<configuration::Draft>,
     buttonbar_switches: [Vec<Vec<arco_core::profile::ButtonbarButton>>; 2],
     separate_search: Option<advanced_search::SeparateSearch>,
+    search_history: advanced_search::History,
     pub(crate) preview_image_path: Option<PathBuf>,
     quick_open: bool,
     quick_requested: Option<QuickTarget>,
@@ -653,6 +657,7 @@ pub fn run(
         configuration_draft: None,
         buttonbar_switches: Default::default(),
         separate_search: None,
+        search_history: Default::default(),
         preview_image_path: None,
         quick_open: false,
         quick_requested: None,
@@ -1075,6 +1080,24 @@ pub fn run(
     window.on_text_draft_apply(move |form| {
         if let Some(app) = weak.upgrade() {
             app.borrow_mut().submit_text_draft(form);
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_duplicate_action(move |action, form, index| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut().duplicate_action(action, form, index);
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_rename_review_action(move |action, index| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut().rename_review_action(action, index);
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_search_result_action(move |action, index| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut().search_result_action(action, index);
         }
     });
     let weak = Rc::downgrade(&app);
@@ -2270,30 +2293,54 @@ impl App {
             let plugin = self.quick_plugin(&target);
             let sender = self.sender.clone();
             std::thread::spawn(move || {
-                let plugin_error = if let Some((plugin, parent)) = plugin {
-                    match arco_core::plugin::embedded_view(
-                        &plugin.path,
-                        &target.path,
-                        parent,
-                        &cancel,
-                    ) {
-                        Ok((host, window)) => {
-                            let preview =
-                                wlx::EmbeddedPreview::new(plugin.name, parent, window, host);
-                            let _ = sender.send(Event::QuickPreview(
-                                target,
-                                wlx::QuickResult::Embedded(Box::new(preview)),
-                            ));
-                            return;
+                let mut plugin_error = None;
+                if let Some((plugins, parent)) = plugin {
+                    let file = arco_core::plugin::WlxFile::read(&target.path, &cancel);
+                    for plugin in plugins {
+                        if cancel.load(Ordering::Relaxed) {
+                            break;
                         }
-                        Err(error) if !cancel.load(Ordering::Relaxed) => {
-                            Some(format!("WLX-Plugin „{}“ · {error}", plugin.name))
+                        let detection =
+                            arco_core::plugin::WlxDetection::for_registration(&plugin, &cancel);
+                        let accepted = match (&file, detection) {
+                            (Ok(file), Ok(rule)) => {
+                                rule.matches(file, false)
+                                    && (!preview::internal_multimedia(&target.path)
+                                        || rule.multimedia)
+                            }
+                            (_, Err(error)) => {
+                                plugin_error =
+                                    Some(format!("WLX-Plugin „{}“ · {error}", plugin.name));
+                                false
+                            }
+                            _ => false,
+                        };
+                        if !accepted {
+                            continue;
                         }
-                        Err(_) => None,
+                        match arco_core::plugin::detected_embedded_view(
+                            &plugin.path,
+                            &target.path,
+                            parent,
+                            &cancel,
+                        ) {
+                            Ok((host, window)) => {
+                                let preview =
+                                    wlx::EmbeddedPreview::new(plugin.name, parent, window, host);
+                                let _ = sender.send(Event::QuickPreview(
+                                    target,
+                                    wlx::QuickResult::Embedded(Box::new(preview)),
+                                ));
+                                return;
+                            }
+                            Err(error) if !cancel.load(Ordering::Relaxed) => {
+                                plugin_error =
+                                    Some(format!("WLX-Plugin „{}“ · {error}", plugin.name));
+                            }
+                            Err(_) => (),
+                        }
                     }
-                } else {
-                    None
-                };
+                }
                 if cancel.load(Ordering::Relaxed) {
                     let _ = sender.send(Event::QuickPreview(
                         target,
@@ -2509,6 +2556,10 @@ impl App {
             Outcome::Properties(sheet) => self.show_properties(*sheet),
             Outcome::MetadataEdited(title, report) => self.finish_metadata_edit(title, report),
             Outcome::SearchReview(review) => self.show_search_review(review),
+            Outcome::SearchFeed(review, archive) => self.apply_search_feed(*review, archive),
+            Outcome::DuplicateSelection(revision, result) => {
+                self.complete_duplicate_selection(revision, result)
+            }
             Outcome::FileComment(path, comment) => self.show_comment(path, comment),
             Outcome::PrintPreview(title, body) => self.show_print_preview(title, body),
             Outcome::TransferFinished(report) => self.complete_transfer(report),

@@ -27,15 +27,17 @@ sha3 = "0.10"
 similar = "2"
 tempfile.workspace = true
 url = "2.5"
+unicode-normalization = "0.1"
 walkdir = "2"
 zeroize = "1"
 zip = { version = "=9.4.1", default-features = false, features = [
     "aes-crypto", "bzip2", "deflate", "deflate64", "legacy-zip", "lzma", "ppmd", "xz", "zstd",
 ] }
 kamadak-exif = "0.6.2"
+lofty = "=0.25.5"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_SystemServices", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_SystemServices", "Win32_System_Threading"] }
 
 [lints]
 workspace = true

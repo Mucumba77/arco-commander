@@ -495,6 +495,7 @@ pub struct Tab {
     pub anchor: usize,
     pub(crate) view_override: Option<Mode>,
     pub(crate) view_scope: Option<Scope>,
+    pub(crate) duplicate_groups: Option<Vec<Vec<PathBuf>>>,
     pub(crate) manual_view: bool,
     pub(crate) wdx_sorted: bool,
     pub extra: String,
@@ -615,6 +616,7 @@ impl Tab {
             anchor: cursor,
             view_override: None,
             view_scope: None,
+            duplicate_groups: None,
             manual_view: false,
             wdx_sorted: false,
             extra: String::new(),
@@ -803,6 +805,7 @@ impl Tab {
         extra: String,
         focus: Option<&Path>,
     ) {
+        self.duplicate_groups = None;
         for (index, entry) in entries.iter_mut().enumerate() {
             entry.list_order = index;
         }
@@ -1082,6 +1085,10 @@ impl Tab {
 
     pub fn display_rows(&self) -> impl Iterator<Item = &Entry> {
         self.model.visible.iter().map(|&index| &self.entries[index])
+    }
+
+    pub(crate) fn all_entries(&self) -> &[Entry] {
+        &self.entries
     }
 
     pub(crate) fn file_model(&self) -> Rc<FileModel> {

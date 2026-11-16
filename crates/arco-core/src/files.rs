@@ -21,6 +21,8 @@ pub enum Kind {
 
 #[derive(Clone, Debug)]
 pub struct Entry {
+    /// Search-only provenance. Cleared before an entry enters an operational file panel.
+    pub archive_file: Option<std::sync::Arc<PathBuf>>,
     pub path: PathBuf,
     pub name: OsString,
     pub kind: Kind,
@@ -70,6 +72,7 @@ impl Entry {
     ) -> Self {
         let name = path.file_name().unwrap_or_default().to_os_string();
         Self {
+            archive_file: None,
             sort_name: name.to_string_lossy().to_lowercase(),
             sort_extension: if kind == Kind::Directory {
                 String::new()
@@ -119,6 +122,7 @@ impl Entry {
         #[cfg(not(windows))]
         let attributes = u32::from(meta.permissions().readonly());
         Self {
+            archive_file: None,
             path,
             hidden: is_hidden(meta, &name),
             name,
@@ -134,6 +138,7 @@ impl Entry {
     }
 }
 
+#[derive(Clone)]
 pub struct Directory {
     pub entries: Vec<Entry>,
     pub errors: Vec<String>,

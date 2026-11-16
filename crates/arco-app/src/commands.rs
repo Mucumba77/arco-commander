@@ -34,6 +34,7 @@ pub(crate) struct RenameDraft {
     extension: String,
     search: crate::RenameSearch,
     separate: bool,
+    focused: Option<PathBuf>,
 }
 
 pub enum Pending {
@@ -47,8 +48,9 @@ pub enum Pending {
     SelectionFile(PathBuf, Option<Vec<PathBuf>>),
     DuplicateSearch(PathBuf),
     DuplicateFields(PathBuf),
+    DuplicateSelection(Box<crate::app::DuplicateSelectionState>),
     AdvancedSearch(crate::app::AdvancedSearchSetup),
-    SearchReview(Box<crate::app::AdvancedSearchReview>),
+    SearchReview(Arc<crate::app::AdvancedSearchReview>),
     EditComment(PathBuf, Option<String>),
     EditMetadata(Vec<PathBuf>),
     Properties(Box<crate::app::properties::Sheet>),
@@ -406,6 +408,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("Pfad des aktiven Fensters kopieren", "copy-source-path"),
     ("Pfad des anderen Fensters kopieren", "copy-target-path"),
     ("Auswahl nach Maske", "mask"),
+    ("Duplikatgruppen markieren", "duplicate-select"),
     ("Auswahl umkehren", "invert"),
     ("Auswahl wiederherstellen", "restore-selection"),
     ("Detailansicht umschalten", "details"),
@@ -1153,7 +1156,9 @@ impl App {
             "wdx-inspect" => self.with_file(|app, path| app.plugin_dialog(Interface::Wdx, path)),
             "wfx-inspect" => self.plugin_dialog(Interface::Wfx, PathBuf::new()),
             "wlx-view" => self.with_file(|app, path| app.plugin_dialog(Interface::Wlx, path)),
+            "duplicate-select" => { if !self.duplicate_selection_from_panel() { self.status("Suche zuerst nach Duplikaten und übernimm die Ergebnisliste."); } }
             "mask" | "mask-add" | "mask-add-folders" | "mask-remove" | "mask-remove-files" => {
+                if matches!(command, "mask" | "mask-add" | "mask-add-folders") && self.duplicate_selection_from_panel() { return; }
                 let mode = match command {
                     "mask-add" | "mask-add-folders" => MaskEdit::Add {
                         folders: command == "mask-add-folders" || self.profile.layout.numpad_folders,
@@ -1413,7 +1418,8 @@ impl App {
             Pending::EditMetadata(paths) => self.apply_metadata_edit(paths, value)?,
             Pending::Properties(_) => (),
             Pending::AdvancedSearch(_) => (),
-            Pending::SearchReview(review) => self.use_search_results(*review, option),
+            Pending::SearchReview(review) => self.use_search_results((*review).clone(), option),
+            Pending::DuplicateSelection(_) => (),
             Pending::QuickFind => self.quick_find(value, option)?,
             Pending::SelectionFile(root, paths) => self.selection_file(root, paths, value)?,
             Pending::Utility(_) => (),
@@ -2759,6 +2765,12 @@ impl App {
                 first_only: search.first_only,
                 include_extension: !separate || search.include_extension,
                 substitute: search.substitute,
+                auto_number: search.auto_number,
+                case: search.case.index(),
+                counter_start: search.counter.start.into(),
+                counter_step: search.counter.step.into(),
+                counter_width: search.counter.width.into(),
+                counter_every: search.counter.every.into(),
             });
         }
         self.dialog(
@@ -2792,21 +2804,14 @@ impl App {
             extension: extension.into(),
             search: search.clone(),
             separate: self.ui().get_rename_separate(),
+            focused: None,
         });
         let extension = self.ui().get_rename_separate().then_some(extension);
-        let search = rename::SearchOptions {
-            find: search.find.to_string(),
-            replace: search.replacement.to_string(),
-            regex: search.regex,
-            wildcards: search.wildcards,
-            match_case: search.match_case,
-            first_only: search.first_only,
-            include_extension: search.include_extension,
-            substitute: search.substitute,
-        };
-        match search.compile().and_then(|search| {
-            self.plan_multi_rename(paths.clone(), mask, extension, search, times)
-        }) {
+        match rename_options(&search)
+            .and_then(|search| search.compile())
+            .and_then(|search| {
+                self.plan_multi_rename(paths.clone(), mask, extension, search, times)
+            }) {
             Ok(()) => {
                 if self.pending.is_none() {
                     self.close_dialog();
@@ -2923,6 +2928,51 @@ impl App {
         );
     }
 
+    pub(crate) fn rename_review_action(&mut self, action: i32, row: i32) {
+        if self.job.is_some() {
+            return;
+        }
+        let Some(Pending::ApplyRename(plan)) = &self.pending else {
+            return;
+        };
+        let entries = plan.entries().to_vec();
+        let Some(mut draft) = self.rename_draft.clone() else {
+            return;
+        };
+        let result = (|| -> io::Result<()> {
+            let old = draft.paths.clone();
+            draft.focused = reorder_rename(
+                &mut draft.paths,
+                &entries,
+                usize::try_from(row).map_err(io::Error::other)?,
+                action,
+            )?;
+            if old == draft.paths {
+                return Ok(());
+            }
+            if draft.paths.is_empty() {
+                self.rename_draft = None;
+                self.close_dialog();
+                self.status(
+                    "Alle Einträge aus der Vorschau entfernt. Keine Datei wurde verändert.",
+                );
+                return Ok(());
+            }
+            let search = rename_options(&draft.search)?.compile()?;
+            self.rename_draft = Some(draft.clone());
+            self.plan_multi_rename(
+                draft.paths,
+                &draft.mask,
+                draft.separate.then_some(draft.extension.as_str()),
+                search,
+                draft.times,
+            )
+        })();
+        if let Err(error) = result {
+            self.restore_rename_draft(&error.to_string());
+        }
+    }
+
     pub(crate) fn rename_review(&mut self, plan: rename::Plan) {
         let description = if plan.skipped_capture() == 0 {
             String::new()
@@ -2953,16 +3003,25 @@ impl App {
                     .to_string_lossy()
                     .as_ref()
                     .into(),
-                secondary: to
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .as_ref()
-                    .into(),
+                secondary: display_path(
+                    to.strip_prefix(from.parent().unwrap_or(from)).unwrap_or(to),
+                )
+                .into(),
                 detail: display_path(from.parent().unwrap_or(from)).into(),
                 kind: "rename".into(),
             })
             .collect::<Vec<_>>();
+        let focus = self
+            .rename_draft
+            .as_ref()
+            .and_then(|draft| draft.focused.as_ref())
+            .and_then(|focused| {
+                plan.entries()
+                    .iter()
+                    .position(|(source, _)| source == focused)
+            })
+            .unwrap_or(0);
+        self.ui().set_review_selection(focus as i32);
         self.ui()
             .set_review_rows(slint::ModelRc::from(std::rc::Rc::new(
                 slint::VecModel::from(rows),
@@ -4046,9 +4105,115 @@ pub(crate) fn compatibility_command(name: &str) -> Option<&'static str> {
     }
 }
 
+fn reorder_rename(
+    paths: &mut Vec<PathBuf>,
+    entries: &[(PathBuf, PathBuf)],
+    row: usize,
+    action: i32,
+) -> io::Result<Option<PathBuf>> {
+    let source = &entries
+        .get(row)
+        .ok_or_else(|| io::Error::other("Der Vorschau-Eintrag fehlt."))?
+        .0;
+    let index = paths
+        .iter()
+        .position(|path| path == source)
+        .ok_or_else(|| io::Error::other("Der Umbenennentwurf hat sich geändert."))?;
+    if action == 2 {
+        paths.remove(index);
+        return Ok(entries
+            .get(row + 1)
+            .or_else(|| row.checked_sub(1).and_then(|row| entries.get(row)))
+            .map(|entry| entry.0.clone()));
+    }
+    let other = match action {
+        0 => row.checked_sub(1),
+        1 => row.checked_add(1).filter(|row| *row < entries.len()),
+        _ => return Err(io::Error::other("Unbekannte Vorschauaktion.")),
+    };
+    if let Some(other) = other {
+        let other = paths
+            .iter()
+            .position(|path| path == &entries[other].0)
+            .ok_or_else(|| io::Error::other("Der Nachbareintrag fehlt."))?;
+        paths.swap(index, other);
+    }
+    Ok(Some(source.clone()))
+}
+
+fn rename_options(search: &crate::RenameSearch) -> io::Result<rename::SearchOptions> {
+    Ok(rename::SearchOptions {
+        find: search.find.to_string(),
+        replace: search.replacement.to_string(),
+        regex: search.regex,
+        wildcards: search.wildcards,
+        match_case: search.match_case,
+        first_only: search.first_only,
+        include_extension: search.include_extension,
+        substitute: search.substitute,
+        auto_number: search.auto_number,
+        counter: rename::CounterSettings {
+            start: search.counter_start.to_string(),
+            step: search.counter_step.to_string(),
+            width: search.counter_width.to_string(),
+            every: search.counter_every.to_string(),
+        },
+        case: rename::NameCase::from_index(search.case)?,
+    })
+}
+
 #[cfg(test)]
 mod operation_dialog_tests {
     use super::extraction_target;
+
+    #[test]
+    fn reordering_and_excluding_preview_rows_recalculates_counters_without_touching_files() {
+        use super::*;
+        let fixture = tempfile::tempdir().unwrap();
+        let mut paths = ["a.txt", "b.txt", "c.txt"]
+            .map(|name| fixture.path().join(name))
+            .to_vec();
+        for (index, path) in paths.iter().enumerate() {
+            fs::write(path, index.to_string()).unwrap();
+        }
+        let preview = |paths: &[PathBuf]| {
+            rename::Plan::new_with_masks(paths, "Item_[C]", Some("[E]"), None, None, |_, _| None)
+                .unwrap()
+        };
+        let plan = preview(&paths);
+        let focused = reorder_rename(&mut paths, plan.entries(), 0, 1).unwrap();
+        let plan = preview(&paths);
+        assert_eq!(focused, Some(fixture.path().join("a.txt")));
+        assert_eq!(
+            plan.entries()[0],
+            (
+                fixture.path().join("b.txt"),
+                fixture.path().join("Item_1.txt")
+            )
+        );
+        assert_eq!(
+            plan.entries()[1],
+            (
+                fixture.path().join("a.txt"),
+                fixture.path().join("Item_2.txt")
+            )
+        );
+        reorder_rename(&mut paths, plan.entries(), 1, 2).unwrap();
+        let plan = preview(&paths);
+        assert_eq!(
+            plan.entries()[1],
+            (
+                fixture.path().join("c.txt"),
+                fixture.path().join("Item_2.txt")
+            )
+        );
+        for (index, name) in ["a.txt", "b.txt", "c.txt"].into_iter().enumerate() {
+            assert_eq!(
+                fs::read_to_string(fixture.path().join(name)).unwrap(),
+                index.to_string()
+            );
+        }
+    }
 
     #[test]
     fn extraction_target_resolves_against_the_shown_folder_and_accepts_quoted_paths() {

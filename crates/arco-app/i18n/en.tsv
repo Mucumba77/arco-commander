@@ -1112,3 +1112,101 @@ Doppelklick/Enter: Umbenennvorschau · F2: bearbeiten · Einfg: neu · Entf: ent
 Einlesen	Read
 Dateipfad	File path
 Fehlerdetails	Error details
+Zähler und abschließende Schreibweise	Counter and final capitalization
+Startwert	Start value
+Schrittweite	Increment
+Stellen (a = automatisch)	Digits (a = automatic)
+Dateien je Zählerwert	Files per counter value
+Schreibweise unverändert	Keep capitalization
+GROSSBUCHSTABEN	UPPERCASE
+kleinbuchstaben	lowercase
+Erster Buchstabe groß	First letter uppercase
+Jedes Wort Groß	Capitalize Each Word
+Englische Titelschreibung	English title capitalization
+Abschließende Schreibweise	Final capitalization
+Gilt nach Suchen und Ersetzen. [C] verwendet diese Zählerwerte; [C10+5:3] definiert eigene Werte.	Applied after search and replace. [C] uses these counter settings; [C10+5:3] defines its own settings.
+1. Priorität	1st priority
+2. Priorität bei Gleichstand	2nd priority for ties
+3. Priorität bei Gleichstand	3rd priority for ties
+Abspielen	Play
+Alle Größen	All sizes
+Alle Zeitstempel	All timestamps
+Alle größten Dateien	All largest files
+Alle kleinsten Dateien	All smallest files
+Alle neuesten Dateien	All newest files
+Alle ältesten Dateien	All oldest files
+Auswahl / Name	Selection / name
+Auswahl übernehmen	Apply selection
+Dateien filtern	Filter files
+Datum innerhalb der Gruppe	Date within group
+Duplikate markieren	Select duplicates
+Erste Datei	First file
+Filter kombinieren, Vorschau prüfen und die Auswahl ins Dateifenster übernehmen.	Combine filters, review the preview and apply the selection to the file panel.
+Gruppe / Größe	Group / size
+Größe innerhalb der Gruppe	Size within group
+Größer als die kleinste Datei	Larger than the smallest file
+Größte Datei	Largest file
+Keine	None
+Kleiner als die größte Datei	Smaller than the largest file
+Kleinste Datei	Smallest file
+Lautstärke	Volume
+Leertaste: Wiedergabe/Pause · Pfeile: Position/Lautstärke · M: stumm · Esc: zurück	Space: play/pause · Arrows: position/volume · M: mute · Esc: back
+Letzte Datei	Last file
+Markieren nach Name / Erweiterung	Select by name / extension
+Markierung entfernen nach Name / Erweiterung	Deselect by name / extension
+Masken: *.txt *.jpg | alt* · RegEx: <Muster · Suchprofil: >Profilname. Namens-, Ordner-, Datums- und Größenfilter werden mit UND kombiniert.	Masks: *.txt *.jpg | old* · RegEx: <pattern · Search profile: >profile name. Name, folder, date and size filters are combined with AND.
+Medien werden vorbereitet …	Preparing media …
+Medienvorschau nicht verfügbar	Media preview unavailable
+Mindestens eine Datei je Gruppe unmarkiert lassen	Keep at least one file unselected per group
+Mindestens eine Kopie behalten	Keep at least one copy
+Muster nur auf den direkten Elternordner anwenden	Apply pattern to the immediate parent folder only
+Neuer als die älteste Datei	Newer than the oldest file
+Neueste Datei	Newest file
+Nicht älter als	Not older than
+Nur ganze Wörter	Whole words only
+Ordner auswählen	Select folders
+Ordnermuster	Folder pattern
+Ordnername, Pfad oder *Muster*	Folder name, path or *pattern*
+Position	Position
+Stopp	Stop
+Stumm	Mute
+Text in Office-Dateien und EPUB durchsuchen	Search text in Office files and EPUB
+Text nicht enthalten	Text not contained
+Ton einschalten	Unmute
+Umkehren	Invert
+Unterordner bei Auswahl und Mustern einbeziehen	Include subfolders in selection and patterns
+Verwende Quelldaten anzeigen oder ein passendes WLX-Plugin.	Use Show source data or a suitable WLX plugin.
+Vorschau aktualisieren	Update preview
+Vorschau nach Änderungen aktualisieren. Es werden keine Dateien verändert.	Update the preview after changes. No files will be changed.
+Älter als	Older than
+Älter als die neueste Datei	Older than the newest file
+Älteste Datei	Oldest file
+Andere Suchergebnisse verwerfen	Discard other search results
+Archive vergleichen	Compare archives
+Archivvergleich	Archive comparison
+Auch Dateien in Archiven durchsuchen	Also search files inside archives
+Aus Vorschau entfernen	Remove from preview
+Automatische Kodierung	Automatic encoding
+Bei Namenskonflikten freie Nummer anhängen	Append an available number on name conflicts
+Ein Archiv: Treffer direkt übernehmen. Mehrere Ursprünge: lokale Dateien und passende Archive als Dateiliste übernehmen.	One archive: use matching members directly. Multiple origins: use local files and matching archive containers as a file list.
+Erweiterte Dateisuche	Advanced file search
+FTP-Kopie prüfen	Review FTP copy
+FTP-Verzeichnis	FTP directory
+Herunterladen	Download
+Letzte Suchergebnisse anzeigen	Show recent search results
+Nach oben	Move up
+Nach unten	Move down
+Nächstes Suchergebnis	Next search result
+Ordner öffnen	Open folder
+Strg+Pfeil auf/ab: Reihenfolge · Entf: nur aus Vorschau entfernen. Zähler und Zielnamen werden neu berechnet.	Ctrl+Up/Down: reorder · Delete: remove from preview only. Counters and target names are recalculated.
+Suchorte mit Zeilenumbruch oder Semikolon trennen. @Dateiliste liest UTF-8, UTF-16 oder Windows-1252. Leer sucht im aktiven Ordner.	Separate search locations with newlines or semicolons. @FileList reads UTF-8, UTF-16 or Windows-1252. Leave empty to search the active folder.
+Suchverlauf	Search history
+Synchronisieren	Synchronize
+Synchronisierung prüfen	Review synchronization
+Textkodierung	Text encoding
+Treffer durchsuchen (F2)	Search within results (F2)
+Vorheriges Suchergebnis	Previous search result
+Ziel	Destination
+Partnerdatei mit anderer Erweiterung	Partner file with another extension
+Partner-Erweiterungen	Partner extensions
+Partnerdatei fehlt	Partner file is missing

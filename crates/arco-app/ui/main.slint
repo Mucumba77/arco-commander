@@ -1,4 +1,6 @@
 import { MessageCard, MessageData, MessageLevel, MessageStat, TextDraftCard, TextDraftData, TextDraftForm, TextDraftKind } from "auxiliary-dialogs.slint";
+import { DuplicateCard, DuplicateForm, DuplicateFolder } from "duplicate-dialog.slint";
+export { DuplicateForm, DuplicateFolder } from "duplicate-dialog.slint";
 export { MessageData, MessageLevel, MessageStat, TextDraftData, TextDraftForm, TextDraftKind } from "auxiliary-dialogs.slint";
 import { ConfigurationCard, ConfigurationData, ConfigurationForm, ConfigurationItem, ConfigurationKind } from "configuration-dialog.slint";
 export { ConfigurationData, ConfigurationForm, ConfigurationItem, ConfigurationKind } from "configuration-dialog.slint";
@@ -184,10 +186,18 @@ export struct SearchDraft {
     content-mode: int,
     encoding: int,
     match-case: bool,
+    whole-words: bool,
+    content-not: bool,
+    office-xml: bool,
+    archives: bool,
+    partner-extensions: string,
+    partner-not: bool,
     minimum-bytes: string,
     maximum-bytes: string,
     modified-from: string,
     modified-to: string,
+    minimum-age: string,
+    maximum-age: string,
     attributes: string,
     depth: string,
     roots: string,
@@ -197,6 +207,8 @@ export struct SearchDraft {
 }
 
 component SearchCard inherits Rectangle {
+    in property <bool> history-available;
+    callback show-history();
     in property <int> focus-cycle;
     changed focus-cycle => { if (root.focus-cycle > 0) { names.focus(); } else { search-button.focus(); } }
     in property <SearchDraft> draft;
@@ -216,10 +228,13 @@ component SearchCard inherits Rectangle {
     function values() -> SearchDraft {
         return { names: names.text, content: contents.text, content-mode: mode.current-index,
             encoding: encoding.current-index, match-case: match-case.checked,
+            whole-words: whole-words.checked, content-not: content-not.checked, office-xml: office-xml.checked, archives: archives.checked,
+            partner-extensions: partner-extensions.text, partner-not: partner-not.checked,
             minimum-bytes: min-size.text, maximum-bytes: max-size.text,
             modified-from: from-date.text, modified-to: to-date.text,
+            minimum-age: min-age.text, maximum-age: max-age.text,
             attributes: attrs.text, depth: depth.text, roots: roots.text, selected-only: selection.checked,
-            wdx-profile: wdx-name.text, archive-password: root.archive ? archive-password.text : "" };
+            wdx-profile: wdx-name.text, archive-password: root.archive || archives.checked ? archive-password.text : "" };
     }
     function reset() {
         names.text = root.draft.names;
@@ -227,10 +242,18 @@ component SearchCard inherits Rectangle {
         mode.current-index = root.draft.content-mode;
         encoding.current-index = root.draft.encoding;
         match-case.checked = root.draft.match-case;
+        whole-words.checked = root.draft.whole-words;
+        content-not.checked = root.draft.content-not;
+        office-xml.checked = root.draft.office-xml;
+        archives.checked = root.draft.archives;
+        partner-extensions.text = root.draft.partner-extensions;
+        partner-not.checked = root.draft.partner-not;
         min-size.text = root.draft.minimum-bytes;
         max-size.text = root.draft.maximum-bytes;
         from-date.text = root.draft.modified-from;
         to-date.text = root.draft.modified-to;
+        min-age.text = root.draft.minimum-age;
+        max-age.text = root.draft.maximum-age;
         attrs.text = root.draft.attributes;
         depth.text = root.draft.depth;
         roots.text = root.draft.roots;
@@ -245,6 +268,7 @@ component SearchCard inherits Rectangle {
         padding: 20px;
         spacing: 10px;
         DialogHeading { icon: @image-url("icons/search.svg"); title: @tr("Erweiterte Dateisuche"); subtitle: root.base; wrap-subtitle: false; }
+        if root.history-available : Button { text: @tr("Letzte Suchergebnisse anzeigen"); clicked => { root.show-history(); } }
         ScrollView {
             vertical-stretch: 1;
             viewport-width: self.visible-width;
@@ -260,9 +284,19 @@ component SearchCard inherits Rectangle {
                     spacing: 6px;
                     mode := ComboBox { model: ["Jeder Inhalt", "Text", "Regulärer Ausdruck", "Hex"]; width: 160px; accessible-label: "Art der Inhaltssuche"; }
                     contents := LineEdit { placeholder-text: "Suchtext oder Hex-Bytes"; enabled: mode.current-index > 0; }
-                    encoding := ComboBox { model: ["Automatisch", "UTF-8", "UTF-16 LE", "UTF-16 BE", "Windows-1252"]; enabled: mode.current-index == 1 || mode.current-index == 2; width: 130px; accessible-label: "Textkodierung"; }
+                    encoding := ComboBox { model: ["Automatisch", "UTF-8", "UTF-16 LE", "UTF-16 BE", "Windows-1252", "DOS-850", "Alle Kodierungen", "DOS-437"]; enabled: mode.current-index == 1 || mode.current-index == 2; width: 150px; accessible-label: "Textkodierung"; }
                 }
                 match-case := CheckBox { text: "Groß- und Kleinschreibung bei Text und RegEx beachten"; }
+                HorizontalLayout {
+                    whole-words := CheckBox { text: @tr("Nur ganze Wörter"); enabled: mode.current-index == 1 || mode.current-index == 2; }
+                    content-not := CheckBox { text: @tr("Text nicht enthalten"); enabled: mode.current-index > 0; }
+                }
+                office-xml := CheckBox { text: @tr("Text in Office-Dateien und EPUB durchsuchen"); enabled: mode.current-index > 0; }
+                FieldLabel { text: @tr("Partnerdatei mit anderer Erweiterung"); }
+                HorizontalLayout {
+                    partner-extensions := LineEdit { placeholder-text: "jpg;png"; accessible-label: @tr("Partner-Erweiterungen"); }
+                    partner-not := CheckBox { text: @tr("Partnerdatei fehlt"); enabled: partner-extensions.text != ""; }
+                }
                 }
                 FormSection {
                     title: @tr("Größe, Datum und Attribute");
@@ -278,14 +312,21 @@ component SearchCard inherits Rectangle {
                     VerticalLayout { spacing: 4px; FieldLabel { text: @tr("Bis JJJJ-MM-TT"); } to-date := LineEdit { placeholder-text: @tr("Bis JJJJ-MM-TT"); accessible-label: @tr("Bis JJJJ-MM-TT"); } }
                     VerticalLayout { spacing: 4px; FieldLabel { text: @tr("Unterordnerebenen, 0 für keine"); } depth := LineEdit { placeholder-text: @tr("Unterordnerebenen, 0 für keine"); accessible-label: @tr("Unterordnerebenen, 0 für keine"); } }
                 }
+                HorizontalLayout {
+                    spacing: 6px;
+                    VerticalLayout { spacing: 4px; FieldLabel { text: @tr("Älter als"); } min-age := LineEdit { placeholder-text: "z. B. 7 d oder 12 h"; accessible-label: @tr("Älter als"); } }
+                    VerticalLayout { spacing: 4px; FieldLabel { text: @tr("Nicht älter als"); } max-age := LineEdit { placeholder-text: "z. B. 14 d oder 2 w"; accessible-label: @tr("Nicht älter als"); } }
+                }
                 }
                 FormSection {
                     title: @tr("Suchorte");
                 selection := CheckBox { text: "Nur markierte Dateien und Ordner durchsuchen"; enabled: root.has-selection; }
-                Text { text: root.archive ? "Je Zeile ein relativer Archivpfad. Leer sucht ab dem geöffneten Archivordner." : "Je Zeile ein Pfad. Leer sucht im aktiven Ordner."; color: Colors.muted; wrap: word-wrap; }
+                Text { text: root.archive ? "Je Zeile ein relativer Archivpfad. Leer sucht ab dem geöffneten Archivordner." : @tr("Suchorte mit Zeilenumbruch oder Semikolon trennen. @Dateiliste liest UTF-8, UTF-16 oder Windows-1252. Leer sucht im aktiven Ordner."); color: Colors.muted; wrap: word-wrap; }
                 roots := TextEdit { min-height: 68px; max-height: 90px; enabled: !selection.checked; accessible-label: @tr("Suchorte"); }
+                archives := CheckBox { visible: !root.archive; text: @tr("Auch Dateien in Archiven durchsuchen"); }
+                Text { visible: !root.archive && archives.checked; text: @tr("Ein Archiv: Treffer direkt übernehmen. Mehrere Ursprünge: lokale Dateien und passende Archive als Dateiliste übernehmen."); color: Colors.muted; wrap: word-wrap; }
                 archive-password := LineEdit {
-                    visible: root.archive;
+                    visible: root.archive || archives.checked;
                     input-type: password;
                     placeholder-text: "Archivpasswort für Inhaltssuche (optional)";
                     accessible-label: "Archivpasswort";
@@ -327,6 +368,11 @@ component SearchCard inherits Rectangle {
 }
 
 export component SearchWindow inherits Window {
+    in property <bool> history-available;
+    in property <bool> history-back;
+    in property <bool> history-next;
+    in property <string> history-status;
+    callback result-action(int, int);
     title: @tr("Arco Commander · Dateisuche");
     default-font-family: "Segoe UI";
     default-font-size: 14px;
@@ -373,6 +419,8 @@ export component SearchWindow inherits Window {
         VerticalLayout {
             padding: 12px; spacing: 12px;
             if !root.busy && !root.has-result : SearchCard {
+                history-available: root.history-available;
+                show-history => { root.result-action(7, 0); }
                 focus-cycle: root.focus-cycle;
                 draft: root.draft; base: root.base; profiles: root.profiles; wdx-profiles: root.wdx-profiles;
                 archive: root.archive; notice: root.notice; has-selection: root.has-selection;
@@ -399,12 +447,15 @@ export component SearchWindow inherits Window {
                 }
             }
             if !root.busy && root.has-result : ReviewCard {
+                history-visible: true; history-back: root.history-back; history-next: root.history-next; history-status: root.history-status;
+                can-refine: root.can-use;
+                search-action(action) => { root.result-action(action, 0); }
                 focus-cycle: root.focus-cycle;
                 kind: OperationKind.search; title: root.result-title; description: root.working-base;
                 rows: root.result-rows; primary-label: @tr("Name"); secondary-label: @tr("Typ / Größe");
                 confirm-label: @tr("Treffer übernehmen"); can-confirm: root.can-use; can-edit: true;
                 confirm(choice) => { root.use-results(); }
-                edit => { root.has-result = false; }
+                edit => { root.result-action(2, 0); }
                 close => { root.close-search(); }
                 copy-all => { root.copy-text(root.result-list); }
                 copy-row(text) => { root.copy-text(text); }
@@ -1022,6 +1073,12 @@ export struct RenameSearch {
     first-only: bool,
     include-extension: bool,
     substitute: bool,
+    auto-number: bool,
+    case: int,
+    counter-start: string,
+    counter-step: string,
+    counter-width: string,
+    counter-every: string,
 }
 
 component RenameCard inherits Rectangle {
@@ -1057,6 +1114,10 @@ component RenameCard inherits Rectangle {
                         regex: regex.checked, wildcards: wildcards.checked,
                         match-case: match-case.checked, first-only: first-only.checked,
                         include-extension: self.include-extension, substitute: substitute.checked,
+                        auto-number: auto-number.checked,
+                        case: casing.current-index,
+                        counter-start: counter-start.text, counter-step: counter-step.text,
+                        counter-width: counter-width.text, counter-every: counter-every.text,
                     });
                 }
                 changed revision => {
@@ -1070,6 +1131,12 @@ component RenameCard inherits Rectangle {
                     first-only.checked = root.search.first-only;
                     self.include-extension = root.search.include-extension;
                     substitute.checked = root.search.substitute;
+                    auto-number.checked = root.search.auto-number;
+                    casing.current-index = root.search.case;
+                    counter-start.text = root.search.counter-start;
+                    counter-step.text = root.search.counter-step;
+                    counter-width.text = root.search.counter-width;
+                    counter-every.text = root.search.counter-every;
                     name-mask.focus();
                 }
                 FormSection {
@@ -1104,6 +1171,17 @@ component RenameCard inherits Rectangle {
                         }
                     }
                 }
+                }
+                FormSection { title: @tr("Zähler und abschließende Schreibweise");
+                    HorizontalLayout { spacing: 10px;
+                        VerticalLayout { spacing: 4px; FieldLabel { text: @tr("Startwert"); } counter-start := LineEdit { text: root.search.counter-start; accessible-label: @tr("Startwert"); edited => { root.edited(); } } }
+                        VerticalLayout { spacing: 4px; FieldLabel { text: @tr("Schrittweite"); } counter-step := LineEdit { text: root.search.counter-step; accessible-label: @tr("Schrittweite"); edited => { root.edited(); } } }
+                        VerticalLayout { spacing: 4px; FieldLabel { text: @tr("Stellen (a = automatisch)"); } counter-width := LineEdit { text: root.search.counter-width; accessible-label: @tr("Stellen (a = automatisch)"); edited => { root.edited(); } } }
+                        VerticalLayout { spacing: 4px; FieldLabel { text: @tr("Dateien je Zählerwert"); } counter-every := LineEdit { text: root.search.counter-every; accessible-label: @tr("Dateien je Zählerwert"); edited => { root.edited(); } } }
+                    }
+                    casing := ComboBox { model: [@tr("Schreibweise unverändert"), @tr("GROSSBUCHSTABEN"), @tr("kleinbuchstaben"), @tr("Erster Buchstabe groß"), @tr("Jedes Wort Groß"), @tr("Englische Titelschreibung")]; current-index: root.search.case; accessible-label: @tr("Abschließende Schreibweise"); selected => { root.edited(); } }
+                    auto-number := CheckBox { text: @tr("Bei Namenskonflikten freie Nummer anhängen"); checked: root.search.auto-number; toggled => { root.edited(); } }
+                    Text { text: @tr("Gilt nach Suchen und Ersetzen. [C] verwendet diese Zählerwerte; [C10+5:3] definiert eigene Werte."); color: Colors.muted; wrap: word-wrap; font-size: 11px; }
                 }
                 FormSection { title: @tr("Suchen und Ersetzen");
                 HorizontalLayout {
@@ -2741,6 +2819,11 @@ export component MainWindow inherits Window {
     in-out property <int> plugin-selection: -1;
     in property <bool> sync-has-selection;
     in property <SearchDraft> search-draft;
+    in property <bool> search-history-available;
+    in property <bool> search-history-back;
+    in property <bool> search-history-next;
+    in property <string> search-history-status;
+    callback search-result-action(int, int);
     in property <[string]> search-profiles;
     in property <string> search-notice;
     in property <string> search-base;
@@ -2803,6 +2886,8 @@ export component MainWindow inherits Window {
     in property <string> review-confirm-label;
     in property <bool> review-can-confirm;
     in property <bool> review-can-edit;
+    in property <int> review-selection;
+    callback rename-review-action(int, int);
     callback copy-review-text(string);
     callback rename-edited();
     callback viewer-control(int, string, int);
@@ -2813,6 +2898,10 @@ export component MainWindow inherits Window {
     callback configuration-apply(ConfigurationForm, ConfigurationItem);
     callback copy-message(bool);
     callback text-draft-apply(TextDraftForm);
+    in-out property <DuplicateForm> duplicate-form;
+    in property <int> duplicate-generation;
+    in property <string> duplicate-summary;
+    callback duplicate-action(int, DuplicateForm, int);
     callback navigation-action(int, int);
     callback navigation-filter(string);
     callback navigation-file(bool, string) -> string;
@@ -3338,6 +3427,8 @@ export component MainWindow inherits Window {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 draft: root.search-draft;
+                history-available: root.search-history-available;
+                show-history => { root.search-result-action(7, 0); }
                 profiles: root.search-profiles;
                 notice: root.search-notice;
                 base: root.search-base;
@@ -3691,6 +3782,19 @@ export component MainWindow inherits Window {
                 perform(option) => { root.submit("", "", option); } close => { root.action("close-dialog"); }
             }
         }
+        if root.dialog-kind == "duplicate-selection" : Rectangle {
+            width: 100%; height: 100%; background: #050a14a8; TouchArea { }
+            DuplicateCard {
+                width: min(parent.width - 36px, 1100px); height: min(parent.height - 36px, 850px);
+                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                form <=> root.duplicate-form; rows: root.review-rows;
+                revision: root.dialog-revision; generation: root.duplicate-generation;
+                focus-cycle: root.dialog-focus-cycle; notice: root.dialog-notice;
+                summary: root.duplicate-summary;
+                action(operation, form, index) => { root.duplicate-action(operation, form, index); }
+                copy(text) => { root.copy-review-text(text); }
+            }
+        }
         if root.dialog-kind == "multi-rename" : Rectangle {
             width: 100%; height: 100%; background: #050a14a8; TouchArea { }
             RenameCard {
@@ -3716,12 +3820,19 @@ export component MainWindow inherits Window {
                 options: root.dialog-options;
                 confirm-label: root.dialog-kind == "management-review" ? root.review-confirm-label : root.dialog-kind == "search-results" ? @tr("Treffer übernehmen") : @tr("Umbenennen");
                 can-confirm: root.review-can-confirm; can-edit: root.review-can-edit;
+                history-visible: root.dialog-kind == "search-results";
+                history-back: root.search-history-back; history-next: root.search-history-next; history-status: root.search-history-status;
+                can-refine: root.dialog-kind == "search-results" && root.review-can-confirm && !root.job-active;
+                search-action(action) => { root.search-result-action(action, 0); }
+                can-reorder: root.dialog-kind == "rename-review" && root.review-can-edit && !root.job-active;
+                initial-selection: root.dialog-kind == "rename-review" ? root.review-selection : 0;
+                reorder(action, index) => { root.rename-review-action(action, index); }
                 confirm(choice) => { root.submit("", "", choice); }
-                edit => { root.action("rename-back"); } close => { root.action("close-dialog"); }
+                edit => { if root.dialog-kind == "search-results" { root.search-result-action(2, 0); } else { root.action("rename-back"); } } close => { root.action("close-dialog"); }
                 copy-all => { root.action("copy-result"); } copy-row(text) => { root.copy-review-text(text); }
             }
         }
-        if root.dialog-kind != "message" && root.dialog-kind != "text-draft" && root.dialog-kind != "configuration" && root.dialog-kind != "navigation-list" && root.dialog-kind != "navigation-editor" && root.dialog-kind != "utility" && root.dialog-kind != "metadata" && root.dialog-kind != "permissions" && root.dialog-kind != "properties" && root.dialog-kind != "ftp-edit" && root.dialog-kind != "management-review" && root.dialog-kind != "multi-rename" && root.dialog-kind != "rename-review" && root.dialog-kind != "search-results" && root.dialog-kind != "" && root.dialog-kind != "input" && root.dialog-kind != "confirm" && root.dialog-kind != "viewer" && root.dialog-kind != "image" && root.dialog-kind != "transfer" && root.dialog-kind != "transfer-manager" && root.dialog-kind != "archive-pack" && root.dialog-kind != "archive-pack-profile" && root.dialog-kind != "archive-extract" && root.dialog-kind != "palette" && root.dialog-kind != "text-comparison" && root.dialog-kind != "transfer-conflict" && root.dialog-kind != "advanced-search" && root.dialog-kind != "sync-options" && root.dialog-kind != "sync-review" && root.dialog-kind != "ftp-browser" && root.dialog-kind != "ftp-profiles" && root.dialog-kind != "plugins" : Rectangle {
+        if root.dialog-kind != "duplicate-selection" && root.dialog-kind != "message" && root.dialog-kind != "text-draft" && root.dialog-kind != "configuration" && root.dialog-kind != "navigation-list" && root.dialog-kind != "navigation-editor" && root.dialog-kind != "utility" && root.dialog-kind != "metadata" && root.dialog-kind != "permissions" && root.dialog-kind != "properties" && root.dialog-kind != "ftp-edit" && root.dialog-kind != "management-review" && root.dialog-kind != "multi-rename" && root.dialog-kind != "rename-review" && root.dialog-kind != "search-results" && root.dialog-kind != "" && root.dialog-kind != "input" && root.dialog-kind != "confirm" && root.dialog-kind != "viewer" && root.dialog-kind != "image" && root.dialog-kind != "transfer" && root.dialog-kind != "transfer-manager" && root.dialog-kind != "archive-pack" && root.dialog-kind != "archive-pack-profile" && root.dialog-kind != "archive-extract" && root.dialog-kind != "palette" && root.dialog-kind != "text-comparison" && root.dialog-kind != "transfer-conflict" && root.dialog-kind != "advanced-search" && root.dialog-kind != "sync-options" && root.dialog-kind != "sync-review" && root.dialog-kind != "ftp-browser" && root.dialog-kind != "ftp-profiles" && root.dialog-kind != "plugins" : Rectangle {
             background: #050a14a8;
             width: 100%; height: 100%;
             TouchArea { }

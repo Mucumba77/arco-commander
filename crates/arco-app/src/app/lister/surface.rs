@@ -11,6 +11,8 @@ mod windows {
         HandleError, HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle,
     };
     use std::borrow::Cow;
+    use std::rc::Rc;
+    use std::time::Duration;
     use webview2_com::Microsoft::Web::WebView2::Win32::{
         COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY_CORS, ICoreWebView2_3,
     };
@@ -46,8 +48,11 @@ mod windows {
     }
 
     pub(crate) struct Surface {
-        webview: WebView,
-        _profile: tempfile::TempDir,
+        _timer: Option<slint::Timer>,
+        webview: Option<Rc<WebView>>,
+        rich_text: Option<arco_windows::RichTextView>,
+        media: Option<Rc<arco_windows::MediaView>>,
+        _profile: Option<tempfile::TempDir>,
     }
 
     impl Surface {
@@ -67,9 +72,40 @@ mod windows {
                 })
                 .flatten()
                 .ok_or_else(|| io::Error::other("Kein Windows-Fenster für den Lister."))?;
+            if let Rich::Rtf { document, .. } = &preview {
+                let rich_text =
+                    arco_windows::RichTextView::new(parent.0.hwnd.get() as usize, document)?;
+                return Ok(Self {
+                    _timer: None,
+                    webview: None,
+                    rich_text: Some(rich_text),
+                    media: None,
+                    _profile: None,
+                });
+            }
+            let mut media = None;
+            let preview = if matches!(&preview, Rich::Media { native: true, .. }) {
+                match arco_windows::MediaView::new(parent.0.hwnd.get() as usize, path) {
+                    Ok(player) => {
+                        media = Some(Rc::new(player));
+                        preview
+                    }
+                    Err(error) => Rich::Html(format!(
+                        "<h2>{}</h2><p>{}</p><p>{}</p>",
+                        crate::locale::tr("Medienvorschau nicht verfügbar"),
+                        ammonia::clean_text(&error.to_string()),
+                        crate::locale::tr(
+                            "Verwende Quelldaten anzeigen oder ein passendes WLX-Plugin."
+                        )
+                    )),
+                }
+            } else {
+                preview
+            };
             let (media_path, html) = document(path, preview, light)?;
             let profile = tempfile::tempdir()?;
             let mut context = wry::WebContext::new(Some(profile.path().to_path_buf()));
+            let ipc_media = media.clone();
             let webview = WebViewBuilder::new_with_web_context(&mut context)
                 .with_https_scheme(true)
                 .with_incognito(true)
@@ -79,6 +115,24 @@ mod windows {
                 .with_bounds(wry::Rect::default())
                 .with_navigation_handler(|url| url == VIEW_URL || url == "about:blank")
                 .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
+                .with_ipc_handler(move |request| {
+                    #[derive(serde::Deserialize)]
+                    struct Control {
+                        action: String,
+                        #[serde(default)]
+                        value: f64,
+                    }
+                    if request.body().len() > 512 || request.uri().to_string() != VIEW_URL {
+                        return;
+                    }
+                    if let Some(player) = &ipc_media
+                        && let Ok(command) = serde_json::from_str::<Control>(request.body())
+                    {
+                        if let Err(error) = player.control(&command.action, command.value) {
+                            player.notice(error.to_string());
+                        }
+                    }
+                })
                 .with_custom_protocol("arco-lister".into(), move |_, request| {
                     use wry::http::{Method, Response, StatusCode};
                     if request.method() == Method::GET
@@ -107,8 +161,8 @@ mod windows {
             let core = unsafe { webview.controller().CoreWebView2() }.map_err(io::Error::other)?;
             let settings = unsafe { core.Settings() }.map_err(io::Error::other)?;
             let configure = || unsafe {
-                settings.SetIsScriptEnabled(media_path.is_some())?;
-                settings.SetIsWebMessageEnabled(false)?;
+                settings.SetIsScriptEnabled(media_path.is_some() || media.is_some())?;
+                settings.SetIsWebMessageEnabled(media.is_some())?;
                 settings.SetAreHostObjectsAllowed(false)?;
                 settings.SetAreDevToolsEnabled(false)?;
                 settings.SetAreDefaultContextMenusEnabled(false)?;
@@ -128,15 +182,42 @@ mod windows {
                 .map_err(io::Error::other)?;
             }
             webview.load_url(VIEW_URL).map_err(io::Error::other)?;
+            let webview = Rc::new(webview);
+            let timer = media.as_ref().map(|player| {
+                let timer = slint::Timer::default();
+                let player = player.clone();
+                let web = Rc::downgrade(&webview);
+                timer.start(
+                    slint::TimerMode::Repeated,
+                    Duration::from_millis(200),
+                    move || {
+                        if let Some(web) = web.upgrade()
+                            && let Ok(state) = serde_json::to_string(&player.refresh())
+                        {
+                            let _ = web.evaluate_script(&format!(
+                                "if(window.arcoState)window.arcoState({state})"
+                            ));
+                        }
+                    },
+                );
+                timer
+            });
             Ok(Self {
-                webview,
-                _profile: profile,
+                _timer: timer,
+                webview: Some(webview),
+                rich_text: None,
+                media,
+                _profile: Some(profile),
             })
         }
 
         pub(crate) fn place(&self, rect: Option<[i32; 4]>) -> io::Result<()> {
+            if let Some(rich_text) = &self.rich_text {
+                return rich_text.place(rect);
+            }
+            let webview = self.webview.as_ref().expect("preview surface");
             if let Some([x, y, width, height]) = rect {
-                self.webview
+                webview
                     .set_bounds(wry::Rect {
                         position: wry::dpi::PhysicalPosition::new(x, y).into(),
                         size: wry::dpi::PhysicalSize::new(
@@ -147,18 +228,39 @@ mod windows {
                     })
                     .map_err(io::Error::other)?;
             }
-            self.webview
+            webview
                 .set_visible(rect.is_some())
-                .map_err(io::Error::other)
+                .map_err(io::Error::other)?;
+            if let Some(media) = &self.media {
+                media.place(rect)?;
+            }
+            Ok(())
         }
     }
 
     fn document(path: &Path, preview: Rich, light: bool) -> io::Result<(Option<&Path>, String)> {
+        if matches!(&preview, Rich::Media { native: true, .. }) {
+            let labels = serde_json::json!({
+                "position": crate::locale::tr("Position"), "volume": crate::locale::tr("Lautstärke"),
+                "keys": crate::locale::tr("Leertaste: Wiedergabe/Pause · Pfeile: Position/Lautstärke · M: stumm · Esc: zurück"),
+                "loading": crate::locale::tr("Medien werden vorbereitet …"), "ready": crate::locale::tr("Bereit"),
+                "play": crate::locale::tr("Abspielen"), "pause": crate::locale::tr("Pausieren"), "stop": crate::locale::tr("Stopp"),
+                "mute": crate::locale::tr("Stumm"), "unmute": crate::locale::tr("Ton einschalten"),
+            }).to_string().replace('<', "\\u003c").replace('&', "\\u0026");
+            let html = include_str!("native-player.html")
+                .replace("{{scheme}}", if light { "light" } else { "dark" })
+                .replace("{{labels}}", &labels)
+                .replace(
+                    "{{title}}",
+                    &ammonia::clean_text(&path.file_name().unwrap_or_default().to_string_lossy()),
+                );
+            return Ok((None, html));
+        }
         let mut media = None;
         let mut media_rule = String::new();
         let body = match preview {
-            Rich::Html(html) | Rich::Rtf(html) => html,
-            Rich::Media { element, mime } => {
+            Rich::Html(html) | Rich::Rtf { html, .. } => html,
+            Rich::Media { element, mime, .. } => {
                 let name = path
                     .file_name()
                     .and_then(|name| name.to_str())
@@ -195,6 +297,26 @@ mod windows {
 
     #[cfg(test)]
     #[test]
+    fn native_media_has_local_controls_without_a_folder_mapping_or_template_injection() {
+        let (mapping, html) = document(
+            Path::new(r"C:\Videos\{{labels}} & probe.wmv"),
+            Rich::Media {
+                element: "video",
+                mime: "application/octet-stream",
+                native: true,
+            },
+            false,
+        )
+        .unwrap();
+        assert!(mapping.is_none());
+        assert!(html.contains("{{labels}}&#32;&amp;&#32;probe.wmv"));
+        assert!(html.contains("id=\"position\"") && html.contains("id=\"volume\""));
+        assert!(html.contains("script-src 'nonce-arco-player'"));
+        assert!(!html.contains("media-src") && !html.contains("arco-media.invalid"));
+    }
+
+    #[cfg(test)]
+    #[test]
     fn only_the_media_document_allows_the_fixed_player_script() {
         let path = Path::new(r"C:\Videos\a & b.mp4");
         let (_, rich) = document(path, Rich::Html("<p>document</p>".into()), true).unwrap();
@@ -204,6 +326,7 @@ mod windows {
             Rich::Media {
                 element: "video",
                 mime: "video/mp4",
+                native: false,
             },
             false,
         )

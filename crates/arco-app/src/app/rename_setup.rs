@@ -144,11 +144,13 @@ impl App {
                 (search.first_only, "erstes"),
                 (search.include_extension, "erweiterung"),
                 (search.substitute, "substitution"),
+                (search.auto_number, "autonummer"),
             ]
             .into_iter()
             .filter_map(|(active, label)| active.then_some(label))
             .collect::<Vec<_>>()
             .join(",");
+            let flags = counter_flags(&flags, &search.counter, search.case.index());
             value.push_str(&format!(
                 "\nSuchen={}\nErsetzen={}\nOptionen={flags}",
                 search.find, search.replace
@@ -343,6 +345,17 @@ fn parse_template(value: &str) -> io::Result<(&str, RenameTemplate)> {
                 "erstes" => search.first_only = true,
                 "erweiterung" => search.include_extension = true,
                 "substitution" => search.substitute = true,
+                "autonummer" => search.auto_number = true,
+                flag if flag.starts_with("start=") => search.counter.start = flag[6..].into(),
+                flag if flag.starts_with("step=") => search.counter.step = flag[5..].into(),
+                flag if flag.starts_with("width=") => search.counter.width = flag[6..].into(),
+                flag if flag.starts_with("every=") => search.counter.every = flag[6..].into(),
+                flag if flag.starts_with("case=") => {
+                    search.case =
+                        rename::NameCase::from_index(flag[5..].parse().map_err(|_| {
+                            io::Error::other("Ungültige Schreibweise in der Vorlage.")
+                        })?)?
+                }
                 _ => {
                     return Err(io::Error::other(
                         "Unbekannte Suchoption in der Umbenennvorlage.",
@@ -365,6 +378,29 @@ fn parse_template(value: &str) -> io::Result<(&str, RenameTemplate)> {
             search,
         },
     ))
+}
+
+pub(super) fn counter_flags(base: &str, counter: &rename::CounterSettings, case: i32) -> String {
+    let mut flags = base
+        .split(',')
+        .filter(|flag| !flag.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let defaults = rename::CounterSettings::default();
+    for (key, value, default) in [
+        ("start", &counter.start, &defaults.start),
+        ("step", &counter.step, &defaults.step),
+        ("width", &counter.width, &defaults.width),
+        ("every", &counter.every, &defaults.every),
+    ] {
+        if value != default {
+            flags.push(format!("{key}={value}"));
+        }
+    }
+    if case != 0 {
+        flags.push(format!("case={case}"));
+    }
+    flags.join(",")
 }
 
 #[cfg(test)]

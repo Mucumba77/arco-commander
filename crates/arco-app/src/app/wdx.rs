@@ -374,8 +374,17 @@ impl App {
             .iter()
             .copied()
             .map(|token| {
-                let (plugin, field) = self.resolve_wdx_token(token)?;
-                Ok((token.to_owned(), plugin, field))
+                let reference = rename::FieldReference::parse(token)?;
+                let plugin = if reference
+                    .query
+                    .split_once('.')
+                    .is_some_and(|(p, _)| p.eq_ignore_ascii_case("tc"))
+                {
+                    None
+                } else {
+                    Some(self.resolve_wdx_token(reference.query)?)
+                };
+                Ok((token.to_owned(), plugin))
             })
             .collect::<io::Result<Vec<_>>>()?;
         let mask = mask.to_owned();
@@ -401,12 +410,32 @@ impl App {
                     .collect::<io::Result<Vec<_>>>()?;
                 let mut values = HashMap::new();
                 let refs = paths.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-                for (token, plugin, field) in fields {
+                for (token, plugin) in fields {
+                    let reference = rename::FieldReference::parse(&token)?;
                     let mut column = HashMap::new();
-                    scan_paths(&plugin, &field, &refs, &job, |path, value| {
-                        column.insert(path.to_path_buf(), value.display);
-                    })?;
-                    values.insert(token, column);
+                    if let Some((plugin, field)) = plugin {
+                        scan_paths(&plugin, &field, &refs, &job, |path, value| {
+                            column.insert(path.to_path_buf(), value);
+                        })?;
+                    } else {
+                        for (path, metadata) in paths.iter().zip(&metadata) {
+                            if let Some(value) = plugin::tc_field_with_cancel(
+                                reference.query,
+                                path,
+                                metadata,
+                                &job.cancel,
+                            )? {
+                                column.insert(path.clone(), value);
+                            }
+                        }
+                    }
+                    let mut formatted = HashMap::new();
+                    for path in &paths {
+                        if let Some(value) = reference.render(column.get(path))? {
+                            formatted.insert(path.clone(), value);
+                        }
+                    }
+                    values.insert(token, formatted);
                 }
                 for (path, metadata) in paths.iter().zip(&metadata) {
                     files::ensure_unchanged(path, metadata)?;
