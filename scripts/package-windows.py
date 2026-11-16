@@ -30,6 +30,7 @@ DOCS = (
     "docs/UI-PRUEFUNG.md", "docs/WEITERARBEIT.md",
     "docs/SUCHE-UND-WERKZEUGE.md", "docs/AREA3-ABSCHLUSS.md",
     "docs/NAVIGATION-UND-DATEIEN.md", "docs/BEREICH1-2-ABSCHLUSS.md",
+    "docs/ARCHIVE.md", "docs/AREA4-ABSCHLUSS.md",
     "docs/branding/arco-commander.svg",
     "docs/screenshots/hauptfenster.jpg", "docs/screenshots/kopierfortschritt.jpg",
     "docs/screenshots/lister.jpg",
@@ -118,7 +119,7 @@ def copy_executable(source, destination, machine, subsystem):
     offset = struct.unpack_from("<I", data, 0x3c)[0]
     require(data[:2] == b"MZ" and data[offset:offset + 4] == b"PE\0\0", f"Invalid PE header: {source}")
     require(struct.unpack_from("<H", data, offset + 4)[0] == machine, f"Unexpected architecture: {source}")
-    require(struct.unpack_from("<H", data, offset + 0x5c)[0] == subsystem, f"Unexpected subsystem: {source}")
+    require(subsystem is None or struct.unpack_from("<H", data, offset + 0x5c)[0] == subsystem, f"Unexpected subsystem: {source}")
     for local in (str(Path.home()), str(ROOT)):
         for path in (local, local.replace("\\", "/")):
             for encoding in ("utf-8", "utf-16-le"):
@@ -126,7 +127,24 @@ def copy_executable(source, destination, machine, subsystem):
     destination.write_bytes(data)
 
 
-def smoke_test(archive, name, version, *, run_app=True):
+def copy_seven_zip(directory, stage):
+    manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    require(manifest["version"] == "26.06", "Prepare the pinned 7-Zip 26.06 runtime first")
+    expected = {"7z.exe", "7z.dll", "7z.sfx", "License.txt", "readme.txt", "source/7z2606-src.7z"}
+    require(set(manifest["files"]) == expected, "Unexpected 7-Zip manifest members")
+    for name, digest in manifest["files"].items():
+        source = directory / name
+        require(hashlib.sha256(source.read_bytes()).hexdigest() == digest, f"7-Zip hash mismatch: {name}")
+        destination = stage / "7zip" / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if name in {"7z.exe", "7z.dll", "7z.sfx"}:
+            copy_executable(source, destination, 0x8664, 3 if name == "7z.exe" else None)
+        else:
+            shutil.copyfile(source, destination)
+    shutil.copyfile(directory / "manifest.json", stage / "7zip" / "manifest.json")
+
+
+def smoke_test(archive, name, version, *, run_app=True, run_sfx=True):
     def run(executable, *args, stdin=None):
         return subprocess.run(
             [str(executable), *map(str, args)], cwd=executable.parent, input=stdin,
@@ -158,6 +176,17 @@ def smoke_test(archive, name, version, *, run_app=True):
             protocols.add(message["version"])
         require(len(protocols) == 1, "The plugin hosts use different protocol versions")
 
+        seven = app.parent / "7zip" / "7z.exe"
+        command = run(seven, "i")
+        require(command.returncode == 0 and b"7-Zip 26.06" in command.stdout, "Bundled 7-Zip version check failed")
+        source = root / "probe.txt"
+        source.write_bytes(b"Arco console archive check")
+        command = run(seven, "a", "-tzip", "-spd", "--", root / "probe.zip", source)
+        require(command.returncode == 0, "Bundled 7-Zip ZIP creation failed")
+        require(run(seven, "t", "--", root / "probe.zip").returncode == 0, "Bundled 7-Zip ZIP test failed")
+        if not run_sfx:
+            return
+
         sfx = root / "probe.exe"
         shutil.copyfile(app.with_name("arco-zip-sfx.exe"), sfx)
         with zipfile.ZipFile(sfx, "a", compression=zipfile.ZIP_DEFLATED) as payload:
@@ -173,7 +202,7 @@ def smoke_test(archive, name, version, *, run_app=True):
         require(command.returncode != 0 and result.read_bytes() == b"keep", "ZIP-SFX did not protect an existing file")
 
 
-def package_release(*, run_app=True):
+def package_release(*, run_app=True, run_sfx=True, seven_zip_dir=TARGET / "tools" / "7zip-26.06"):
     require(os.name == "nt", "Run packaging and smoke tests on Windows")
     require(not git("status", "--porcelain"), "Commit the release sources before packaging")
     commit = git("rev-parse", "HEAD")
@@ -199,6 +228,7 @@ def package_release(*, run_app=True):
         ):
             source_name = "arco-plugin-host.exe" if folder == wow_binaries else filename
             copy_executable(folder / source_name, stage / filename, machine, subsystem)
+        copy_seven_zip(seven_zip_dir, stage)
         for document in (*DOCS, f"docs/releases/v{version}.md"):
             destination = stage / document
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -221,6 +251,10 @@ Für die formatierte Vorschau und Medien im Lister braucht Windows die
 Microsoft Edge WebView2 Runtime. Optionale Archivwerkzeuge stehen im README.
 https://developer.microsoft.com/microsoft-edge/webview2/#download
 
+7-Zip 26.06 ist unter 7zip/ enthalten (Konsole, SFX-Modul, Lizenz und Quellcode).
+ACE/UC2 benoetigen die optionale Python-Umgebung aus README.md.
+Archiveinstellungen und Formatgrenzen: docs/ARCHIVE.md
+
 Das Paket ist unsigniert. Release-Hinweise und SHA-256-Prüfsumme stehen auf GitHub.
 {REPO}/releases/tag/v{version}
 
@@ -234,18 +268,25 @@ Drittanbieterhinweise: DRITTANBIETER.md und licenses/
             for package in dependencies(meta, roots):
                 packages[package["name"], package["version"]] = package
         write_notices(stage, packages)
+        with (stage / "DRITTANBIETER.md").open("a", encoding="utf-8") as notice:
+            notice.write("\n## 7-Zip 26.06\n\nCopyright (C) 1999–2026 Igor Pavlov. "
+                         "LGPL mit den in `7zip/License.txt` genannten BSD-/unRAR-Bedingungen. "
+                         "Die Dateien sind unverändert und separat austauschbar. "
+                         "Zugehöriger Quellcode: `7zip/source/7z2606-src.7z`. "
+                         "[Originalrelease](https://github.com/ip7z/7zip/releases/tag/26.06).\n")
 
         archive = Path(scratch) / final_archive.name
         with zipfile.ZipFile(archive, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as package:
             for path in sorted(stage.rglob("*")):
                 if path.is_file():
                     package.write(path, path.relative_to(stage.parent).as_posix())
-        smoke_test(archive, name, version, run_app=run_app)
+        smoke_test(archive, name, version, run_app=run_app, run_sfx=run_sfx)
         digest = hashlib.sha256(archive.read_bytes()).hexdigest()
         archive.rename(final_archive)
         (output / "SHA256SUMS.txt").write_text(f"{digest}  {final_archive.name}\n", encoding="ascii")
     version_check = "application version/help" if run_app else "embedded version (application not started)"
-    print(f"Verified {version_check}, both plugin hosts, ZIP-SFX and ZIP CRC: {final_archive}")
+    sfx_check = "ZIP-SFX execution" if run_sfx else "ZIP-SFX static PE check (not executed)"
+    print(f"Verified {version_check}, both plugin hosts, 7-Zip, {sfx_check} and ZIP CRC: {final_archive}")
     print(f"Dependency notices: {len(packages)}. SHA-256: {digest}")
 
 
@@ -253,5 +294,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--no-app-run", action="store_true",
                         help="Never execute arco-commander.exe; check its embedded version statically")
+    parser.add_argument("--no-sfx-run", action="store_true", help="Check SFX statically without executing it")
+    parser.add_argument("--seven-zip-dir", type=Path, default=TARGET / "tools" / "7zip-26.06")
     arguments = parser.parse_args()
-    package_release(run_app=not arguments.no_app_run)
+    package_release(run_app=not arguments.no_app_run, run_sfx=not arguments.no_sfx_run, seven_zip_dir=arguments.seven_zip_dir)

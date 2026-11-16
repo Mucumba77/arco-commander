@@ -9,6 +9,8 @@ license.workspace = true
 base64 = "0.22"
 blake3 = "1"
 brotli-decompressor = "5"
+cab = "=0.6.0"
+delharc = { version = "=0.7.0", features = ["lhx"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 crc32fast = "1"
 encoding_rs = "0.8"

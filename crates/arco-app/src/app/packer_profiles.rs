@@ -5,6 +5,24 @@ use arco_core::{packer_profile::PackerProfile, tools};
 use std::{io, path::PathBuf};
 
 impl App {
+    pub(super) fn packer_for_archive(&self, file: &std::path::Path) -> Option<PackerProfile> {
+        let extension = file.extension()?;
+        if !["rar", "arj", "lha", "lzh"]
+            .iter()
+            .any(|kind| extension.eq_ignore_ascii_case(kind))
+        {
+            return None;
+        }
+        self.profile
+            .packer_profiles
+            .values()
+            .find(|packer| {
+                extension.eq_ignore_ascii_case(&packer.extension)
+                    || extension.eq_ignore_ascii_case("lha") && packer.extension == "lzh"
+                    || extension.eq_ignore_ascii_case("lzh") && packer.extension == "lha"
+            })
+            .cloned()
+    }
     pub(crate) fn open_packer_profiles(&mut self) {
         let names: Vec<_> = self.profile.packer_profiles.keys().cloned().collect();
         let options: Vec<_> = std::iter::once("Neues Profil")
@@ -135,6 +153,8 @@ impl App {
                 options: &options,
                 options_label: "Packerprofil",
                 confirm_label: "Packen",
+                second_secret: true,
+                second_placeholder: "Packerpasswort (optional)",
                 ..Dialog::default()
             },
         );
@@ -147,6 +167,7 @@ impl App {
         directory: PathBuf,
         profile: &str,
         value: &str,
+        password: &str,
     ) -> io::Result<()> {
         let profile = self
             .profile
@@ -162,15 +183,63 @@ impl App {
         } else {
             directory.join(tools::output_name(&format!("{value}{suffix}"))?)
         };
+        let password = (!password.is_empty()).then(|| zeroize::Zeroizing::new(password.to_owned()));
+        let form = self.ui().get_dialog_pack_selection();
+        let selection = arco_core::pack_selection::Options {
+            paths: form.paths,
+            recursive: form.recursive,
+            separate: form.separate,
+            omit_base: form.omit_base,
+            move_sources: form.move_sources,
+        };
         self.start_operation_job(
             "Packe mit externem Profil …",
             true,
             super::JobDescription::files(crate::OperationKind::Pack, &paths, &target),
             move |job| {
-                profile.pack(&paths, &base, &target, &job.cancel)?;
+                let password = password.as_ref().map(|password| password.as_str());
+                let batch = arco_core::pack_selection::Batch::new(
+                    &paths,
+                    &base,
+                    &target,
+                    selection,
+                    &job.cancel,
+                )?;
+                let mut outputs = Vec::new();
+                let mut entries = Vec::new();
+                for (index, unit) in batch.units.iter().enumerate() {
+                    job.step_progress(
+                        format!("Archiv {} von {}", index + 1, batch.units.len()),
+                        index + 1,
+                        batch.units.len(),
+                    );
+                    let prepared = batch.prepare(unit, &job.cancel)?;
+                    let parts = profile.pack_set(
+                        &prepared.sources,
+                        &prepared.base,
+                        &unit.target,
+                        password,
+                        &job.cancel,
+                    )?;
+                    entries.push(
+                        parts
+                            .first()
+                            .ok_or_else(|| {
+                                io::Error::other("Der Packer hat keinen Archiveinstieg erzeugt.")
+                            })?
+                            .clone(),
+                    );
+                    outputs.extend(parts);
+                }
+                batch.finish(&entries, password, &job.cancel)?;
                 Ok(Outcome::Notice(format!(
-                    "Erstellt: {}",
-                    display_path(&target)
+                    "{} Archivteile erstellt:\n{}",
+                    outputs.len(),
+                    outputs
+                        .iter()
+                        .map(|path| display_path(path))
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 )))
             },
         );

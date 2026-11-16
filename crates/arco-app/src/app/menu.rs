@@ -430,6 +430,7 @@ const MENU: &[Category] = &[
                     ("Interne Dateizuordnungen …", "associations"),
                     ("NTFS-Kopieroptionen …", "ntfs-options"),
                     ("Externe Packerprofile …", "packer-profiles"),
+                    ("Archiveinstellungen …", "archive-settings"),
                     ("Ignorierliste bearbeiten …", "ignore-edit"),
                     ("Ignorierliste importieren …", "ignore-import"),
                 ],

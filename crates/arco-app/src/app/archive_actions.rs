@@ -209,13 +209,14 @@ impl App {
             check_archive(&archive)?;
             let target = std::fs::canonicalize(target)?;
             let staging = tempfile::tempdir_in(&target)?;
-            archive_view::extract_with_progress(
+            archive_view::extract_with_options(
                 &archive.file,
                 staging.path(),
-                &selection,
+                Some(&selection),
                 password.as_deref().or(archive.password()),
                 &job.cancel,
                 job.archive_progress_phase("Entpacken · Schritt 1 von 2"),
+                job.archives.zone,
             )?;
             job.phase("Dateien am Ziel bereitstellen · Schritt 2 von 2");
             check_archive(&archive)?;
@@ -307,6 +308,7 @@ impl App {
         target_password: Option<String>,
         source_password: Option<String>,
     ) {
+        let packer = self.packer_for_archive(&target.file);
         let presentation = super::JobDescription::new(
             crate::OperationKind::Pack,
             String::new(),
@@ -320,12 +322,14 @@ impl App {
                     check_archive(&archive)?;
                     storage = tempfile::tempdir()?;
                     let base = storage.path().to_path_buf();
-                    archive_view::extract(
+                    archive_view::extract_with_options(
                         &archive.file,
                         &base,
-                        &selection,
+                        Some(&selection),
                         source_password.as_deref().or(archive.password()),
                         &job.cancel,
+                        job.archive_progress(),
+                        job.archives.zone,
                     )?;
                     let paths = std::fs::read_dir(&base)?
                         .map(|entry| entry.map(|entry| entry.path()))
@@ -335,27 +339,29 @@ impl App {
             };
             check_archive(&target)?;
             let password = target_password.as_deref().or(target.password());
-            let result = archive_view::append(
+            let result = archive_view::append_with_packer(
                 &target.file,
                 &target.folder,
                 &paths,
                 &base,
                 password,
+                packer.as_ref(),
                 &job.cancel,
             );
             let count = match result {
                 Ok(count) => count,
                 Err(error)
                     if error.kind() == io::ErrorKind::AlreadyExists
-                        && target.catalog.can_sync_write() =>
+                        && target.catalog.can_edit() =>
                 {
                     let mut remaining = None;
-                    let report = target.catalog.append_resolving(
+                    let report = target.catalog.append_resolving_with_packer(
                         &target.folder,
                         &paths,
                         &base,
                         password,
                         &job.cancel,
+                        packer.as_ref(),
                         |conflict| {
                             let can_replace = conflict.source_metadata.is_file()
                                 && conflict.target.kind == files::Kind::File;
@@ -440,6 +446,7 @@ impl App {
         edit: archives::ZipEdit,
         password: &str,
     ) {
+        let packer = self.packer_for_archive(&archive.file);
         let password = (!password.is_empty()).then(|| zeroize::Zeroizing::new(password.to_owned()));
         self.start_operation_job(
             "Bearbeite Archiv …",
@@ -455,7 +462,13 @@ impl App {
                     .as_ref()
                     .map(|value| value.as_str())
                     .or(archive.password());
-                let count = archive_view::edit(&archive.file, edit, secret, &job.cancel)?;
+                let count = archive_view::edit_with_packer(
+                    &archive.file,
+                    edit,
+                    secret,
+                    packer.as_ref(),
+                    &job.cancel,
+                )?;
                 Ok(Outcome::Notice(format!(
                     "{count} Archiveinträge bearbeitet."
                 )))

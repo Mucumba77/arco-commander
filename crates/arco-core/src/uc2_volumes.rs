@@ -131,6 +131,65 @@ pub(crate) fn is_volume(path: &Path) -> bool {
     detect(path).is_some()
 }
 
+pub(crate) fn is_entry_point(path: &Path) -> bool {
+    match detect(path) {
+        Some(Set::Sas { selected: 1, .. }) => true,
+        Some(Set::Sea { first, .. }) => first == path,
+        _ => false,
+    }
+}
+
+pub(crate) fn repack(
+    original: &Path,
+    sources: &[PathBuf],
+    base: &Path,
+    directory: &Path,
+    cancel: &AtomicBool,
+) -> io::Result<Vec<PathBuf>> {
+    let volumes = snapshot(original)?;
+    let size = volumes
+        .iter()
+        .map(|(_, metadata)| metadata.len())
+        .max()
+        .ok_or_else(|| io::Error::other("UC2-Teilgröße fehlt."))?;
+    let first = match detect(original) {
+        Some(Set::Sas { selected: 1, .. }) => {
+            let leaf = original
+                .file_stem()
+                .ok_or_else(|| io::Error::other("UC2-Satzname fehlt."))?;
+            let target = directory.join(leaf);
+            pack_sas(sources, base, &target, size, cancel)?;
+            let mut name = target.as_os_str().to_os_string();
+            name.push(".p01");
+            PathBuf::from(name)
+        }
+        Some(Set::Sea { first, .. }) if first == original => {
+            let target = directory.join(
+                first
+                    .file_name()
+                    .ok_or_else(|| io::Error::other("UC2SEA-Name fehlt."))?,
+            );
+            pack_sea(
+                sources,
+                base,
+                &target,
+                size.div_ceil(1024).max(32) * 1024,
+                cancel,
+            )?;
+            target
+        }
+        _ => {
+            return Err(io::Error::other(
+                "Öffne den ersten UC2-Teil, um den Satz zu bearbeiten.",
+            ));
+        }
+    };
+    Ok(snapshot(&first)?
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect())
+}
+
 pub(crate) fn snapshot(path: &Path) -> io::Result<Vec<(PathBuf, Metadata)>> {
     match detect(path) {
         None => Ok(Vec::new()),
@@ -186,6 +245,12 @@ pub fn pack_sea(
     volume_size: u64,
     cancel: &AtomicBool,
 ) -> io::Result<usize> {
+    if sources.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Der DOS-UC2SEA-Encoder benötigt mindestens einen Eintrag. Entferne den Archivsatz als Datei, wenn er leer werden soll.",
+        ));
+    }
     let stem = destination
         .file_stem()
         .and_then(|name| name.to_str())

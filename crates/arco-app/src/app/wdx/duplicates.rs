@@ -317,6 +317,7 @@ mod tests {
         }
         let (sender, _receiver) = mpsc::channel();
         let job = JobContext {
+            archives: Default::default(),
             cancel: Arc::new(AtomicBool::new(false)),
             sender,
         };
@@ -372,6 +373,7 @@ mod tests {
         .unwrap();
         let (sender, _receiver) = mpsc::channel();
         let job = JobContext {
+            archives: Default::default(),
             cancel: Arc::new(AtomicBool::new(false)),
             sender,
         };

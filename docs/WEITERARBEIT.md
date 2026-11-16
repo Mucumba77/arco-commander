@@ -1,8 +1,18 @@
-# Fortsetzung nach Arco Commander 1.4.0
+# Fortsetzung nach Arco Commander 1.5.0
 
-Stand: 16. November 2026. Dieses Dokument hält den nächsten Arbeitsblock über Sitzungen hinweg fest. Version 1.4.0 ergänzt den Abschluss der Bereiche 1 und 2. Version 1.3.0 enthält den Bereich-3-Abschluss mit Suche, Lister und Werkzeugen. Version 1.2.0 bündelte die Dialogüberarbeitungen einschließlich Datei-/Binärvergleich, Einfg, Dateieigenschaften, Attributen, Berechtigungen, Dateiwerkzeugen, Tabs, Favoriten, Buttonbars, Starter, Ansichtsregeln, Spaltensätzen, Dateizuordnungen sowie Nebenfenstern und allgemeinen Fehler-/Ergebnisdialogen.
+Stand: 17. November 2026. Version 1.5.0 veröffentlicht den Archivbereich. Dieses Dokument hält den nächsten Arbeitsblock über Sitzungen hinweg fest. Version 1.4.0 ergänzt den Abschluss der Bereiche 1 und 2. Version 1.3.0 enthält den Bereich-3-Abschluss mit Suche, Lister und Werkzeugen. Version 1.2.0 bündelte die Dialogüberarbeitungen einschließlich Datei-/Binärvergleich, Einfg, Dateieigenschaften, Attributen, Berechtigungen, Dateiwerkzeugen, Tabs, Favoriten, Buttonbars, Starter, Ansichtsregeln, Spaltensätzen, Dateizuordnungen sowie Nebenfenstern und allgemeinen Fehler-/Ergebnisdialogen.
 
-## Nächster Schritt
+## Aktueller Stand: Bereich 4 in Version 1.5.0
+
+**ARC-01 bis ARC-07 sind im definierten Matrixumfang implementiert: 7/7 IDs, 100 %.** Der Quellstand ist über Tag `v1.5.0` nachvollziehbar. [Bedienung und Formatgrenzen](ARCHIVE.md), [Abschlussnachweis](AREA4-ABSCHLUSS.md) und [Fensterprüfliste](UI-PRUEFUNG.md) sind aktualisiert. Das Windows-x64-Paket enthält beide Plugin-Hosts, ZIP-SFX, 7-Zip 26.06 und die Archivdokumentation. ACE/UC2 bleiben als optionale Python-Erweiterung dokumentiert.
+
+Neu sind gemeinsame Packauswahl und Archivvorgaben, geschütztes ACE und ACE-Mehrteiler, transaktionale zusätzliche Bearbeitungsformate, vollständige externe Teilesätze, ergänzende LHA-/CAB-Leser, ZIP-Brotli mit Verschlüsselung und die Zonenrichtlinie einschließlich WCX. Der TC-Packerimport und Englisch/Französisch sind ergänzt. Der Bereich-4-Nachweis dokumentiert die Backends und Grenzen, insbesondere CAB/klassische ZIP-Datenträgersätze, proprietäre Zusatzfelder und DOS-Encoder.
+
+Prüfstand: **351 Tests in sechs Suiten bestanden**, 49 explizite Umgebungsfälle im Standardlauf ignoriert; **16 davon zusätzlich als Archiv-Referenztests bestanden**. Formatierung, Check aller Ziele und normaler Windows-Build bestanden. Kein Start von Arco Commander, Suchworker oder SFX. Die beiden entsprechenden Integrationstestsuiten bleiben in diesem Arbeitsblock ungestartet.
+
+Als Nächstes Rückmeldungen des Projektinhabers aus den Fenstertests bearbeiten. Weitere Funktionsbereiche erst auf neuen Auftrag beginnen. Die Anwendung weiterhin nicht selbst starten.
+
+## Ausgangspunkt: Veröffentlichung 1.4.0
 
 **Bereiche 1 und 2 sind im definierten Matrixumfang abgeschlossen: jeweils 10/10 IDs, 100 % Implementierung.** Quellstand über Tag `v1.4.0`. [Nachweis](BEREICH1-2-ABSCHLUSS.md) und [Bedienung](NAVIGATION-UND-DATEIEN.md). Fensterprüfung und Rechte-/Hardware-/TC-Referenzen bleiben separat offen. Arco Commander weiterhin nicht starten. Version 1.4.0 wird als reguläre Windows-Version bereitgestellt. Weitere Bereiche erst nach neuem Auftrag beginnen.
 

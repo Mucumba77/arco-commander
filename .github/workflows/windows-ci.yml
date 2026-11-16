@@ -33,5 +33,9 @@ jobs:
         run: cargo +stable fmt --all --check
       - name: Build workspace
         run: cargo +stable build --locked --workspace
+      - name: Check all targets without starting the application
+        run: cargo +stable check --locked --workspace --all-targets
       - name: Test workspace
-        run: cargo +stable test --locked --workspace --all-targets -- --test-threads=1
+        # Process/SFX integration tests start product executables. The project
+        # owner performs those checks; all targets are still compiled above.
+        run: cargo +stable test --locked --workspace --lib --bins --test windows_reference -- --test-threads=1

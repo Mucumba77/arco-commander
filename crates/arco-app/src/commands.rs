@@ -137,6 +137,7 @@ pub enum Pending {
         PathBuf,
         VolumePacking,
         Option<Zeroizing<String>>,
+        arco_core::pack_selection::Options,
     ),
     ZipRead(PathBuf, PathBuf, bool),
     ArchiveUnlock(usize, Location, Navigation),
@@ -208,7 +209,9 @@ pub enum MaskEdit {
     Remove { folders: bool },
 }
 
+#[derive(Clone, Copy)]
 pub enum VolumePacking {
+    Ace(u8),
     Sas,
     Sea,
     Zip,
@@ -293,6 +296,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("WDX-Feld ändern", "wdx-edit"),
     ("Ignorierliste bearbeiten", "ignore-edit"),
     ("Externe Packerprofile", "packer-profiles"),
+    ("Archiveinstellungen", "archive-settings"),
     ("Mit Packerprofil packen", "external-pack"),
     ("Ignorierliste importieren", "ignore-import"),
     ("Ignorierliste umschalten", "ignore-toggle"),
@@ -579,6 +583,7 @@ impl App {
             "settings" | "language" => Some(crate::app::SettingsPage::General),
             "configure-editor" | "everything-configure" => Some(crate::app::SettingsPage::Programs),
             "ntfs-options" => Some(crate::app::SettingsPage::Transfers),
+            "archive-settings" => Some(crate::app::SettingsPage::Archives),
             _ => None,
         };
         if let Some(page) = settings_page {
@@ -1536,7 +1541,7 @@ impl App {
                 let name = names
                     .get(option)
                     .ok_or_else(|| io::Error::other("Wähle ein Packerprofil."))?;
-                self.run_external_packer(paths, base, directory, name, value)?;
+                self.run_external_packer(paths, base, directory, name, value, second)?;
             }
             Pending::IgnoreList => {
                 if let Err(error) = self.save_ignore_list(value, self.profile.ignore_enabled) {
@@ -1839,8 +1844,25 @@ impl App {
                 }
             }
             Pending::ZipPack(paths, base, destination) => {
+                let form = self.ui().get_dialog_pack_selection();
+                let selection = arco_core::pack_selection::Options {
+                    paths: form.paths,
+                    recursive: form.recursive,
+                    separate: form.separate,
+                    omit_base: form.omit_base,
+                    move_sources: form.move_sources,
+                };
                 let destination = extraction_target(target_folder, &destination)?;
                 let volumes = match option {
+                    16..=18 => Some((
+                        VolumePacking::Ace(match option {
+                            17 => 0,
+                            18 => 1,
+                            _ => 2,
+                        }),
+                        ".ace",
+                        "ACE-Satz mit .ace und bei Bedarf .c00, .c01 usw.",
+                    )),
                     8 => Some((
                         VolumePacking::Sas,
                         "",
@@ -1883,7 +1905,14 @@ impl App {
                     let sea = matches!(format, VolumePacking::Sea);
                     self.dialog(
                         "input",
-                        Pending::ArchiveVolumes(paths, base, destination, format, password),
+                        Pending::ArchiveVolumes(
+                            paths,
+                            base,
+                            destination,
+                            format,
+                            password,
+                            selection,
+                        ),
                         Dialog {
                             title: "Mehrteiler erstellen",
                             description,
@@ -1899,6 +1928,7 @@ impl App {
                     return Ok(());
                 }
                 let (extension, format) = match option {
+                    15 => (".tgz", Some(ExternalFormat::TarGzip)),
                     1 => (".7z", None),
                     2 => (".tar", Some(ExternalFormat::Tar)),
                     3 => (".gz", Some(ExternalFormat::Gzip)),
@@ -1914,9 +1944,9 @@ impl App {
                 if option == 14 && second.is_empty() {
                     return Err(io::Error::other("Gib ein ZipCrypto-Passwort ein."));
                 }
-                if !matches!(extension, ".zip" | ".7z" | ".exe") && !second.is_empty() {
+                if !matches!(extension, ".zip" | ".7z" | ".exe" | ".ace") && !second.is_empty() {
                     return Err(io::Error::other(
-                        "Passwörter sind für ZIP und 7z einschließlich SFX vorgesehen.",
+                        "Passwörter sind für ZIP, 7z und ACE einschließlich unterstützter SFX-Varianten vorgesehen.",
                     ));
                 }
                 let name = if value.to_ascii_lowercase().ends_with(extension) {
@@ -1936,90 +1966,138 @@ impl App {
                     JobDescription::files(crate::OperationKind::Pack, &paths, &destination),
                     move |job| {
                         let password = password.as_ref().map(|password| password.as_str());
-                        if option == 6 {
-                            let stub = std::env::current_exe()?.with_file_name("arco-zip-sfx.exe");
-                            if !stub.is_file() {
-                                return Err(io::Error::new(
-                                    io::ErrorKind::NotFound,
-                                    "arco-zip-sfx.exe fehlt neben Arco Commander.",
-                                ));
+                        let batch = arco_core::pack_selection::Batch::new(
+                            &paths,
+                            &base,
+                            &destination,
+                            selection,
+                            &job.cancel,
+                        )?;
+                        let mut outputs = Vec::new();
+                        for (index, unit) in batch.units.iter().enumerate() {
+                            job.step_progress(
+                                format!("Archiv {} von {}", index + 1, batch.units.len()),
+                                index + 1,
+                                batch.units.len(),
+                            );
+                            let prepared = batch.prepare(unit, &job.cancel)?;
+                            let paths = &prepared.sources;
+                            let base = &prepared.base;
+                            let destination = &unit.target;
+                            if option == 6 {
+                                let stub =
+                                    std::env::current_exe()?.with_file_name("arco-zip-sfx.exe");
+                                if !stub.is_file() {
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::NotFound,
+                                        "arco-zip-sfx.exe fehlt neben Arco Commander.",
+                                    ));
+                                }
+                                archives::create_zip_sfx_with_options(
+                                    &paths,
+                                    &base,
+                                    &destination,
+                                    &stub,
+                                    password,
+                                    job.archives,
+                                    &job.cancel,
+                                    job.archive_progress(),
+                                )?;
+                            } else if option == 4 {
+                                archive_view::pack_7z_sfx_with_options(
+                                    &paths,
+                                    &base,
+                                    &destination,
+                                    password,
+                                    job.archives,
+                                    &job.cancel,
+                                )?;
+                            } else if extension == ".ace" {
+                                if let Some(password) = password {
+                                    let mode = match option {
+                                        12 => 1,
+                                        13 => 2,
+                                        _ => 0,
+                                    };
+                                    arco_core::legacy_archives::pack_ace_encrypted(
+                                        &paths,
+                                        &base,
+                                        &destination,
+                                        mode,
+                                        password,
+                                        &job.cancel,
+                                    )?;
+                                } else {
+                                    let pack = match option {
+                                        12 => arco_core::legacy_archives::pack_ace_compressed,
+                                        13 => arco_core::legacy_archives::pack_ace_blocked,
+                                        _ => arco_core::legacy_archives::pack_ace,
+                                    };
+                                    pack(&paths, &base, &destination, &job.cancel)?;
+                                }
+                            } else if extension == ".7z" {
+                                archive_view::pack_7z_with_options(
+                                    &paths,
+                                    &base,
+                                    &destination,
+                                    password,
+                                    job.archives,
+                                    &job.cancel,
+                                )?;
+                            } else if extension == ".uc2" {
+                                arco_core::legacy_archives::pack_uc2(
+                                    &paths,
+                                    &base,
+                                    &destination,
+                                    &job.cancel,
+                                )?;
+                            } else if let Some(format) = format {
+                                ExternalArchiver::discover(&job.cancel)?.pack_with_options(
+                                    &paths,
+                                    &base,
+                                    &destination,
+                                    format,
+                                    job.archives,
+                                    &job.cancel,
+                                )?;
+                            } else if option == 14 {
+                                let password = password
+                                    .ok_or_else(|| io::Error::other("ZipCrypto-Passwort fehlt."))?;
+                                archives::create_zip_zipcrypto_with_progress(
+                                    &paths,
+                                    &base,
+                                    &destination,
+                                    password,
+                                    &job.cancel,
+                                    job.archive_progress(),
+                                )?;
+                            } else {
+                                archives::create_zip_with_options(
+                                    &paths,
+                                    &base,
+                                    &destination,
+                                    password,
+                                    job.archives,
+                                    &job.cancel,
+                                    job.archive_progress(),
+                                )?;
                             }
-                            archives::create_zip_sfx_with_progress(
-                                &paths,
-                                &base,
-                                &destination,
-                                &stub,
-                                password,
-                                &job.cancel,
-                                job.archive_progress(),
-                            )?;
-                        } else if let Some(password) = password.filter(|_| option == 4) {
-                            archive_view::pack_encrypted_7z_sfx(
-                                &paths,
-                                &base,
-                                &destination,
-                                password,
-                                &job.cancel,
-                            )?;
-                        } else if extension == ".ace" {
-                            let pack = match option {
-                                12 => arco_core::legacy_archives::pack_ace_compressed,
-                                13 => arco_core::legacy_archives::pack_ace_blocked,
-                                _ => arco_core::legacy_archives::pack_ace,
-                            };
-                            pack(&paths, &base, &destination, &job.cancel)?;
-                        } else if extension == ".7z" {
-                            archive_view::pack_7z(
-                                &paths,
-                                &base,
-                                &destination,
-                                password,
-                                &job.cancel,
-                            )?;
-                        } else if extension == ".uc2" {
-                            arco_core::legacy_archives::pack_uc2(
-                                &paths,
-                                &base,
-                                &destination,
-                                &job.cancel,
-                            )?;
-                        } else if let Some(format) = format {
-                            ExternalArchiver::discover(&job.cancel)?.pack(
-                                &paths,
-                                &base,
-                                &destination,
-                                format,
-                                &job.cancel,
-                            )?;
-                        } else if option == 14 {
-                            let password = password
-                                .ok_or_else(|| io::Error::other("ZipCrypto-Passwort fehlt."))?;
-                            archives::create_zip_zipcrypto_with_progress(
-                                &paths,
-                                &base,
-                                &destination,
-                                password,
-                                &job.cancel,
-                                job.archive_progress(),
-                            )?;
-                        } else {
-                            archives::create_zip_with_progress(
-                                &paths,
-                                &base,
-                                &destination,
-                                password,
-                                &job.cancel,
-                                job.archive_progress(),
-                            )?;
+                            outputs.push(destination.clone());
                         }
+                        batch.finish(&outputs, password, &job.cancel)?;
                         Ok(Outcome::Notice(format!(
-                            "Erstellt: {}",
-                            display_path(&destination)
+                            "{} Archive erstellt:\n{}",
+                            outputs.len(),
+                            outputs
+                                .iter()
+                                .map(|path| display_path(path))
+                                .collect::<Vec<_>>()
+                                .join("\n")
                         )))
                     },
                 );
             }
-            Pending::ArchiveVolumes(paths, base, destination, format, password) => {
+            Pending::ArchiveVolumes(paths, base, destination, format, password, selection) => {
                 let sea = matches!(format, VolumePacking::Sea);
                 let size = value
                     .trim()
@@ -2045,33 +2123,88 @@ impl App {
                     true,
                     JobDescription::files(crate::OperationKind::Pack, &paths, &destination),
                     move |job| {
-                        let count = match format {
-                            VolumePacking::Sas => arco_core::legacy_archives::pack_uc2_sas(
-                                &paths,
-                                &base,
-                                &destination,
-                                size,
-                                &job.cancel,
-                            ),
-                            VolumePacking::Sea => arco_core::legacy_archives::pack_uc2_sea(
-                                &paths,
-                                &base,
-                                &destination,
-                                size,
-                                &job.cancel,
-                            ),
-                            VolumePacking::Zip | VolumePacking::SevenZip => {
-                                archive_view::pack_split(
+                        let batch = arco_core::pack_selection::Batch::new(
+                            &paths,
+                            &base,
+                            &destination,
+                            selection,
+                            &job.cancel,
+                        )?;
+                        let mut outputs = Vec::new();
+                        let mut total_parts = 0;
+                        for (index, unit) in batch.units.iter().enumerate() {
+                            job.step_progress(
+                                format!("Archiv {} von {}", index + 1, batch.units.len()),
+                                index + 1,
+                                batch.units.len(),
+                            );
+                            let prepared = batch.prepare(unit, &job.cancel)?;
+                            let paths = &prepared.sources;
+                            let base = &prepared.base;
+                            let destination = &unit.target;
+                            let count = match format {
+                                VolumePacking::Ace(mode) => {
+                                    arco_core::legacy_archives::pack_ace_volumes(
+                                        &paths,
+                                        &base,
+                                        &destination,
+                                        size,
+                                        mode,
+                                        password.as_ref().map(|password| password.as_str()),
+                                        &job.cancel,
+                                    )
+                                }
+                                VolumePacking::Sas => arco_core::legacy_archives::pack_uc2_sas(
                                     &paths,
                                     &base,
                                     &destination,
                                     size,
-                                    password.as_ref().map(|password| password.as_str()),
                                     &job.cancel,
-                                )
-                            }
-                        }?;
-                        Ok(Outcome::Notice(format!("{count} Archivteile erstellt.")))
+                                ),
+                                VolumePacking::Sea => arco_core::legacy_archives::pack_uc2_sea(
+                                    &paths,
+                                    &base,
+                                    &destination,
+                                    size,
+                                    &job.cancel,
+                                ),
+                                VolumePacking::Zip | VolumePacking::SevenZip => {
+                                    archive_view::pack_split_with_options(
+                                        &paths,
+                                        &base,
+                                        &destination,
+                                        size,
+                                        password.as_ref().map(|password| password.as_str()),
+                                        job.archives,
+                                        &job.cancel,
+                                    )
+                                }
+                            }?;
+                            total_parts += count;
+                            let output = match format {
+                                VolumePacking::Sas => {
+                                    let mut path = destination.as_os_str().to_os_string();
+                                    path.push(".p01");
+                                    PathBuf::from(path)
+                                }
+                                VolumePacking::Sea => destination.clone(),
+                                VolumePacking::Ace(_) => destination.clone(),
+                                VolumePacking::Zip | VolumePacking::SevenZip => {
+                                    let mut path = destination.as_os_str().to_os_string();
+                                    path.push(".001");
+                                    PathBuf::from(path)
+                                }
+                            };
+                            outputs.push(output);
+                        }
+                        batch.finish(
+                            &outputs,
+                            password.as_ref().map(|password| password.as_str()),
+                            &job.cancel,
+                        )?;
+                        Ok(Outcome::Notice(format!(
+                            "{total_parts} Archivteile erstellt."
+                        )))
                     },
                 );
             }
@@ -2158,12 +2291,14 @@ impl App {
                         let count = if test {
                             archive_view::test(&path, password, &job.cancel)?
                         } else {
-                            archive_view::extract_all_with_progress(
+                            archive_view::extract_with_options(
                                 &path,
                                 &target,
+                                None,
                                 password,
                                 &job.cancel,
                                 job.archive_progress(),
+                                job.archives.zone,
                             )?
                         };
                         Ok(Outcome::Notice(format!(
@@ -2392,6 +2527,17 @@ impl App {
                 });
             }
             Pending::ApplyTc(import, bindings) => {
+                import.packers.apply_options(&mut self.profile.archives);
+                for (name, packer) in import.packers.profiles {
+                    if !self
+                        .profile
+                        .packer_profiles
+                        .keys()
+                        .any(|key| key.eq_ignore_ascii_case(&name))
+                    {
+                        self.profile.packer_profiles.insert(name, packer);
+                    }
+                }
                 for (panel, paths) in self.panels.iter_mut().zip(import.panels) {
                     for path in paths {
                         if !panel.tabs.iter().any(|tab| tab.path == path) {
@@ -2656,6 +2802,11 @@ impl App {
         ui.set_dialog_operation_multiple(multiple);
         ui.set_dialog_operation_move(moving);
         ui.set_dialog_operation_note(Default::default());
+        ui.set_dialog_pack_selection(crate::PackSelection {
+            paths: true,
+            recursive: true,
+            ..Default::default()
+        });
     }
 
     fn delete_dialog(&mut self, permanent: bool) {
@@ -3159,7 +3310,7 @@ impl App {
                 description: &description,
                 value: "archiv",
                 placeholder: "Archivname",
-                second_placeholder: "ZIP-/7z-Passwort (optional)",
+                second_placeholder: "Archivpasswort (optional)",
                 second_secret: true,
                 options_label: "Archivformat",
                 confirm_label: "Packen",
@@ -3179,6 +3330,10 @@ impl App {
                     crate::locale::tr("ACE (LZ77)"),
                     crate::locale::tr("ACE 2.0 (Blocked)"),
                     crate::locale::tr("ZIP (ZipCrypto)"),
+                    crate::locale::tr("TAR + GZIP (.tgz)"),
+                    crate::locale::tr("ACE-Mehrteiler"),
+                    crate::locale::tr("ACE-Mehrteiler (ohne Kompression)"),
+                    crate::locale::tr("ACE-Mehrteiler (LZ77)"),
                 ],
                 ..Default::default()
             },
@@ -3272,7 +3427,7 @@ impl App {
             return;
         };
         if !archive_view::is_editable(&target.file) {
-            self.status("Als Archivziel für F5 sind ZIP, 7z, deren Mehrteiler und unterstützte ACE-Archive verfügbar.");
+            self.status("Wähle ein beschreibbares Archiv. RAR, ARJ und LHA benötigen ein passendes externes Packerprofil.");
             return;
         }
         if target.catalog.contains_encrypted_entries()
@@ -3384,7 +3539,7 @@ impl App {
             || (encrypted && !archive_view::supports_encrypted_edit(&archive.file))
         {
             self.status(
-                "Löschen und Umbenennen sind für ZIP, 7z, deren Mehrteiler und unterstützte ACE-Archive verfügbar.",
+                    "Das Archiv kann mit dem gewählten Backend nicht verändert werden. Prüfe Format, Schreibschutz und externes Packerprofil.",
             );
             return;
         }
@@ -3733,6 +3888,19 @@ impl App {
 
     pub fn show_tc_import(&mut self, import: TcImport) {
         let mut body = String::new();
+        writeln!(body, "Externe Packer und Archivoptionen").unwrap();
+        for (name, packer) in &import.packers.profiles {
+            writeln!(
+                body,
+                "  {name} → {} · {}",
+                display_path(&packer.executable),
+                packer.arguments.join(" ")
+            )
+            .unwrap();
+        }
+        for (key, value) in &import.packers.options {
+            writeln!(body, "  {key} = {value}").unwrap();
+        }
         for (label, items) in [("Links", &import.panels[0]), ("Rechts", &import.panels[1])] {
             writeln!(body, "{label}").unwrap();
             for path in items {
@@ -3749,7 +3917,7 @@ impl App {
         writeln!(body, "\nTastenkürzel").unwrap();
         let mut seen = std::collections::BTreeSet::new();
         let mut bindings = Vec::new();
-        let mut skipped = import.skipped;
+        let mut skipped = import.skipped + import.packers.skipped;
         let current = shortcuts::effective(&self.profile.shortcuts);
         for (key, command) in &import.shortcuts {
             let Some((key, command, label)) = shortcuts::tc_chord(key)

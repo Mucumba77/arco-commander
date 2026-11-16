@@ -9,7 +9,8 @@ use std::{
     process::{Command, Stdio},
     sync::atomic::AtomicBool,
 };
-use tempfile::TempPath;
+mod tc;
+pub use tc::{TcPackers, read_tc_packers};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackerProfile {
@@ -33,7 +34,18 @@ impl PackerProfile {
         }
         if !matches!(
             self.extension.as_str(),
-            "zip" | "7z" | "tar" | "gz" | "rar" | "arj" | "lha" | "lzh" | "ace" | "uc2"
+            "zip"
+                | "7z"
+                | "tar"
+                | "tgz"
+                | "gz"
+                | "rar"
+                | "arj"
+                | "lha"
+                | "lzh"
+                | "ace"
+                | "uc2"
+                | "exe"
         ) {
             return Err(io::Error::other(
                 "Diese Archivendung ist für Packerprofile nicht verfügbar.",
@@ -67,6 +79,30 @@ impl PackerProfile {
         target: &Path,
         cancel: &AtomicBool,
     ) -> io::Result<()> {
+        self.pack_with_password(sources, base, target, None, cancel)
+    }
+
+    pub fn pack_with_password(
+        &self,
+        sources: &[PathBuf],
+        base: &Path,
+        target: &Path,
+        password: Option<&str>,
+        cancel: &AtomicBool,
+    ) -> io::Result<()> {
+        self.pack_set(sources, base, target, password, cancel)
+            .map(|_| ())
+    }
+
+    /// Returns every published part, with the actual entry point first.
+    pub fn pack_set(
+        &self,
+        sources: &[PathBuf],
+        base: &Path,
+        target: &Path,
+        password: Option<&str>,
+        cancel: &AtomicBool,
+    ) -> io::Result<Vec<PathBuf>> {
         self.validate()?;
         files::check_cancel(cancel)?;
         if !files::regular_metadata(&self.executable)?.is_file() {
@@ -97,8 +133,12 @@ impl PackerProfile {
                 return Err(io::Error::other("Das Zielarchiv liegt im Quellordner."));
             }
         }
-        let plan = archives::plan_sources(sources, base, Path::new(""), cancel)?;
-        let working = tempfile::tempdir_in(parent)?;
+        let plan = if sources.is_empty() {
+            Vec::new()
+        } else {
+            archives::plan_sources(sources, base, Path::new(""), cancel)?
+        };
+        let working = tempfile::tempdir_in(&parent)?;
         let data = working.path().join("files");
         fs::create_dir(&data)?;
         let mut expected = BTreeSet::new();
@@ -140,17 +180,40 @@ impl PackerProfile {
                 expected.insert((ancestor.to_string_lossy().to_lowercase(), None));
             }
         }
+        let lha32 = self
+            .executable
+            .file_stem()
+            .is_some_and(|name| name.eq_ignore_ascii_case("lha32"));
         let selected = sources
             .iter()
             .map(|path| {
-                path.strip_prefix(base)
-                    .map(|relative| Path::new(".").join(relative))
+                path.strip_prefix(base).map(|relative| {
+                    let relative = Path::new(".").join(relative);
+                    if lha32 && path.is_dir() {
+                        relative.join("*.*")
+                    } else {
+                        relative
+                    }
+                })
             })
             .collect::<Result<BTreeSet<_>, _>>()
             .map_err(io::Error::other)?;
         let output_name = format!("output.{}", self.extension);
         let output_arg = Path::new("..").join(&output_name);
         let mut command = Command::new(&self.executable);
+        if password.is_some()
+            && self.executable.file_stem().is_some_and(|name| {
+                ["7z", "7zg", "rar", "winrar", "ace", "winace"]
+                    .iter()
+                    .any(|tool| name.eq_ignore_ascii_case(tool))
+            })
+            && !self
+                .arguments
+                .iter()
+                .any(|argument| argument.starts_with("-p"))
+        {
+            command.arg("-p");
+        }
         command.current_dir(&data).stdin(Stdio::null());
         #[cfg(windows)]
         {
@@ -179,9 +242,80 @@ impl PackerProfile {
                 }
             }
         }
-        external_archives::capture_output("Externer Packer", command, 1024 * 1024, cancel)?;
-        let archive = working.path().join(output_name);
-        let catalog = archive_view::Catalog::read(&archive, cancel)?;
+        if sources.is_empty() {
+            let empty = working.path().join(&output_name);
+            match self.extension.as_str() {
+                "rar" => {
+                    let mut data = b"Rar!\x1a\x07\x01\0".to_vec();
+                    for body in [[1u8, 0, 0], [5, 0, 0]] {
+                        let mut header = vec![3];
+                        header.extend_from_slice(&body);
+                        data.extend_from_slice(&crc32fast::hash(&header).to_le_bytes());
+                        data.extend(header);
+                    }
+                    fs::write(empty, data)?;
+                }
+                "arj" => {
+                    let mut main = vec![0u8; 32];
+                    main[..8].copy_from_slice(&[30, 3, 1, 0, 0, 0, 2, 0]);
+                    let mut data = vec![0x60, 0xea, 32, 0];
+                    data.extend_from_slice(&main);
+                    data.extend_from_slice(&crc32fast::hash(&main).to_le_bytes());
+                    data.extend_from_slice(&[0, 0, 0x60, 0xea, 0, 0]);
+                    fs::write(empty, data)?;
+                }
+                "lha" | "lzh" => fs::write(empty, [0])?,
+                _ => {
+                    external_archives::capture_output_input(
+                        "Externer Packer",
+                        command,
+                        1024 * 1024,
+                        cancel,
+                        external_archives::password_input(password, true)?,
+                    )?;
+                }
+            }
+        } else {
+            external_archives::capture_output_input(
+                "Externer Packer",
+                command,
+                1024 * 1024,
+                cancel,
+                external_archives::password_input(password, true)?,
+            )?;
+        }
+        let mut archive = working.path().join(&output_name);
+        if !archive.try_exists()? {
+            let first = regex::Regex::new(
+                r"(?i)^output(?:\.part0*1\.(?:rar|exe)|\.(?:zip|7z)\.001|(?:\.uc2)?\.p01)$",
+            )
+            .expect("fixed first-volume pattern");
+            let candidates = fs::read_dir(working.path())?
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| first.is_match(name))
+                })
+                .map(|entry| entry.path())
+                .collect::<Vec<_>>();
+            if candidates.len() != 1 {
+                return Err(io::Error::other(
+                    "Der Packer hat keinen eindeutigen Archiveinstieg erzeugt.",
+                ));
+            }
+            archive = candidates[0].clone();
+        }
+        let catalog = archive_view::Catalog::read_with_password(&archive, password, cancel)?;
+        if password.is_some()
+            && expected.iter().any(|(_, size)| size.is_some())
+            && !catalog.contains_encrypted_entries()
+        {
+            return Err(io::Error::other(
+                "Der Packer hat trotz gesetztem Passwort kein verschlüsseltes Archiv erzeugt. Prüfe seine Profilargumente.",
+            ));
+        }
         let query = tools::Search {
             names: files::compile_masks("")?,
             text: None,
@@ -192,7 +326,7 @@ impl PackerProfile {
             ignore: None,
         };
         let contents: BTreeSet<_> = catalog
-            .search(Path::new(""), &query, None, cancel)?
+            .search(Path::new(""), &query, password, cancel)?
             .entries
             .into_iter()
             .map(|entry| (entry.path.to_string_lossy().to_lowercase(), entry.size))
@@ -202,13 +336,50 @@ impl PackerProfile {
                 "Einträge oder Dateigrößen des Archivs weichen von der Auswahl ab.",
             ));
         }
-        archive_view::test(&archive, None, cancel)?;
-        File::options().write(true).open(&archive)?.sync_all()?;
-        files::check_cancel(cancel)?;
-        TempPath::try_from_path(archive)?
-            .persist_noclobber(target)
-            .map_err(|error| error.error)?;
-        Ok(())
+        archive_view::test(&archive, password, cancel)?;
+        let parts = catalog
+            .storage_paths()
+            .map(Path::to_path_buf)
+            .collect::<Vec<_>>();
+        let target_stem = target
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .ok_or_else(|| io::Error::other("Archivname benötigt Unicode."))?;
+        let rar_stem = regex::Regex::new(r"(?i)\.part[0-9]+$").expect("fixed RAR stem pattern");
+        let target_stem = if self.extension == "rar" {
+            rar_stem.replace(target_stem, "").into_owned()
+        } else {
+            target_stem.to_owned()
+        };
+        let mut replacements = Vec::new();
+        for part in parts {
+            files::check_cancel(cancel)?;
+            if part.parent() != Some(working.path()) {
+                return Err(io::Error::other(
+                    "Ein Packerteil liegt außerhalb des Arbeitsordners.",
+                ));
+            }
+            File::options().write(true).open(&part)?.sync_all()?;
+            let name = part
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_prefix("output"))
+                .ok_or_else(|| io::Error::other("Unerwarteter Name eines Packerteils."))?;
+            let target = if part == archive && archive.file_name() == Some(OsStr::new(&output_name))
+            {
+                parent.join(target.file_name().expect("validated target name"))
+            } else {
+                parent.join(tools::output_name(&format!("{target_stem}{name}"))?)
+            };
+            replacements.push((part, target));
+        }
+        catalog.check_unchanged()?;
+        let outputs = replacements
+            .iter()
+            .map(|(_, target)| target.clone())
+            .collect();
+        tools::publish_parts(replacements, cancel)?;
+        Ok(outputs)
     }
 }
 

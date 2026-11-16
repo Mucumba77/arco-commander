@@ -438,6 +438,7 @@ mod tests {
         };
         let (sender, receiver) = mpsc::channel();
         let job = JobContext {
+            archives: Default::default(),
             cancel: Arc::new(AtomicBool::new(false)),
             sender,
         };
@@ -499,6 +500,7 @@ mod tests {
         let worker_pause = paused.clone();
         let (sender, _receiver) = mpsc::channel();
         let job = JobContext {
+            archives: Default::default(),
             cancel: Arc::new(AtomicBool::new(false)),
             sender,
         };
@@ -544,6 +546,7 @@ mod tests {
         let worker_pause = paused.clone();
         let (sender, receiver) = mpsc::channel();
         let job = JobContext {
+            archives: Default::default(),
             cancel: Arc::new(AtomicBool::new(false)),
             sender,
         };

@@ -1234,3 +1234,46 @@ Drucker im Dateifenster	Printers in file panel
 Netzwerk im Dateifenster	Network in file panel
 Papierkorb im Dateifenster	Recycle Bin in file panel
 Verschieben erhält Links. Metadatenoptionen gelten für das Linkobjekt; sein Ziel wird nicht durchlaufen. Symbolische Links benötigen die passende Windows-Berechtigung oder den Entwicklermodus.	Moving preserves links. Metadata options apply to the link itself; its target is not traversed. Symbolic links require the appropriate Windows privilege or Developer Mode.
+7z-Kompression	7z compression
+7z-Kompressionsmethode	7z compression method
+7z-Kompressionsrate	7z compression level
+Archivdatum auf neueste Quelldatei setzen	Use newest source timestamp for archive
+Auch Dateinamen verschlüsseln	Encrypt filenames too
+Auswahl und Ordnerstruktur	Selection and folder structure
+Basisordner weglassen	Omit base folder
+Ein Archiv pro ausgewählter Datei oder Ordner	One archive per selected file or folder
+GZIP-Kompressionsrate	GZIP compression level
+Gilt auch für Packer-Plugins. Bei Mehrteilern wird die strengste vorhandene Markierung übernommen.	Also applies to packer plugins. Multipart archives inherit the strictest existing zone.
+Herkunftsmarkierung beim Entpacken	Origin marking when extracting
+Herkunftsmarkierung weglassen	Omit origin marking
+Kompression, Verschlüsselung und Herkunft entpackter Dateien.	Compression, encryption and origin of extracted files.
+Kompressionsmethode	Compression method
+Kompressionsrate	Compression level
+Nach erfolgreicher Prüfung ins Archiv verschieben	Move into archive after successful verification
+Ohne Kompression	Without compression
+Pfadnamen mit speichern	Store pathnames
+Prüfung und Dateieigenschaften	Verification and file properties
+Solid-Archiv erstellen	Create solid archive
+TAR und GZIP	TAR and GZIP
+TAR-Format	TAR format
+Unterordner rekursiv mitpacken	Include subfolders recursively
+Verschlüsselung bei gesetztem Passwort	Encryption when a password is set
+ZIP nach dem Packen prüfen	Verify ZIP after packing
+ZIP-Kompression	ZIP compression
+ZIP-Kompressionsrate	ZIP compression level
+ZIP-Verschlüsselung	ZIP encryption
+Zone.Identifier übernehmen	Preserve Zone.Identifier
+Archiveinstellungen …	Archive settings…
+Archiveinstellungen	Archive settings
+Packerpasswort (optional)	Packer password (optional)
+TAR + GZIP (.tgz)	TAR + GZIP (.tgz)
+ACE-Mehrteiler	Multipart ACE
+ACE-Mehrteiler (ohne Kompression)	Multipart ACE (without compression)
+ACE-Mehrteiler (LZ77)	Multipart ACE (LZ77)
+Wähle gültige Archivoptionen.	Choose valid archive options.
+Passwörter sind für ZIP, 7z und ACE einschließlich unterstützter SFX-Varianten vorgesehen.	Passwords are available for ZIP, 7z and ACE, including supported SFX variants.
+CPU-Threads (0 = automatisch)	CPU threads (0 = automatic)
+Wörterbuch in KiB (0 = automatisch)	Dictionary in KiB (0 = automatic)
+Wortgröße (0 = automatisch)	Word size (0 = automatic)
+Solid-Block in MiB (0 = automatisch)	Solid block in MiB (0 = automatic)
+Eigene Speicher- und Threadwerte verwenden den mitgelieferten 7-Zip-Konsolenadapter.	Custom memory and thread values use the bundled 7-Zip console adapter.

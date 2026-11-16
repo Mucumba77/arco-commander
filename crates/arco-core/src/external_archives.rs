@@ -19,11 +19,21 @@ pub struct ExternalArchiver {
     executable: PathBuf,
 }
 
+#[derive(Debug)]
+pub(crate) struct HeaderPassword;
+impl std::fmt::Display for HeaderPassword {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Das Archiv konnte nicht ohne Passwort gelesen werden. Prüfe Passwort, Dateinamenverschlüsselung und Archivdaten.")
+    }
+}
+impl std::error::Error for HeaderPassword {}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Format {
     SevenZip,
     SevenZipSfx,
     Tar,
+    TarGzip,
     Gzip,
 }
 
@@ -58,6 +68,13 @@ pub fn is_supported(path: &Path) -> bool {
                         | "tzst"
                 )
             })
+}
+
+pub(crate) fn is_empty_lha(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("lha") || ext.eq_ignore_ascii_case("lzh"))
+        && files::regular_metadata(path).is_ok_and(|metadata| metadata.len() == 1)
+        && fs::read(path).is_ok_and(|bytes| bytes == [0])
 }
 
 pub(crate) fn is_first_volume(path: &Path) -> bool {
@@ -129,6 +146,42 @@ pub(crate) fn sfx_module() -> io::Result<PathBuf> {
 }
 
 impl ExternalArchiver {
+    pub(crate) fn pack_zip_options(
+        &self,
+        paths: &[PathBuf],
+        base: &Path,
+        target: &Path,
+        password: Option<&str>,
+        settings: crate::archive_settings::Settings,
+        cancel: &AtomicBool,
+    ) -> io::Result<()> {
+        settings.validate()?;
+        let mut arguments: Vec<String> = ["a", "-tzip", "-mm=LZMA", "-spd", "-y"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        arguments.push(format!("-mx={}", settings.zip_level));
+        if password.is_some() {
+            use crate::archive_settings::ZipCipher;
+            let method = match settings.zip_cipher {
+                ZipCipher::Aes256 => "AES256",
+                ZipCipher::Aes192 => "AES192",
+                ZipCipher::Aes128 => "AES128",
+                ZipCipher::ZipCrypto => "ZipCrypto",
+            };
+            arguments.extend([format!("-mem={method}"), "-p".into()]);
+        }
+        if settings.newest_timestamp {
+            arguments.push("-stl".into());
+        }
+        arguments.extend(["{archive}".into(), "{sources}".into()]);
+        crate::packer_profile::PackerProfile {
+            executable: self.executable.clone(),
+            extension: "zip".into(),
+            arguments,
+        }
+        .pack_with_password(paths, base, target, password, cancel)
+    }
     pub fn discover(cancel: &AtomicBool) -> io::Result<Self> {
         let executable = configured_executable()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "7-Zip wurde nicht gefunden"))?;
@@ -159,30 +212,148 @@ impl ExternalArchiver {
     }
 
     pub fn list(&self, archive: &Path, cancel: &AtomicBool) -> io::Result<Vec<Entry>> {
+        self.list_with_password(archive, None, cancel)
+    }
+
+    pub(crate) fn pack_seven_options(
+        &self,
+        paths: &[PathBuf],
+        base: &Path,
+        target: &Path,
+        password: Option<&str>,
+        settings: crate::archive_settings::Settings,
+        cancel: &AtomicBool,
+    ) -> io::Result<()> {
+        use crate::archive_settings::SevenZipMethod;
+        settings.validate()?;
+        let method = match settings.seven_zip_method {
+            SevenZipMethod::Lzma2 => "LZMA2",
+            SevenZipMethod::Lzma => "LZMA",
+            SevenZipMethod::Ppmd => "PPMd",
+            SevenZipMethod::Bzip2 => "BZip2",
+        };
+        let mut arguments = vec![
+            "a".into(),
+            "-t7z".into(),
+            "-spd".into(),
+            "-y".into(),
+            format!("-mx={}", settings.seven_zip_level),
+            format!("-m0={method}"),
+            format!(
+                "-mmt={}",
+                if settings.threads == 0 {
+                    "on".into()
+                } else {
+                    settings.threads.to_string()
+                }
+            ),
+        ];
+        arguments.push(if !settings.solid {
+            "-ms=off".into()
+        } else if settings.solid_block_mib == 0 {
+            "-ms=on".into()
+        } else {
+            format!("-ms={}m", settings.solid_block_mib)
+        });
+        if settings.dictionary_kib != 0 {
+            arguments.push(format!(
+                "-m{}={}k",
+                if settings.seven_zip_method == SevenZipMethod::Ppmd {
+                    "mem"
+                } else {
+                    "d"
+                },
+                settings.dictionary_kib
+            ));
+        }
+        if settings.word_size != 0 {
+            arguments.push(format!(
+                "-m{}={}",
+                if settings.seven_zip_method == SevenZipMethod::Ppmd {
+                    "o"
+                } else {
+                    "fb"
+                },
+                settings.word_size
+            ));
+        }
+        if password.is_some() {
+            arguments.push(format!(
+                "-mhe={}",
+                if settings.encrypt_headers {
+                    "on"
+                } else {
+                    "off"
+                }
+            ));
+        }
+        if settings.newest_timestamp {
+            arguments.push("-stl".into());
+        }
+        arguments.extend(["{archive}".into(), "{sources}".into()]);
+        crate::packer_profile::PackerProfile {
+            executable: self.executable.clone(),
+            extension: "7z".into(),
+            arguments,
+        }
+        .pack_with_password(paths, base, target, password, cancel)
+    }
+
+    pub(crate) fn list_with_password(
+        &self,
+        archive: &Path,
+        password: Option<&str>,
+        cancel: &AtomicBool,
+    ) -> io::Result<Vec<Entry>> {
         let mut command = self.command();
         command
             .args(["l", "-slt", "-ba", "-sccUTF-8", "--"])
             .arg(archive);
-        let listing = capture(command, LIST_LIMIT, cancel)?;
+        let listing = capture_output_input(
+            "7-Zip",
+            command,
+            LIST_LIMIT,
+            cancel,
+            password_input(password, false)?,
+        )
+        .map_err(|error| {
+            if password.is_none()
+                && error.kind() != io::ErrorKind::Interrupted
+                && crate::external_volumes::rar_headers_encrypted(archive)
+            {
+                io::Error::other(HeaderPassword)
+            } else {
+                error
+            }
+        })?;
         if let Some(name) = stream_name(archive)? {
             let text = std::str::from_utf8(&listing).map_err(io::Error::other)?;
             let sizes = text
                 .lines()
                 .filter_map(|line| line.strip_prefix("Size = "))
                 .collect::<Vec<_>>();
-            let size = match sizes.as_slice() {
-                [""] | [] => {
-                    let mut command = self.command();
-                    command.args(["x", "-so", "-spd", "--"]).arg(archive);
-                    measure_stream(command, cancel)?
-                }
-                [value] => value
-                    .parse::<u64>()
-                    .map_err(|_| io::Error::other("archive stream has no verified size"))?,
-                _ => {
-                    return Err(io::Error::other(
-                        "a compressed stream must have one payload",
-                    ));
+            let gzip = archive.extension().is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("gz") || ext.eq_ignore_ascii_case("tgz")
+            });
+            let size = if gzip {
+                let mut command = self.command();
+                command.args(["x", "-so", "-spd", "--"]).arg(archive);
+                measure_stream(command, cancel)?
+            } else {
+                match sizes.as_slice() {
+                    [""] | [] => {
+                        let mut command = self.command();
+                        command.args(["x", "-so", "-spd", "--"]).arg(archive);
+                        measure_stream(command, cancel)?
+                    }
+                    [value] => value
+                        .parse::<u64>()
+                        .map_err(|_| io::Error::other("archive stream has no verified size"))?,
+                    _ => {
+                        return Err(io::Error::other(
+                            "a compressed stream must have one payload",
+                        ));
+                    }
                 }
             };
             let entries = parse_list_fallback(&listing, Some((&name, size)))?;
@@ -196,10 +367,29 @@ impl ExternalArchiver {
     }
 
     pub fn test(&self, archive: &Path, cancel: &AtomicBool) -> io::Result<usize> {
-        let entries = self.list(archive, cancel)?;
+        self.test_with_password(archive, None, cancel)
+    }
+
+    pub(crate) fn test_with_password(
+        &self,
+        archive: &Path,
+        password: Option<&str>,
+        cancel: &AtomicBool,
+    ) -> io::Result<usize> {
+        let original = files::regular_metadata(archive)?;
+        let volumes = crate::external_volumes::snapshot(archive, cancel)?;
+        let entries = self.list_with_password(archive, password, cancel)?;
         let mut command = self.command();
         command.args(["t", "-bso0", "--"]).arg(archive);
-        capture(command, 64 * 1024, cancel)?;
+        capture_output_input(
+            "7-Zip",
+            command,
+            64 * 1024,
+            cancel,
+            password_input(password, false)?,
+        )?;
+        files::ensure_unchanged(archive, &original)?;
+        crate::uc2_volumes::unchanged(&volumes)?;
         Ok(entries.len())
     }
 
@@ -219,16 +409,37 @@ impl ExternalArchiver {
         selection: Option<&crate::archive_view::Selection>,
         cancel: &AtomicBool,
     ) -> io::Result<usize> {
-        let entries = self.list(archive, cancel)?;
+        self.extract_with_zone(
+            archive,
+            destination,
+            selection,
+            None,
+            cancel,
+            Default::default(),
+        )
+    }
+
+    pub(crate) fn extract_with_zone(
+        &self,
+        archive: &Path,
+        destination: &Path,
+        selection: Option<&crate::archive_view::Selection>,
+        password: Option<&str>,
+        cancel: &AtomicBool,
+        policy: crate::archive_zone::ZonePolicy,
+    ) -> io::Result<usize> {
+        let original = files::regular_metadata(archive)?;
+        let volumes = crate::external_volumes::snapshot(archive, cancel)?;
+        let entries = self.list_with_password(archive, password, cancel)?;
         let entries = crate::archive_view::project(
             entries,
             selection,
             |entry| (&entry.path, entry.size, entry.directory),
             cancel,
         )?;
-        if entries.iter().any(|(entry, _)| entry.encrypted) {
+        if password.is_none() && entries.iter().any(|(entry, _)| entry.encrypted) {
             return Err(io::Error::other(
-                "Passwortgeschützte externe Archive werden derzeit nicht entpackt.",
+                "Für die verschlüsselten Archiveinträge ist ein Passwort erforderlich.",
             ));
         }
         let base = crate::archive_view::check_destination(
@@ -237,10 +448,12 @@ impl ExternalArchiver {
             |entry| entry.directory,
             cancel,
         )?;
-        let zone = crate::archive_zone::ArchiveZone::read(archive, cancel)?;
+        let zone = crate::archive_zone::ArchiveZone::read_with_policy(archive, cancel, policy)?;
         let mut completed = 0;
         for (entry, relative) in entries {
             files::check_cancel(cancel)?;
+            files::ensure_unchanged(archive, &original)?;
+            crate::uc2_volumes::unchanged(&volumes)?;
             let target = base.join(&relative);
             let parent = if entry.directory {
                 &relative
@@ -261,7 +474,16 @@ impl ExternalArchiver {
             if !entry.raw_path.is_empty() {
                 command.arg(&entry.raw_path);
             }
-            stream_to_file(command, output.reopen()?, entry.size, cancel)?;
+            stream_output_input(
+                "7-Zip",
+                command,
+                output.reopen()?,
+                entry.size,
+                cancel,
+                password_input(password, false)?,
+            )?;
+            files::ensure_unchanged(archive, &original)?;
+            crate::uc2_volumes::unchanged(&volumes)?;
             zone.apply(output.path())?;
             crate::archive_view::preserve_timestamp(output.as_file(), entry.modified)?;
             output.as_file().sync_all()?;
@@ -282,6 +504,55 @@ impl ExternalArchiver {
         format: Format,
         cancel: &AtomicBool,
     ) -> io::Result<()> {
+        self.pack_with_options(paths, base, target, format, Default::default(), cancel)
+    }
+
+    pub fn pack_with_options(
+        &self,
+        paths: &[PathBuf],
+        base: &Path,
+        target: &Path,
+        format: Format,
+        settings: crate::archive_settings::Settings,
+        cancel: &AtomicBool,
+    ) -> io::Result<()> {
+        settings.validate()?;
+        if format == Format::TarGzip {
+            let parent = target
+                .parent()
+                .ok_or_else(|| io::Error::other("Zielordner fehlt."))?;
+            let working = tempfile::tempdir_in(parent)?;
+            let tar = working.path().join("archive.tar");
+            self.pack_with_options(paths, base, &tar, Format::Tar, settings, cancel)?;
+            let gzip = working.path().join("archive.tgz");
+            self.pack_with_options(
+                &[tar],
+                working.path(),
+                &gzip,
+                Format::Gzip,
+                settings,
+                cancel,
+            )?;
+            crate::archive_view::test(&gzip, None, cancel)?;
+            files::check_cancel(cancel)?;
+            return TempPath::try_from_path(gzip)?
+                .persist_noclobber(target)
+                .map(|_| ())
+                .map_err(|error| error.error);
+        }
+        if paths.is_empty() && format == Format::Tar {
+            let parent = target
+                .parent()
+                .ok_or_else(|| io::Error::other("Zielordner fehlt."))?;
+            let mut empty = NamedTempFile::new_in(parent)?;
+            empty.write_all(&[0; 1024])?;
+            empty.as_file().sync_all()?;
+            files::check_cancel(cancel)?;
+            return empty
+                .persist_noclobber(target)
+                .map(|_| ())
+                .map_err(|error| error.error);
+        }
         if paths.is_empty() || (format == Format::Gzip && (paths.len() != 1 || !paths[0].is_file()))
         {
             return Err(io::Error::new(
@@ -307,6 +578,7 @@ impl ExternalArchiver {
         }
         let base = fs::canonicalize(base)?;
         let mut items = Vec::new();
+        let mut snapshots = Vec::new();
         for path in paths {
             files::check_cancel(cancel)?;
             let metadata = files::regular_metadata(path)?;
@@ -323,7 +595,14 @@ impl ExternalArchiver {
             }
             for item in WalkDir::new(&path).follow_links(false) {
                 files::check_cancel(cancel)?;
-                files::regular_metadata(item?.path())?;
+                let item = item?;
+                snapshots.push((
+                    item.path().to_path_buf(),
+                    files::regular_metadata(item.path())?,
+                ));
+                if snapshots.len() > ENTRY_LIMIT {
+                    return Err(io::Error::other("Zu viele Archivquellen."));
+                }
             }
             items.push(relative.to_string());
         }
@@ -334,6 +613,7 @@ impl ExternalArchiver {
             Format::SevenZip => ("-t7z", "archive-stage.7z"),
             Format::SevenZipSfx => ("-t7z", "archive-stage.exe"),
             Format::Tar => ("-ttar", "archive-stage.tar"),
+            Format::TarGzip => unreachable!("compressed TAR handled before source planning"),
             Format::Gzip => ("-tgzip", "archive-stage.gz"),
         };
         let stage = working.path().join(staging_name);
@@ -343,6 +623,18 @@ impl ExternalArchiver {
         command
             .current_dir(base)
             .args(["a", format_flag, "-spd", "-scsUTF-8", "-bso0"]);
+        if format == Format::Gzip {
+            command.arg(format!("-mx={}", settings.gzip_level));
+        }
+        if format == Format::Tar {
+            command.arg(
+                if settings.tar_dialect == crate::archive_settings::TarDialect::Gnu {
+                    "-mm=gnu"
+                } else {
+                    "-mm=posix"
+                },
+            );
+        }
         if format == Format::SevenZipSfx {
             let module = std::env::var_os("ARCO_7ZIP_SFX")
                 .map(PathBuf::from)
@@ -364,6 +656,16 @@ impl ExternalArchiver {
             ));
         }
         self.test(&stage, cancel)?;
+        for (path, metadata) in &snapshots {
+            files::check_cancel(cancel)?;
+            files::ensure_unchanged(path, metadata)?;
+        }
+        let newest = snapshots
+            .iter()
+            .filter(|(_, metadata)| metadata.is_file())
+            .filter_map(|(_, metadata)| metadata.modified().ok())
+            .max();
+        settings.finish(&stage, newest)?;
         fs::OpenOptions::new()
             .write(true)
             .open(&stage)?
@@ -469,6 +771,11 @@ fn parse_list_fallback(bytes: &[u8], fallback: Option<(&str, u64)>) -> io::Resul
     let mut names = BTreeMap::new();
     let mut total = 0u64;
     for line in text.lines().chain(Some("")) {
+        // The console reader prints this prompt on stdout even with stdin
+        // redirected. It is protocol framing, never an archive field.
+        if line.trim() == "Enter password (will not be echoed):" {
+            continue;
+        }
         if !line.is_empty() {
             let (key, value) = line
                 .split_once(" = ")
@@ -569,15 +876,29 @@ fn capture(command: Command, limit: u64, cancel: &AtomicBool) -> io::Result<Vec<
 
 pub(crate) fn capture_output(
     tool: &str,
-    mut command: Command,
+    command: Command,
     limit: u64,
     cancel: &AtomicBool,
 ) -> io::Result<Vec<u8>> {
+    capture_output_input(tool, command, limit, cancel, None)
+}
+
+pub(crate) fn capture_output_input(
+    tool: &str,
+    mut command: Command,
+    limit: u64,
+    cancel: &AtomicBool,
+    input: Option<zeroize::Zeroizing<Vec<u8>>>,
+) -> io::Result<Vec<u8>> {
     files::check_cancel(cancel)?;
+    if input.is_some() {
+        command.stdin(Stdio::piped());
+    }
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()?;
+    send_input(&mut child, input)?;
     let stdout = child.stdout.take().expect("stdout piped");
     let reader = std::thread::spawn(move || {
         let mut data = Vec::new();
@@ -597,27 +918,23 @@ pub(crate) fn capture_output(
     bytes
 }
 
-fn stream_to_file(
-    command: Command,
-    output: File,
-    expected: u64,
-    cancel: &AtomicBool,
-) -> io::Result<()> {
-    stream_output("7-Zip", command, output, expected, cancel)
-}
-
-pub(crate) fn stream_output(
+pub(crate) fn stream_output_input(
     tool: &str,
     mut command: Command,
     mut output: File,
     expected: u64,
     cancel: &AtomicBool,
+    input: Option<zeroize::Zeroizing<Vec<u8>>>,
 ) -> io::Result<()> {
     files::check_cancel(cancel)?;
+    if input.is_some() {
+        command.stdin(Stdio::piped());
+    }
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()?;
+    send_input(&mut child, input)?;
     let stdout = child.stdout.take().expect("stdout piped");
     let reader = std::thread::spawn(move || {
         let length = io::copy(&mut stdout.take(expected + 1), &mut output)?;
@@ -633,6 +950,51 @@ pub(crate) fn stream_output(
         return Err(io::Error::other("archive entry size mismatch"));
     }
     Ok(())
+}
+
+fn send_input(child: &mut Child, input: Option<zeroize::Zeroizing<Vec<u8>>>) -> io::Result<()> {
+    if let Some(input) = input {
+        // Bound the pipe write; passwords never enter command lines, logs or files.
+        let result = if input.len() > 4096 {
+            Err(io::Error::other("Die Adaptereingabe überschreitet 4 KiB."))
+        } else {
+            match child.stdin.take() {
+                Some(mut pipe) => pipe.write_all(&input),
+                None => Err(io::Error::other("Adaptereingabe fehlt.")),
+            }
+        };
+        if let Err(error) = result {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn password_input(
+    password: Option<&str>,
+    confirm: bool,
+) -> io::Result<Option<zeroize::Zeroizing<Vec<u8>>>> {
+    password
+        .map(|password| {
+            if password.is_empty() || password.len() > 1024 || password.contains(['\0', '\n', '\r'])
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Das Packerpasswort benötigt 1–1024 UTF-8-Bytes ohne Zeilenumbrüche oder NUL.",
+                ));
+            }
+            let mut input = zeroize::Zeroizing::new(Vec::new());
+            input.extend_from_slice(password.as_bytes());
+            input.push(b'\n');
+            if confirm {
+                input.extend_from_slice(password.as_bytes());
+                input.push(b'\n');
+            }
+            Ok(input)
+        })
+        .transpose()
 }
 
 fn wait(tool: &str, child: &mut Child, cancel: &AtomicBool) -> io::Result<()> {
@@ -658,6 +1020,17 @@ fn wait(tool: &str, child: &mut Child, cancel: &AtomicBool) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn password_prompt_is_framing_and_other_unexpected_lines_are_rejected() {
+        let member = "Path = data.txt\nFolder = -\nSize = 3\nEncrypted = +\n\n";
+        let listed = super::parse_list(
+            format!("\nEnter password (will not be echoed):\n{member}").as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].encrypted);
+        assert!(super::parse_list(format!("unexpected output\n{member}").as_bytes()).is_err());
+    }
     #[test]
     #[ignore = "requires 7-Zip 26.05+ via ARCO_7ZIP_PATH"]
     fn independent_nameless_bzip2_and_xz_streams_list_and_extract_with_verified_sizes() {

@@ -49,7 +49,7 @@ mod wlx_bitmap;
 pub use detection::{WLX_DETECT_BYTES, WlxDetection, WlxFile};
 pub use operations::{
     DownloadConflict, WFX_TREE_DEPTH, WFX_TREE_ENTRIES, WcxOperation, WfxOperation, WfxOverwrite,
-    WfxVersion, operate, operate_interactive, wfx_batch, wfx_batch_filtered,
+    WfxVersion, operate, operate_interactive, operate_with_zone, wfx_batch, wfx_batch_filtered,
 };
 pub use registry::*;
 pub use wdx::{WdxKey, WdxMatcher, WdxValue, wdx_order};

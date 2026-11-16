@@ -1,5 +1,13 @@
 use std::{io, path::Path, sync::atomic::AtomicBool};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ZonePolicy {
+    #[default]
+    Preserve,
+    Omit,
+}
+
 #[cfg(windows)]
 use std::{
     fs::File,
@@ -14,15 +22,28 @@ pub(crate) struct ArchiveZone {
 }
 
 impl ArchiveZone {
+    pub(crate) fn read_with_policy(
+        source: &Path,
+        cancel: &AtomicBool,
+        policy: ZonePolicy,
+    ) -> io::Result<Self> {
+        match policy {
+            ZonePolicy::Preserve => Self::read(source, cancel),
+            ZonePolicy::Omit => {
+                crate::files::check_cancel(cancel)?;
+                Ok(Self::default())
+            }
+        }
+    }
     #[cfg(windows)]
     pub(crate) fn read(source: &Path, cancel: &AtomicBool) -> io::Result<Self> {
-        use crate::{archive_parts, files, tools, uc2_volumes};
+        use crate::{archive_parts, files, legacy_archives, tools};
         let mut zone = Self::default();
         let mut rank = None;
         let parts = if archive_parts::kind(source).is_some() {
             archive_parts::following(source, cancel)?
         } else {
-            uc2_volumes::snapshot(source)?
+            legacy_archives::storage_parts(source, cancel)?
         };
         for path in std::iter::once(source).chain(
             parts
@@ -133,6 +154,23 @@ mod tests {
             fs::read(stream_path(&output.path().join("probe.txt"))).unwrap(),
             lower
         );
+        let unmarked = tempfile::tempdir().unwrap();
+        archive_view::extract_with_options(
+            &zip,
+            unmarked.path(),
+            None,
+            None,
+            &cancel,
+            |_| {},
+            ZonePolicy::Omit,
+        )
+        .unwrap();
+        assert!(!stream_path(&unmarked.path().join("probe.txt")).exists());
+        assert_eq!(
+            fs::read(unmarked.path().join("probe.txt")).unwrap(),
+            b"fixture payload"
+        );
+        assert_eq!(fs::read(stream_path(&zip)).unwrap(), lower);
         let seven = root.join("marked.7z");
         assert!(archive_view::pack_split(paths, root, &seven, 61, None, &cancel).unwrap() > 1);
         let first = root.join("marked.7z.001");
