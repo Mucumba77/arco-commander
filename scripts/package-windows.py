@@ -138,7 +138,9 @@ def copy_seven_zip(directory, stage):
         destination = stage / "7zip" / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         if name in {"7z.exe", "7z.dll", "7z.sfx"}:
-            copy_executable(source, destination, 0x8664, 3 if name == "7z.exe" else None)
+            # The official x64 distribution includes the x86 SFX stub.
+            copy_executable(source, destination, 0x14c if name == "7z.sfx" else 0x8664,
+                            3 if name == "7z.exe" else None)
         else:
             shutil.copyfile(source, destination)
     shutil.copyfile(directory / "manifest.json", stage / "7zip" / "manifest.json")
