@@ -32,6 +32,8 @@ $env:CARGO_ENCODED_RUSTFLAGS = @(
 cargo build --locked --release --target i686-pc-windows-msvc -p arco-plugin-host
 ```
 
+Bereite vor dem Paketieren den fest versionierten 7-Zip-Konsolenadapter mit `py -3 scripts/prepare-7zip.py --extractor <absoluter-Pfad-zu-7z.exe>` vor. Das Skript prüft Download-Hashes und liest den Originalinstaller ausschließlich als Archiv; es führt ihn nicht aus. Lizenz und zugehöriger Quellcode werden mitgeliefert. ACE/UC2 bleiben optionale, separat eingerichtete Python-Erweiterungen.
+
 Committe den Release-Stand vor dem Paketieren. Das Skript verwendet `HEAD` für den Quellverweis in der Kurzanleitung und schreibt nach `target/distribution/v<VERSION>/`.
 
 ```powershell
@@ -40,7 +42,7 @@ py -3 scripts/package-windows.py
 
 Das Skript prüft Architektur, GUI-Subsystem, lokale Buildpfade und die Programmversion. Es entpackt das ZIP für Tests des Programmaufrufs, der beiden Plugin-Hosts und des ZIP-SFX-Moduls. Die Fensterbedienung und Zielsysteme haben separate manuelle Prüffälle.
 
-Wenn die Anwendung ausdrücklich nicht gestartet werden soll, verwende `py -3 scripts/package-windows.py --no-app-run`. Diese Variante führt auch `--version` und `--help` nicht aus und prüft stattdessen die eingebettete Versionszeichenfolge im Programm. Beide Plugin-Hosts, ZIP-SFX und die Paketintegrität werden weiterhin ohne Fenster geprüft. Release-Hinweise müssen den ausgelassenen Anwendungstest und die ausstehenden Fenstertests nennen.
+Wenn die Anwendung ausdrücklich nicht gestartet werden soll, verwende `py -3 scripts/package-windows.py --no-app-run --no-sfx-run`. Diese Variante führt auch `--version` und `--help` nicht aus und prüft stattdessen die eingebettete Versionszeichenfolge im Programm. Beide Plugin-Hosts, 7-Zip und die Paketintegrität werden weiterhin ohne Fenster geprüft; ZIP-SFX wird mit `--no-sfx-run` ausschließlich statisch geprüft. Die Windows-CI kompiliert alle Ziele und führt Bibliotheks-/Programmmodul- und Windows-Dateisystemtests aus. Suchprozess- und SFX-Integrationstests, die Produkt-EXEs starten, bleiben der gesonderten Abnahme vorbehalten. Release-Hinweise müssen den ausgelassenen Anwendungstest und die ausstehenden Fenstertests nennen.
 
 ## GitHub
 

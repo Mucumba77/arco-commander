@@ -10,6 +10,7 @@ pub(crate) enum SettingsPage {
     General = 0,
     Transfers = 5,
     Programs = 6,
+    Archives = 7,
 }
 
 pub(super) fn path_label(path: Option<&Path>) -> String {
@@ -152,12 +153,15 @@ fn apply_configuration(
         .map_err(|_| invalid("Gib eine ganze Zahl für KiB/s ein."))
         .map_err(ConfigurationError::at(5))?;
 
+    let archives = archive_settings(&value.archives).map_err(ConfigurationError::at(7))?;
+
     draft.language = language;
     draft.editor = editor;
     draft.everything_cli = everything;
     draft.transfer_rate_kib = transfer_rate_kib;
     draft.transfer_log = transfer_log;
     draft.transfer_descriptions = value.transfer_comments;
+    draft.archives = archives;
     draft.transfer_ntfs = NtfsCopyOptions {
         streams: value.ntfs.streams,
         permissions: value.ntfs.permissions,
@@ -223,6 +227,152 @@ fn optional_path(
     Ok(path)
 }
 
+pub(super) fn archive_draft(
+    value: arco_core::archive_settings::Settings,
+) -> crate::ArchiveDefaults {
+    use arco_core::archive_settings::{
+        SevenZipMethod, TarDialect, ZipCipher, ZipMethod, ZonePolicy,
+    };
+    crate::ArchiveDefaults {
+        zone: i32::from(value.zone == ZonePolicy::Omit),
+        zip_level: value.zip_level.into(),
+        seven_level: value.seven_zip_level.into(),
+        zip_method: match value.zip_method {
+            ZipMethod::Deflate => 0,
+            ZipMethod::Store => 1,
+            ZipMethod::Bzip2 => 2,
+            ZipMethod::Lzma => 3,
+            ZipMethod::Ppmd => 4,
+            ZipMethod::Xz => 5,
+            ZipMethod::Zstd => 6,
+        },
+        zip_cipher: match value.zip_cipher {
+            ZipCipher::Aes256 => 0,
+            ZipCipher::Aes192 => 1,
+            ZipCipher::Aes128 => 2,
+            ZipCipher::ZipCrypto => 3,
+        },
+        seven_method: match value.seven_zip_method {
+            SevenZipMethod::Lzma2 => 0,
+            SevenZipMethod::Lzma => 1,
+            SevenZipMethod::Ppmd => 2,
+            SevenZipMethod::Bzip2 => 3,
+        },
+        solid: value.solid,
+        gzip_level: value.gzip_level.into(),
+        tar_dialect: i32::from(value.tar_dialect == TarDialect::Posix),
+        encrypt_headers: value.encrypt_headers,
+        newest_timestamp: value.newest_timestamp,
+        verify: value.verify,
+        threads: value.threads.to_string().into(),
+        dictionary: value.dictionary_kib.to_string().into(),
+        word_size: value.word_size.to_string().into(),
+        solid_block: value.solid_block_mib.to_string().into(),
+    }
+}
+
+fn archive_settings(
+    value: &crate::ArchiveDefaults,
+) -> io::Result<arco_core::archive_settings::Settings> {
+    use arco_core::archive_settings::{
+        Settings, SevenZipMethod, TarDialect, ZipCipher, ZipMethod, ZonePolicy,
+    };
+    let invalid = || invalid("Wähle gültige Archivoptionen.");
+    let result = Settings {
+        zone: match value.zone {
+            0 => ZonePolicy::Preserve,
+            1 => ZonePolicy::Omit,
+            _ => return Err(invalid()),
+        },
+        zip_level: value.zip_level.try_into().map_err(|_| invalid())?,
+        seven_zip_level: value.seven_level.try_into().map_err(|_| invalid())?,
+        zip_method: match value.zip_method {
+            0 => ZipMethod::Deflate,
+            1 => ZipMethod::Store,
+            2 => ZipMethod::Bzip2,
+            3 => ZipMethod::Lzma,
+            4 => ZipMethod::Ppmd,
+            5 => ZipMethod::Xz,
+            6 => ZipMethod::Zstd,
+            _ => return Err(invalid()),
+        },
+        zip_cipher: match value.zip_cipher {
+            0 => ZipCipher::Aes256,
+            1 => ZipCipher::Aes192,
+            2 => ZipCipher::Aes128,
+            3 => ZipCipher::ZipCrypto,
+            _ => return Err(invalid()),
+        },
+        seven_zip_method: match value.seven_method {
+            0 => SevenZipMethod::Lzma2,
+            1 => SevenZipMethod::Lzma,
+            2 => SevenZipMethod::Ppmd,
+            3 => SevenZipMethod::Bzip2,
+            _ => return Err(invalid()),
+        },
+        solid: value.solid,
+        gzip_level: value.gzip_level.try_into().map_err(|_| invalid())?,
+        tar_dialect: match value.tar_dialect {
+            0 => TarDialect::Gnu,
+            1 => TarDialect::Posix,
+            _ => return Err(invalid()),
+        },
+        encrypt_headers: value.encrypt_headers,
+        newest_timestamp: value.newest_timestamp,
+        verify: value.verify,
+        threads: value
+            .threads
+            .trim()
+            .parse()
+            .or_else(|_| {
+                if value.threads.is_empty() {
+                    Ok(0)
+                } else {
+                    Err(())
+                }
+            })
+            .map_err(|_| invalid())?,
+        dictionary_kib: value
+            .dictionary
+            .trim()
+            .parse()
+            .or_else(|_| {
+                if value.dictionary.is_empty() {
+                    Ok(0)
+                } else {
+                    Err(())
+                }
+            })
+            .map_err(|_| invalid())?,
+        word_size: value
+            .word_size
+            .trim()
+            .parse()
+            .or_else(|_| {
+                if value.word_size.is_empty() {
+                    Ok(0)
+                } else {
+                    Err(())
+                }
+            })
+            .map_err(|_| invalid())?,
+        solid_block_mib: value
+            .solid_block
+            .trim()
+            .parse()
+            .or_else(|_| {
+                if value.solid_block.is_empty() {
+                    Ok(0)
+                } else {
+                    Err(())
+                }
+            })
+            .map_err(|_| invalid())?,
+    };
+    result.validate()?;
+    Ok(result)
+}
+
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, locale::tr(message))
 }
@@ -231,6 +381,61 @@ fn invalid(message: &str) -> io::Error {
 mod tests {
     use super::*;
     use arco_core::profile::Language;
+
+    #[test]
+    fn archive_form_preserves_options_and_rejects_invalid_choices_atomically() {
+        use arco_core::archive_settings::{
+            Settings, SevenZipMethod, TarDialect, ZipCipher, ZipMethod, ZonePolicy,
+        };
+        for method in [
+            ZipMethod::Store,
+            ZipMethod::Deflate,
+            ZipMethod::Bzip2,
+            ZipMethod::Lzma,
+            ZipMethod::Ppmd,
+            ZipMethod::Xz,
+            ZipMethod::Zstd,
+        ] {
+            let settings = Settings {
+                zip_method: method,
+                seven_zip_method: SevenZipMethod::Bzip2,
+                zip_cipher: ZipCipher::ZipCrypto,
+                zone: ZonePolicy::Omit,
+                zip_level: 9,
+                seven_zip_level: 1,
+                solid: true,
+                gzip_level: 2,
+                tar_dialect: TarDialect::Posix,
+                encrypt_headers: false,
+                newest_timestamp: true,
+                verify: false,
+                threads: 2,
+                dictionary_kib: 100,
+                word_size: 0,
+                solid_block_mib: 32,
+            };
+            let form = archive_draft(settings);
+            assert_eq!(archive_settings(&form).unwrap(), settings);
+            let mut profile = Profile::default();
+            let invalid = SettingsData {
+                language: 1,
+                transfer_rate: "0".into(),
+                archives: crate::ArchiveDefaults {
+                    zip_level: 10,
+                    ..form
+                },
+                ..Default::default()
+            };
+            assert_eq!(
+                apply_configuration(&mut profile, &invalid)
+                    .unwrap_err()
+                    .page,
+                7
+            );
+            assert_eq!(profile.language, Language::German);
+            assert_eq!(profile.archives, Settings::default());
+        }
+    }
 
     #[test]
     fn invalid_settings_identify_the_category_without_changing_saved_values() {

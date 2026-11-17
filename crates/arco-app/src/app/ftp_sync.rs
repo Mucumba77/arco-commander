@@ -1154,6 +1154,7 @@ mod tests {
             enable_copy_conflicts(&mut plan.rows, 0);
             let (sender, receiver) = std::sync::mpsc::channel();
             let job = JobContext {
+                archives: Default::default(),
                 cancel: Arc::new(AtomicBool::new(false)),
                 sender,
             };

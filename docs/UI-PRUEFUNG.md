@@ -2,6 +2,18 @@
 
 Die Fenstertests übernimmt der Projektinhaber. Diese Liste beschreibt die erwartete Bedienung der überarbeiteten Oberfläche; sie ist kein Protokoll bestandener Fenstertests.
 
+## Archiv-Erweiterungen nach Version 1.4.0
+
+- **Einstellungen:** „Konfigurieren → Archiveinstellungen“ mit Maus und Befehlspalette öffnen. Alle Felder ausschließlich mit Tab/Umschalt+Tab, Pfeiltasten und Leertaste bedienen. Kategorie mit Strg+Bild auf/ab wechseln; Eingaben müssen erhalten bleiben. Ungültige Rate, Wörterbuch- oder Wortgröße muss auf der Archivseite korrigierbar sein. Speichern und beim nächsten eigenen Start wieder prüfen; Deutsch/Englisch/Französisch und erhöhte DPI einbeziehen.
+- **Packauswahl:** Einen Baum mit zwei Dateien, Unterordner und leerem Ordner verwenden. Pfade/Rekursion/Basisordner und getrennte Archive jeweils umschalten. Dieselben Optionen im externen Packerprofil prüfen. Namenskollision bei flacher Ablage darf nichts überschreiben. „Verschieben“ darf Quellen erst nach erfolgreicher Prüfung aller Ergebnisse entfernen.
+- **Passwörter:** ZIP mit den angebotenen Verfahren, 7z mit sichtbaren/verdeckten Dateinamen und ACE erstellen. Falsches Passwort korrigieren; kein falscher Inhalt darf im Ziel erscheinen. Packformat ohne Passwortunterstützung darf kein verstecktes Passwort weiterverwenden. Mit Passwort konfigurierte externe Packer dürfen kein unverschlüsseltes Ergebnis veröffentlichen.
+- **Mehrteiler/SFX:** ZIP-/7z-Rohteiler, ACE- und UC2-SAS-Sätze öffnen, Auswahl kopieren, umbenennen und löschen. Fehlenden Folgepart und bereits vorhandenen Zielpart prüfen. SFX zunächst als Archiv betreten. Die Ausführung eines selbst erzeugten SFX bleibt eine separate bewusste Prüfung des Projektinhabers.
+- **Bearbeitung/Konflikte:** TAR/TGZ, UC2, Solid-/geschützte ACE sowie RAR/ARJ/LHA mit geeignetem Packerprofil ergänzen. Je Datei Ersetzen/Überspringen/alternativen Namen prüfen. Abbruch während Neuaufbau muss den bisherigen Archivsatz erhalten. Schreibschutz und gesperrtes ACE müssen klar gemeldet werden.
+- **Zonen:** Auf NTFS ein Testarchiv mit `Zone.Identifier` verwenden. Entpacken mit Übernahme und ohne Übernahme vergleichen; dasselbe mit einem passenden WCX-Plugin prüfen. Bei Mehrteilern muss die strengste vorhandene Markierung gelten.
+- **Fortschritt und Fokus:** Lange Pack-/Entpackaufträge in Vorder- und Hintergrund prüfen. Schritte und vorhandene Bytewerte müssen zusammenpassen. Bei unbekanntem Gesamtumfang muss eine Aktivitätsanzeige erscheinen. Abbrechen, Rückkehr zum Dateifenster und Fokus müssen per Maus und Tastatur funktionieren.
+
+Formatgrenzen, Hilfsprogramme und Hintergrundverhalten beschreibt [Archive bedienen](ARCHIVE.md).
+
 ## Ergänzungen aus Bereich 3 nach Version 1.2.0
 
 - **Partnerdateien:** Beispielsweise RAW-Dateien mit und ohne gleichnamiges JPG im selben Ordner anlegen. „Partnerdatei fehlt“ muss die Auswahl umkehren. Eine Datei im Unterordner oder ein gleichnamiger Ordner genügt nicht als Partner. Dieselben Fälle im Archiv und nach Profilwechsel prüfen.

@@ -141,8 +141,26 @@ pub fn operate(
     cancel: &AtomicBool,
     progress: impl FnMut(String),
 ) -> io::Result<Vec<Row>> {
+    operate_with_zone(
+        plugin,
+        archive,
+        operation,
+        cancel,
+        progress,
+        Default::default(),
+    )
+}
+
+pub fn operate_with_zone(
+    plugin: &Path,
+    archive: &Path,
+    operation: Operation,
+    cancel: &AtomicBool,
+    progress: impl FnMut(String),
+    zone: crate::archive_view::ZonePolicy,
+) -> io::Result<Vec<Row>> {
     match operation {
-        Operation::Wcx(operation) => wcx(plugin, archive, operation, cancel, progress),
+        Operation::Wcx(operation) => wcx(plugin, archive, operation, cancel, progress, zone),
         Operation::Wfx(operation) => wfx(plugin, operation, cancel, progress, None),
         _ => Err(invalid("Die Anfrage enthält keine Plugin-Dateioperation.")),
     }
@@ -164,6 +182,7 @@ fn wcx(
     operation: WcxOperation,
     cancel: &AtomicBool,
     progress: impl FnMut(String),
+    policy: crate::archive_view::ZonePolicy,
 ) -> io::Result<Vec<Row>> {
     check_absolute(archive)?;
     match operation {
@@ -171,6 +190,7 @@ fn wcx(
             let member = checked_member(&member)?;
             let target = destination(&target)?;
             let metadata = regular(archive)?;
+            let zone = crate::archive_zone::ArchiveZone::read_with_policy(archive, cancel, policy)?;
             let catalog = inspect(Interface::Wcx, plugin, archive, cancel)?;
             let entry = selected_member(&catalog, &member)?;
             let size = member_size(entry)?;
@@ -195,6 +215,7 @@ fn wcx(
                     "Die entpackte Größe weicht vom Archiveintrag ab.",
                 ));
             }
+            zone.apply(&staged)?;
             publish(staged, &target, None, cancel)?;
             Ok(rows)
         }
@@ -1197,6 +1218,48 @@ fn invalid(message: &str) -> io::Error {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires the headless WCX zone fixture via ARCO_TEST_WCX_ZONE and the plugin host"]
+    fn wcx_zone_policy_crosses_the_plugin_host_boundary() {
+        let plugin =
+            PathBuf::from(std::env::var_os("ARCO_TEST_WCX_ZONE").expect("ARCO_TEST_WCX_ZONE"));
+        let fixture = tempfile::tempdir().unwrap();
+        let archive = fixture.path().join("source.fixture");
+        fs::write(&archive, b"fixture archive").unwrap();
+        let zone = b"[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=https://example.invalid/archive\r\n";
+        let stream = |path: &Path| {
+            let mut name = path.as_os_str().to_owned();
+            name.push(":Zone.Identifier:$DATA");
+            PathBuf::from(name)
+        };
+        fs::write(stream(&archive), zone).expect("NTFS alternate streams required");
+        for (policy, name) in [
+            (crate::archive_view::ZonePolicy::Preserve, "marked.txt"),
+            (crate::archive_view::ZonePolicy::Omit, "plain.txt"),
+        ] {
+            let target = fixture.path().join(name);
+            operate_with_zone(
+                &plugin,
+                &archive,
+                Operation::Wcx(WcxOperation::Extract {
+                    member: "sample.txt".into(),
+                    target: target.clone(),
+                }),
+                &AtomicBool::new(false),
+                |_| {},
+                policy,
+            )
+            .unwrap();
+            assert_eq!(fs::read(&target).unwrap(), b"plugin");
+            if policy == crate::archive_view::ZonePolicy::Preserve {
+                assert_eq!(fs::read(stream(&target)).unwrap(), zone);
+            } else {
+                assert!(!stream(&target).exists());
+            }
+        }
+        assert_eq!(fs::read(stream(&archive)).unwrap(), zone);
+    }
 
     #[test]
     fn wfx_download_conflicts_preserve_target_on_skip_and_use_renamed_path_for_cleanup() {

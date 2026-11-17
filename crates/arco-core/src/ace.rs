@@ -74,7 +74,11 @@ fn pack_with_mode(
     encoding: Option<Encoding>,
     cancel: &AtomicBool,
 ) -> io::Result<()> {
-    let plan = archives::plan_sources(paths, base, Path::new(""), cancel)?;
+    let plan = if paths.is_empty() {
+        Vec::new()
+    } else {
+        archives::plan_sources(paths, base, Path::new(""), cancel)?
+    };
     let parent = fs::canonicalize(parent(target)?)?;
     for path in paths {
         if parent.starts_with(fs::canonicalize(path)?) {
@@ -278,9 +282,12 @@ fn encode_name(path: &Path) -> io::Result<Vec<u8>> {
 }
 
 fn decode_name(name: &[u8]) -> io::Result<PathBuf> {
+    archives::checked_archive_path(&decode_oem_name(name).replace('\\', "/"))
+}
+
+pub(crate) fn decode_oem_name(name: &[u8]) -> String {
     let oem: Vec<_> = OEM.chars().collect();
-    let name: String = name
-        .iter()
+    name.iter()
         .map(|&byte| {
             if byte < 128 {
                 char::from(byte)
@@ -288,8 +295,7 @@ fn decode_name(name: &[u8]) -> io::Result<PathBuf> {
                 oem[usize::from(byte - 128)]
             }
         })
-        .collect();
-    archives::checked_archive_path(&name.replace('\\', "/"))
+        .collect()
 }
 
 fn dos_time(time: SystemTime) -> u32 {

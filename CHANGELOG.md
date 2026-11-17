@@ -1,5 +1,15 @@
 # Änderungen
 
+## 1.5.0 · 17. November 2026
+
+- Persistente Archiveinstellungen für Kompressionsmethoden/-raten, AES/ZipCrypto, 7z-Solid/Header sowie eigene Speicher-/Threadwerte, TAR/GZIP, Prüfung, Archivdatum und Zonenübernahme.
+- Gemeinsame Packauswahl für eingebaute und externe Packer: Pfade, Rekursion, Basisordner, getrennte Archive und Quellen erst nach vollständiger Prüfung verschieben.
+- Passwortgeschütztes ACE, ACE-Mehrteiler und verschlüsseltes ZIP-Brotli. Transaktionale Ergänzung, Umbenennung und Löschung für weitere Archiv-/Teilesätze; vollständige Veröffentlichung externer Ergebnisse mit Kollisionsschutz.
+- Ergänzende Rust-Leser für LHA-Header 3 und CAB-LZX, formatabhängige Volume-/SFX-Erkennung, TGZ-Dateibaum sowie gemeinsamer Zonenparameter einschließlich WCX.
+- TC-Packerimport, neue englische/französische Texte, unabhängiger Archivkorpus und wiederholbarer Referenzlauf. [Bedienung](docs/ARCHIVE.md), [Nachweise](docs/AREA4-ABSCHLUSS.md).
+- ARC-01–ARC-07 im definierten Matrixumfang implementiert, 7/7 IDs. 351 Tests plus 16 explizite Archiv-Referenztests bestanden; Fenster-/Originalencoderabnahme separat offen. Keine Anwendung oder erzeugtes SFX gestartet.
+- Portables Windows-x64-Paket einschließlich 7-Zip 26.06, Lizenz und zugehörigem Quellcode. ACE/UC2 verwenden weiterhin eine separat eingerichtete optionale Python-Umgebung. Paketierung und Windows-CI können Anwendung und SFX vollständig ungestartet lassen.
+
 
 ## 1.4.0 · 16. November 2026
 

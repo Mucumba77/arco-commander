@@ -273,6 +273,7 @@ mod tests {
         use std::sync::{Arc, atomic::AtomicBool, mpsc};
         let (sender, receiver) = mpsc::channel();
         let job = JobContext {
+            archives: Default::default(),
             sender,
             cancel: Arc::new(AtomicBool::new(false)),
         };

@@ -7,7 +7,7 @@ use crate::{
 use sevenz_rust2::{
     Archive, ArchiveEntry, ArchiveReader, ArchiveWriter, BlockDecoder, EncoderMethod, Error,
     Password,
-    encoder_options::{AesEncoderOptions, Lzma2Options},
+    encoder_options::{AesEncoderOptions, Bzip2Options, Lzma2Options, LzmaOptions, PpmdOptions},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -192,12 +192,31 @@ pub(crate) fn test(path: &Path, password: Option<&str>, cancel: &AtomicBool) -> 
     Ok(count)
 }
 
+#[cfg(test)]
 pub(crate) fn extract(
     path: &Path,
     destination: &Path,
     selection: Option<&Selection>,
     password: Option<&str>,
     cancel: &AtomicBool,
+) -> io::Result<usize> {
+    extract_with_zone(
+        path,
+        destination,
+        selection,
+        password,
+        cancel,
+        Default::default(),
+    )
+}
+
+pub(crate) fn extract_with_zone(
+    path: &Path,
+    destination: &Path,
+    selection: Option<&Selection>,
+    password: Option<&str>,
+    cancel: &AtomicBool,
+    policy: crate::archive_zone::ZonePolicy,
 ) -> io::Result<usize> {
     let original = files::regular_metadata(path)?;
     let mut source = open_read(path, cancel)?;
@@ -215,7 +234,7 @@ pub(crate) fn extract(
     )?;
     let base =
         archive_view::check_destination(destination, &projected, |item| item.directory, cancel)?;
-    let zone = crate::archive_zone::ArchiveZone::read(path, cancel)?;
+    let zone = crate::archive_zone::ArchiveZone::read_with_policy(path, cancel, policy)?;
     let mut requested = BTreeMap::new();
     for (item, relative) in projected {
         let target = base.join(relative);
@@ -442,7 +461,38 @@ pub(crate) fn pack(
     password: Option<&str>,
     cancel: &AtomicBool,
 ) -> io::Result<()> {
-    let plan = archives::plan_sources(paths, base, Path::new(""), cancel)?;
+    pack_with_options(paths, base, target, password, Default::default(), cancel)
+}
+
+pub(crate) fn pack_with_options(
+    paths: &[PathBuf],
+    base: &Path,
+    target: &Path,
+    password: Option<&str>,
+    settings: crate::archive_settings::Settings,
+    cancel: &AtomicBool,
+) -> io::Result<()> {
+    settings.validate()?;
+    if !paths.is_empty()
+        && settings.seven_zip_level != 0
+        && (settings.threads != 0
+            || settings.dictionary_kib != 0
+            || settings.word_size != 0
+            || settings.solid_block_mib != 0)
+    {
+        return crate::external_archives::ExternalArchiver::discover(cancel)?
+            .pack_seven_options(paths, base, target, password, settings, cancel);
+    }
+    let plan = if paths.is_empty() {
+        Vec::new()
+    } else {
+        archives::plan_sources(paths, base, Path::new(""), cancel)?
+    };
+    let newest = plan
+        .iter()
+        .filter(|(_, _, metadata)| metadata.is_file())
+        .filter_map(|(_, _, metadata)| metadata.modified().ok())
+        .max();
     let parent = fs::canonicalize(
         target
             .parent()
@@ -458,14 +508,15 @@ pub(crate) fn pack(
     let protected = password
         .filter(|value| !value.is_empty())
         .map(Password::new);
-    writer.set_encrypt_header(protected.is_some());
-    push_sources(&mut writer, plan, protected.as_ref(), cancel)?;
-    set_methods(&mut writer, protected.as_ref())?;
+    writer.set_encrypt_header(settings.encrypt_headers && protected.is_some());
+    push_sources_options(&mut writer, plan, protected.as_ref(), cancel, settings)?;
+    set_methods_options(&mut writer, protected.as_ref(), settings)?;
     writer.finish()?.sync_all()?;
     test(staging.path(), password, cancel)?;
-    if protected.is_some() {
+    if settings.encrypt_headers && protected.is_some() {
         verify_hidden_header(staging.path(), cancel)?;
     }
+    settings.finish(staging.path(), newest)?;
     files::check_cancel(cancel)?;
     staging
         .persist_noclobber(target)
@@ -486,6 +537,24 @@ pub(crate) fn pack_sfx(
             "Das Passwort für das 7z-SFX-Archiv fehlt.",
         ));
     }
+    pack_sfx_with_options(
+        paths,
+        base,
+        target,
+        Some(password),
+        Default::default(),
+        cancel,
+    )
+}
+
+pub(crate) fn pack_sfx_with_options(
+    paths: &[PathBuf],
+    base: &Path,
+    target: &Path,
+    password: Option<&str>,
+    settings: crate::archive_settings::Settings,
+    cancel: &AtomicBool,
+) -> io::Result<()> {
     let module = crate::external_archives::sfx_module()?;
     let metadata = files::regular_metadata(&module)?;
     let mut stub = File::open(&module)?;
@@ -509,7 +578,8 @@ pub(crate) fn pack_sfx(
         .ok_or_else(|| io::Error::other("Zielordner fehlt."))?;
     let working = tempfile::tempdir_in(parent)?;
     let payload = working.path().join("payload.7z");
-    pack(paths, base, &payload, Some(password), cancel)?;
+    pack_with_options(paths, base, &payload, password, settings, cancel)?;
+    let payload_time = fs::metadata(&payload)?.modified().ok();
     let mut staging = tempfile::Builder::new()
         .suffix(".exe")
         .tempfile_in(parent)?;
@@ -524,8 +594,11 @@ pub(crate) fn pack_sfx(
     if crate::external_archives::sfx_offset(&staging) != Some(copied) {
         return Err(io::Error::other("Der 7z-Datenblock fehlt im SFX-Archiv."));
     }
-    test(&staging, Some(password), cancel)?;
-    verify_hidden_header(&staging, cancel)?;
+    test(&staging, password, cancel)?;
+    if settings.encrypt_headers && password.is_some() {
+        verify_hidden_header(&staging, cancel)?;
+    }
+    settings.finish(&staging, payload_time)?;
     files::check_cancel(cancel)?;
     staging
         .persist_noclobber(target)
@@ -788,6 +861,29 @@ fn set_methods(
     writer: &mut ArchiveWriter<&mut File>,
     password: Option<&Password>,
 ) -> io::Result<()> {
+    set_methods_level(writer, password, 3)
+}
+
+fn set_methods_level(
+    writer: &mut ArchiveWriter<&mut File>,
+    password: Option<&Password>,
+    level: u8,
+) -> io::Result<()> {
+    set_methods_options(
+        writer,
+        password,
+        crate::archive_settings::Settings {
+            seven_zip_level: level,
+            ..Default::default()
+        },
+    )
+}
+
+fn set_methods_options(
+    writer: &mut ArchiveWriter<&mut File>,
+    password: Option<&Password>,
+    settings: crate::archive_settings::Settings,
+) -> io::Result<()> {
     let mut methods = Vec::with_capacity(2);
     if let Some(password) = password {
         let mut iv = [0; 16];
@@ -804,7 +900,22 @@ fn set_methods(
             .into(),
         );
     }
-    methods.push(Lzma2Options::from_level(3).into());
+    let level = u32::from(settings.seven_zip_level);
+    use crate::archive_settings::SevenZipMethod;
+    methods.push(if level == 0 {
+        EncoderMethod::COPY.into()
+    } else {
+        match settings.seven_zip_method {
+            SevenZipMethod::Lzma2 => Lzma2Options::from_level(level).into(),
+            SevenZipMethod::Lzma => LzmaOptions::from_level(level).into(),
+            SevenZipMethod::Ppmd => PpmdOptions::from_order_memory_size(
+                [3, 4, 4, 5, 5, 6, 8, 16, 24, 32][level as usize],
+                (1u32 << (level + 19)).min(64 * 1024 * 1024),
+            )
+            .into(),
+            SevenZipMethod::Bzip2 => Bzip2Options::from_level(level).into(),
+        }
+    });
     writer.set_content_methods(methods);
     Ok(())
 }
@@ -815,11 +926,42 @@ fn push_sources(
     password: Option<&Password>,
     cancel: &AtomicBool,
 ) -> io::Result<usize> {
+    push_sources_level(writer, sources, password, cancel, 3)
+}
+
+fn push_sources_level(
+    writer: &mut ArchiveWriter<&mut File>,
+    sources: Vec<archives::PlannedSource>,
+    password: Option<&Password>,
+    cancel: &AtomicBool,
+    level: u8,
+) -> io::Result<usize> {
+    push_sources_options(
+        writer,
+        sources,
+        password,
+        cancel,
+        crate::archive_settings::Settings {
+            seven_zip_level: level,
+            ..Default::default()
+        },
+    )
+}
+
+fn push_sources_options(
+    writer: &mut ArchiveWriter<&mut File>,
+    sources: Vec<archives::PlannedSource>,
+    password: Option<&Password>,
+    cancel: &AtomicBool,
+    settings: crate::archive_settings::Settings,
+) -> io::Result<usize> {
     let mut count = 0;
-    for (source, name, metadata) in sources {
+    let mut solid_entries = Vec::new();
+    let mut solid_readers = Vec::new();
+    for (source, name, metadata) in &sources {
         files::check_cancel(cancel)?;
         files::ensure_unchanged(&source, &metadata)?;
-        let mut entry = ArchiveEntry::from_path(&source, name);
+        let mut entry = ArchiveEntry::from_path(source, name.clone());
         entry.has_windows_attributes = true;
         #[cfg(windows)]
         {
@@ -831,13 +973,29 @@ fn push_sources(
             entry.windows_attributes = if metadata.is_dir() { 0x10 } else { 0x20 };
         }
         let reader = if metadata.is_file() {
-            set_methods(writer, password)?;
+            set_methods_options(writer, password, settings)?;
             count += 1;
             Some(Cancellable::new(File::open(&source)?, cancel))
         } else {
             None
         };
-        result(writer.push_archive_entry(entry, reader), cancel)?;
+        if settings.solid
+            && let Some(reader) = reader
+        {
+            solid_entries.push(entry);
+            solid_readers.push(sevenz_rust2::SourceReader::new(reader));
+        } else {
+            result(writer.push_archive_entry(entry, reader), cancel)?;
+        }
+        files::ensure_unchanged(&source, &metadata)?;
+    }
+    if !solid_entries.is_empty() {
+        result(
+            writer.push_archive_entries(solid_entries, solid_readers),
+            cancel,
+        )?;
+    }
+    for (source, _, metadata) in sources {
         files::ensure_unchanged(&source, &metadata)?;
     }
     Ok(count)

@@ -9,9 +9,9 @@ Arco Commander ist ein Zwei-Fenster-Dateimanager für Windows, geschrieben in Ru
 
 ## Download
 
-[**Arco Commander 1.4.0 für Windows x64 herunterladen**](https://github.com/Mucumba77/arco-commander/releases/download/v1.4.0/arco-commander-v1.4.0-windows-x64.zip)
+[**Arco Commander 1.5.0 für Windows x64 herunterladen**](https://github.com/Mucumba77/arco-commander/releases/download/v1.5.0/arco-commander-v1.5.0-windows-x64.zip)
 
-Das portable ZIP ist für Windows 10 22H2 und Windows 11 vorgesehen. Entpacke es vollständig und starte `arco-commander.exe`. Das Paket enthält beide Plugin-Hosts, das ZIP-SFX-Modul, die Kurzanleitung und Drittanbieterhinweise. Es ist unsigniert. [Release-Hinweise und SHA-256-Prüfsumme](https://github.com/Mucumba77/arco-commander/releases/tag/v1.4.0)
+Das portable ZIP ist für Windows 10 22H2 und Windows 11 vorgesehen. Entpacke es vollständig und starte `arco-commander.exe`. Das Paket enthält beide Plugin-Hosts, das ZIP-SFX-Modul, den 7-Zip-Konsolenadapter, die Kurzanleitung und Drittanbieterhinweise. Es ist unsigniert. [Release-Hinweise und SHA-256-Prüfsumme](https://github.com/Mucumba77/arco-commander/releases/tag/v1.5.0)
 
 Für ein Update entpacke die neue Version in einen eigenen Ordner. Arco verwendet das bisherige Standardprofil weiter. Bei Verwendung von `--portable` übernimm zusätzlich die Profildatei `arco-commander.json` aus dem bisherigen Programmordner.
 
@@ -42,7 +42,11 @@ Mit **Eigenes Fenster** öffnest du die Dateivorschau im separaten Lister. Dort 
 
 ![Arco Lister mit der Projektübersicht aus den Beispieldateien](docs/screenshots/lister.jpg)
 
-## Neu in Version 1.4.0
+## Neu in Version 1.5.0
+
+Der Archivbereich ergänzt gemeinsame Packoptionen, verschlüsseltes ACE/ZIP-Brotli, Mehrteiler, weitere transaktionale Bearbeitungspfade, externe Packer und TC-Import. Die Archivvorgaben stehen im allgemeinen Einstellungsdialog. 7-Zip 26.06 liegt dem portablen Paket bei; ACE/UC2 benötigen die unten beschriebene optionale Python-Umgebung. [Archive bedienen](docs/ARCHIVE.md) und [Bereich-4-Nachweis](docs/AREA4-ABSCHLUSS.md) beschreiben Umfang, Formatgrenzen und die weiterhin offene Fensterabnahme.
+
+### Stand bis Version 1.4.0
 
 Die Abschlussarbeit für **Oberfläche/Navigation** und **Dateioperationen/Windows-Integration** ist im [Nachweis für Bereiche 1 und 2](docs/BEREICH1-2-ABSCHLUSS.md) dokumentiert. Version 1.4.0 enthält diesen Abschluss der ersten beiden Matrixbereiche. Die [Bedienung der ergänzten Funktionen](docs/NAVIGATION-UND-DATEIEN.md) und die [Fensterprüfliste](docs/UI-PRUEFUNG.md) unterscheiden Implementierung und manuelle Abnahme.
 
@@ -226,7 +230,7 @@ Im Binärvergleich blätterst du durch die Byteabweichungen. Beide Seiten zeigen
 
 **Datei teilen** bietet einen Total-Commander-Modus mit nummerierten Teilen und `.crc`-Begleitdatei. **Dateien verbinden** erkennt den Satz anhand der Begleitdatei oder eines nummerierten Teils im selben Ordner. Arco schlägt den Originalnamen vor und prüft Größe und CRC32 vor dem Speichern. [Total-Commander-Änderungsübersicht](https://www.ghisler.ch/wiki/index.php?title=List_of_changes_%28version_7.04a_-_7.50%29)
 
-- **Archive.** ZIP und 7z lassen sich direkt in Arco öffnen, prüfen, erstellen und bearbeiten. Der optionale Adapter erstellt TAR, GZIP und selbstentpackende 7z-Archive und liest weitere Formate. GZIP akzeptiert eine einzelne Datei. Der Adapter benötigt 7-Zip 26.05 oder neuer. Arco sucht zuerst am absoluten Pfad in `ARCO_7ZIP_PATH`, dann unter `7zip\7z.exe` neben Arco und schließlich unter `%ProgramFiles%\7-Zip\7z.exe`. [7-Zip-Download](https://www.7-zip.org/download.html)
+- **Archive.** ZIP und 7z lassen sich direkt in Arco öffnen, prüfen, erstellen und bearbeiten. Der mitgelieferte 7-Zip-26.06-Konsolenadapter erstellt TAR/TGZ, GZIP und selbstentpackende 7z-Archive und liest weitere Formate. GZIP akzeptiert eine einzelne Datei. Bei eigenen Entwicklungsbuilds wird 7-Zip 26.05 oder neuer benötigt. Arco sucht zuerst am absoluten Pfad in `ARCO_7ZIP_PATH`, dann unter `7zip\7z.exe` neben Arco und schließlich unter `%ProgramFiles%\7-Zip\7z.exe`. [7-Zip-Download](https://www.7-zip.org/download.html)
 - **FTP und FTPS.** Verbindungen öffnen sich im aktiven Dateifenster und nutzen für gewöhnliche Transfers das mit Windows gelieferte `curl.exe`. Downloads können ein geprüftes Teilstück fortsetzen, sofern der Server die benötigten Angaben und Bytebereiche liefert. Direkter FXP-Transfer ist zwischen geeigneten Klartext-FTP-Servern über IPv4 verfügbar. Der Zielserver kann nach einem Abbruch eine temporär benannte Teildatei behalten.
 - **Total-Commander-Plugins.** Unter **Konfigurieren → Plugin-Verwaltung** kannst du WCX-, WFX-, WDX- und WLX-DLLs registrieren, ZIP-Pakete mit `pluginst.inf` installieren oder Registrierungen aus `wincmd.ini` importieren. Dort kannst du Plugins aktivieren, deaktivieren, umordnen, umbenennen, per Dateimaske eingrenzen, prüfen und entfernen. Neue Registrierungen sind zunächst deaktiviert. Die Architektur liest Arco aus der DLL. Beim Prüfen und Ausführen lädt der passende Host die DLL mit deinen Windows-Rechten. [Ghisler-Plugin-SDKs](https://www.ghisler.com/plugins.htm), [Format für Plugin-Installationspakete](https://www.ghisler.ch/wiki/index.php/Plugins_Automated_Installation)
 
@@ -365,6 +369,7 @@ Die Referenz bleibt Total Commander 11.58.1 für Windows. Die Funktionsparität 
 
 - [Entwicklungsplan](PLAN.md)
 - [Funktionsmatrix und Prüffälle](FUNKTIONSMATRIX.md)
+- [Archive bedienen](docs/ARCHIVE.md)
 - [Suche und Werkzeuge in 1.3.0](docs/SUCHE-UND-WERKZEUGE.md)
 - [Änderungen pro Version](CHANGELOG.md)
 - [Herstellerhilfe und Referenzindex für Dialoge, Einstellungen und Tastatur](TOTAL-COMMANDER-REFERENZ.md)

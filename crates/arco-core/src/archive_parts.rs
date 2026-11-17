@@ -180,7 +180,7 @@ fn check_siblings(first: &Path, count: usize, cancel: &AtomicBool) -> io::Result
     Ok(())
 }
 
-fn replace_parts(
+pub(crate) fn replace_parts(
     parent: &Path,
     originals: &[(PathBuf, Metadata)],
     replacements: Vec<(PathBuf, PathBuf)>,

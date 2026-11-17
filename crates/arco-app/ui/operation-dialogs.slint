@@ -1,5 +1,8 @@
 import { ComboBox, LineEdit, ListView, ScrollView, TextEdit } from "std-widgets.slint";
-import { Colors, Button, ActionButton, NavButton } from "dialog-theme.slint";
+import { Colors, Button, ActionButton, NavButton, CheckBox } from "dialog-theme.slint";
+
+// A structural type is used here so the shared card stays independent of main.
+export struct PackSelection { paths: bool, recursive: bool, separate: bool, omit-base: bool, move-sources: bool }
 
 export component DialogHeading {
     in property <image> icon;
@@ -409,6 +412,8 @@ export component FileOperationCard inherits Rectangle {
     in-out property <string> target-folder;
     in property <OperationKind> kind;
     property <bool> pack: root.kind == OperationKind.pack;
+    in property <bool> pack-settings;
+    in-out property <PackSelection> pack-selection;
     property <bool> extract: root.kind == OperationKind.extract;
     in property <bool> multiple;
     in property <bool> password-enabled;
@@ -422,8 +427,8 @@ export component FileOperationCard inherits Rectangle {
         + layout.padding * 2 + layout.spacing * 3 + divider.height;
     property <bool> selection-open: true;
     property <bool> advanced;
-    property <bool> password-available: root.password-enabled && (!root.pack || choice.current-index == 0 || choice.current-index == 1 || choice.current-index == 4 || choice.current-index == 6 || choice.current-index == 9 || choice.current-index == 10 || choice.current-index == 14);
-    property <bool> password-required: root.password-enabled && root.pack && choice.current-index == 14;
+    property <bool> password-available: root.password-enabled && (!root.pack || !root.pack-settings || choice.current-index == 0 || choice.current-index == 1 || choice.current-index == 4 || choice.current-index == 6 || choice.current-index == 7 || choice.current-index == 9 || choice.current-index == 10 || choice.current-index == 12 || choice.current-index == 13 || choice.current-index == 14 || (choice.current-index >= 16 && choice.current-index <= 18));
+    property <bool> password-required: root.password-enabled && root.pack && root.pack-settings && choice.current-index == 14;
     property <bool> can-submit: (root.multiple || main-input.text != "") && (!root.pack || root.target-folder != "") && (!root.password-required || secondary.text != "");
     callback start(string, string, int);
     callback dismiss();
@@ -538,6 +543,15 @@ export component FileOperationCard inherits Rectangle {
                     accessible-label: @tr("Gespeicherter Suchfilter");
                 }
                 if root.note != "" : Note { text: root.note; }
+                if root.pack : FormSection { title: @tr("Auswahl und Ordnerstruktur");
+                    CheckBox { text: @tr("Pfadnamen mit speichern"); checked <=> root.pack-selection.paths; }
+                    CheckBox { text: @tr("Unterordner rekursiv mitpacken"); checked <=> root.pack-selection.recursive; enabled: !root.pack-selection.move-sources; }
+                    CheckBox { text: @tr("Ein Archiv pro ausgewählter Datei oder Ordner"); checked <=> root.pack-selection.separate; }
+                    CheckBox { text: @tr("Basisordner weglassen"); checked <=> root.pack-selection.omit-base; }
+                    CheckBox { text: @tr("Nach erfolgreicher Prüfung ins Archiv verschieben"); checked <=> root.pack-selection.move-sources;
+                        toggled => { if (self.checked) { root.pack-selection.recursive = true; } }
+                    }
+                }
             }
         }
         divider := Rectangle { height: 1px; background: Colors.edge; }

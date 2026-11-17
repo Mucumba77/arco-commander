@@ -786,6 +786,7 @@ mod tests {
         };
         let (sender, receiver) = mpsc::channel();
         let job = JobContext {
+            archives: Default::default(),
             sender,
             cancel: Arc::new(AtomicBool::new(false)),
         };

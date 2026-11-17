@@ -465,7 +465,14 @@ impl App {
                         &mut |prompt| job.prompt(&entry.name, prompt),
                     )
                 } else {
-                    plugin::operate(&entry.path, &archive, operation, &job.cancel, progress)
+                    plugin::operate_with_zone(
+                        &entry.path,
+                        &archive,
+                        operation,
+                        &job.cancel,
+                        progress,
+                        job.archives.zone,
+                    )
                 }
                 .map_err(|error| plugin_error(&entry.name, error))?;
                 let details = rows
@@ -580,8 +587,14 @@ impl App {
                 job.step_progress(format!("{} · {label}", entry.name), index + 1, total);
                 let progress =
                     |message| job.step_progress(format!("{label} · {message}"), index + 1, total);
-                let result =
-                    plugin::operate(&entry.path, &archive, operation, &job.cancel, progress);
+                let result = plugin::operate_with_zone(
+                    &entry.path,
+                    &archive,
+                    operation,
+                    &job.cancel,
+                    progress,
+                    job.archives.zone,
+                );
                 match result {
                     Ok(_) => report.completed += 1,
                     Err(error) => report.errors.push(format!("{label}: {error}")),

@@ -1234,3 +1234,46 @@ Drucker im Dateifenster	Imprimantes dans le panneau de fichiers
 Netzwerk im Dateifenster	Réseau dans le panneau de fichiers
 Papierkorb im Dateifenster	Corbeille dans le panneau de fichiers
 Verschieben erhält Links. Metadatenoptionen gelten für das Linkobjekt; sein Ziel wird nicht durchlaufen. Symbolische Links benötigen die passende Windows-Berechtigung oder den Entwicklermodus.	Le déplacement préserve les liens. Les options de métadonnées concernent le lien lui-même ; sa cible n’est pas parcourue. Les liens symboliques nécessitent le droit Windows approprié ou le mode développeur.
+7z-Kompression	Compression 7z
+7z-Kompressionsmethode	Méthode de compression 7z
+7z-Kompressionsrate	Niveau de compression 7z
+Archivdatum auf neueste Quelldatei setzen	Utiliser la date du fichier source le plus récent
+Auch Dateinamen verschlüsseln	Chiffrer également les noms de fichiers
+Auswahl und Ordnerstruktur	Sélection et structure des dossiers
+Basisordner weglassen	Omettre le dossier de base
+Ein Archiv pro ausgewählter Datei oder Ordner	Une archive par fichier ou dossier sélectionné
+GZIP-Kompressionsrate	Niveau de compression GZIP
+Gilt auch für Packer-Plugins. Bei Mehrteilern wird die strengste vorhandene Markierung übernommen.	S’applique aussi aux plugins d’archivage. Les archives multivolumes héritent de la zone existante la plus stricte.
+Herkunftsmarkierung beim Entpacken	Marquage de provenance à l’extraction
+Herkunftsmarkierung weglassen	Omettre le marquage de provenance
+Kompression, Verschlüsselung und Herkunft entpackter Dateien.	Compression, chiffrement et provenance des fichiers extraits.
+Kompressionsmethode	Méthode de compression
+Kompressionsrate	Niveau de compression
+Nach erfolgreicher Prüfung ins Archiv verschieben	Déplacer dans l’archive après vérification réussie
+Ohne Kompression	Sans compression
+Pfadnamen mit speichern	Conserver les chemins
+Prüfung und Dateieigenschaften	Vérification et propriétés des fichiers
+Solid-Archiv erstellen	Créer une archive solide
+TAR und GZIP	TAR et GZIP
+TAR-Format	Format TAR
+Unterordner rekursiv mitpacken	Inclure les sous-dossiers récursivement
+Verschlüsselung bei gesetztem Passwort	Chiffrement avec un mot de passe
+ZIP nach dem Packen prüfen	Vérifier le ZIP après création
+ZIP-Kompression	Compression ZIP
+ZIP-Kompressionsrate	Niveau de compression ZIP
+ZIP-Verschlüsselung	Chiffrement ZIP
+Zone.Identifier übernehmen	Conserver Zone.Identifier
+Archiveinstellungen …	Paramètres des archives…
+Archiveinstellungen	Paramètres des archives
+Packerpasswort (optional)	Mot de passe de l’outil d’archivage (facultatif)
+TAR + GZIP (.tgz)	TAR + GZIP (.tgz)
+ACE-Mehrteiler	ACE multivolume
+ACE-Mehrteiler (ohne Kompression)	ACE multivolume (sans compression)
+ACE-Mehrteiler (LZ77)	ACE multivolume (LZ77)
+Wähle gültige Archivoptionen.	Choisissez des options d’archive valides.
+Passwörter sind für ZIP, 7z und ACE einschließlich unterstützter SFX-Varianten vorgesehen.	Les mots de passe sont disponibles pour ZIP, 7z et ACE, y compris les variantes SFX prises en charge.
+CPU-Threads (0 = automatisch)	Threads CPU (0 = automatique)
+Wörterbuch in KiB (0 = automatisch)	Dictionnaire en Kio (0 = automatique)
+Wortgröße (0 = automatisch)	Taille des mots (0 = automatique)
+Solid-Block in MiB (0 = automatisch)	Bloc solide en Mio (0 = automatique)
+Eigene Speicher- und Threadwerte verwenden den mitgelieferten 7-Zip-Konsolenadapter.	Les valeurs personnalisées de mémoire et de threads utilisent l’adaptateur console 7-Zip fourni.

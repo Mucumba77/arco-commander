@@ -3,7 +3,7 @@ use chrono::{DateTime, Datelike, Local, NaiveDate, Timelike};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs::{self, File, Metadata};
-use std::io::{self, BufReader, Read, Seek, Write};
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::SystemTime;
@@ -70,6 +70,39 @@ pub(crate) fn is_zip_sfx(path: &Path) -> bool {
         || archive
             .by_index_raw(0)
             .is_ok_and(|entry| entry.header_start() >= 2)
+}
+
+/// Conventional PKZIP disk sets (.z01, .z02, ..., .zip), distinct from raw .001 splits.
+pub(crate) fn spanned_disks(path: &Path) -> Option<usize> {
+    if !path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+    {
+        return None;
+    }
+    let mut input = File::open(path).ok()?;
+    let length = input.metadata().ok()?.len();
+    let tail = length.min(65_557);
+    input.seek(SeekFrom::Start(length - tail)).ok()?;
+    let mut bytes = Vec::new();
+    input.read_to_end(&mut bytes).ok()?;
+    for at in (0..bytes.len().saturating_sub(21)).rev() {
+        if &bytes[at..at + 4] != b"PK\x05\x06" {
+            continue;
+        }
+        let comment = usize::from(u16::from_le_bytes(bytes[at + 20..at + 22].try_into().ok()?));
+        if at + 22 + comment != bytes.len() {
+            continue;
+        }
+        let disk = usize::from(u16::from_le_bytes(bytes[at + 4..at + 6].try_into().ok()?));
+        let directory_disk =
+            usize::from(u16::from_le_bytes(bytes[at + 6..at + 8].try_into().ok()?));
+        if disk > 0 || directory_disk > 0 {
+            return Some(disk + 1);
+        }
+        return None;
+    }
+    None
 }
 
 fn members(
@@ -228,15 +261,81 @@ fn create_zip_with_encryption(
     target: &Path,
     encryption: Option<ZipEncryption<'_>>,
     cancel: &AtomicBool,
+    progress: impl FnMut(files::Progress<'_>),
+) -> io::Result<()> {
+    create_zip_custom(
+        paths,
+        base,
+        target,
+        encryption,
+        Default::default(),
+        cancel,
+        progress,
+    )
+}
+
+pub fn create_zip_with_options(
+    paths: &[PathBuf],
+    base: &Path,
+    target: &Path,
+    password: Option<&str>,
+    options: crate::archive_settings::Settings,
+    cancel: &AtomicBool,
+    progress: impl FnMut(files::Progress<'_>),
+) -> io::Result<()> {
+    if options.zip_method == crate::archive_settings::ZipMethod::Lzma {
+        return crate::external_archives::ExternalArchiver::discover(cancel)?
+            .pack_zip_options(paths, base, target, password, options, cancel);
+    }
+    let encryption = password.map(|password| {
+        if options.zip_cipher == crate::archive_settings::ZipCipher::ZipCrypto {
+            ZipEncryption::ZipCrypto(password)
+        } else {
+            ZipEncryption::Aes(password)
+        }
+    });
+    create_zip_custom(paths, base, target, encryption, options, cancel, progress)
+}
+
+fn create_zip_custom(
+    paths: &[PathBuf],
+    base: &Path,
+    target: &Path,
+    encryption: Option<ZipEncryption<'_>>,
+    options: crate::archive_settings::Settings,
+    cancel: &AtomicBool,
     mut progress: impl FnMut(files::Progress<'_>),
 ) -> io::Result<()> {
-    let plan = plan_sources(paths, base, Path::new(""), cancel)?;
+    options.validate()?;
+    let plan = if paths.is_empty() {
+        Vec::new()
+    } else {
+        plan_sources(paths, base, Path::new(""), cancel)?
+    };
+    let newest = plan
+        .iter()
+        .filter(|(_, _, metadata)| metadata.is_file())
+        .filter_map(|(_, _, metadata)| metadata.modified().ok())
+        .max();
     let parent = target
         .parent()
         .ok_or_else(|| io::Error::other("missing target directory"))?;
+    let parent = fs::canonicalize(parent)?;
+    for path in paths {
+        if parent.starts_with(fs::canonicalize(path)?) {
+            return Err(io::Error::other("Das Zielarchiv liegt im Quellordner."));
+        }
+    }
     let mut staging = NamedTempFile::new_in(parent)?;
     let mut archive = ZipWriter::new(staging.as_file_mut());
-    let total = write_plan(&mut archive, plan, encryption, cancel, &mut progress)?;
+    let total = write_plan_options(
+        &mut archive,
+        plan,
+        encryption,
+        options,
+        cancel,
+        &mut progress,
+    )?;
     progress(files::Progress {
         path: target,
         copied: total,
@@ -246,9 +345,13 @@ fn create_zip_with_encryption(
         phase: files::ProgressPhase::Finalizing,
     });
     archive.finish()?.sync_all()?;
-    if let Some(ZipEncryption::ZipCrypto(password)) = encryption {
-        test_zip(staging.path(), Some(password), cancel)?;
+    if options.verify || matches!(encryption, Some(ZipEncryption::ZipCrypto(_))) {
+        let password = encryption.map(|e| match e {
+            ZipEncryption::Aes(p) | ZipEncryption::ZipCrypto(p) => p,
+        });
+        test_zip(staging.path(), password, cancel)?;
     }
+    options.finish(staging.path(), newest)?;
     files::check_cancel(cancel)?;
     staging
         .persist_noclobber(target)
@@ -274,6 +377,28 @@ pub fn create_zip_sfx_with_progress(
     stub: &Path,
     password: Option<&str>,
     cancel: &AtomicBool,
+    progress: impl FnMut(files::Progress<'_>),
+) -> io::Result<()> {
+    create_zip_sfx_with_options(
+        paths,
+        base,
+        target,
+        stub,
+        password,
+        Default::default(),
+        cancel,
+        progress,
+    )
+}
+
+pub fn create_zip_sfx_with_options(
+    paths: &[PathBuf],
+    base: &Path,
+    target: &Path,
+    stub: &Path,
+    password: Option<&str>,
+    settings: crate::archive_settings::Settings,
+    cancel: &AtomicBool,
     mut progress: impl FnMut(files::Progress<'_>),
 ) -> io::Result<()> {
     if password.is_some_and(|password| {
@@ -289,7 +414,6 @@ pub fn create_zip_sfx_with_progress(
     let parent = target
         .parent()
         .ok_or_else(|| io::Error::other("Zielordner fehlt."))?;
-    let plan = plan_sources(paths, base, Path::new(""), cancel)?;
     let metadata = files::regular_metadata(stub)?;
     if !metadata.is_file() || metadata.len() > 64 * 1024 * 1024 || is_zip_sfx(stub) {
         return Err(io::Error::other("Das ZIP-SFX-Programm ist ungültig."));
@@ -303,21 +427,37 @@ pub fn create_zip_sfx_with_progress(
         ));
     }
     stub_file.rewind()?;
+    let working = tempfile::tempdir_in(parent)?;
+    let payload = working.path().join("payload.zip");
+    let mut total = 0;
+    create_zip_with_options(
+        paths,
+        base,
+        &payload,
+        password,
+        settings,
+        cancel,
+        |sample| {
+            total = sample.total;
+            progress(sample);
+        },
+    )?;
+    let payload_time = fs::metadata(&payload)?.modified().ok();
+    let mut payload_writer = ZipWriter::new_append(
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&payload)?,
+    )?;
+    payload_writer.set_comment(SFX_COMMENT)?;
+    payload_writer.finish()?.sync_all()?;
     let mut staging = NamedTempFile::new_in(parent)?;
     let copied = tools::copy_cancelled(stub_file.take(metadata.len() + 1), &mut staging, cancel)?;
     if copied != metadata.len() {
         return Err(io::Error::other("Das ZIP-SFX-Programm hat sich geändert."));
     }
     files::ensure_unchanged(stub, &metadata)?;
-    let mut archive = ZipWriter::new(staging.as_file_mut());
-    archive.set_comment(SFX_COMMENT)?;
-    let total = write_plan(
-        &mut archive,
-        plan,
-        password.map(ZipEncryption::Aes),
-        cancel,
-        &mut progress,
-    )?;
+    tools::copy_cancelled(File::open(&payload)?, &mut staging, cancel)?;
     progress(files::Progress {
         path: target,
         copied: total,
@@ -326,8 +466,9 @@ pub fn create_zip_sfx_with_progress(
         current: None,
         phase: files::ProgressPhase::Finalizing,
     });
-    archive.finish()?.sync_all()?;
+    staging.as_file().sync_all()?;
     test_zip(staging.path(), password, cancel)?;
+    settings.finish(staging.path(), payload_time)?;
     files::check_cancel(cancel)?;
     staging
         .persist_noclobber(target)
@@ -450,6 +591,7 @@ pub fn append_zip(
     Ok(count)
 }
 
+#[derive(Clone)]
 pub enum ZipEdit {
     Remove(Vec<PathBuf>),
     Rename(PathBuf, std::ffi::OsString),
@@ -818,6 +960,24 @@ fn write_plan(
     plan: Vec<PlannedSource>,
     encryption: Option<ZipEncryption<'_>>,
     cancel: &AtomicBool,
+    progress: impl FnMut(files::Progress<'_>),
+) -> io::Result<u64> {
+    write_plan_options(
+        archive,
+        plan,
+        encryption,
+        Default::default(),
+        cancel,
+        progress,
+    )
+}
+
+fn write_plan_options(
+    archive: &mut ZipWriter<&mut File>,
+    plan: Vec<PlannedSource>,
+    encryption: Option<ZipEncryption<'_>>,
+    settings: crate::archive_settings::Settings,
+    cancel: &AtomicBool,
     mut progress: impl FnMut(files::Progress<'_>),
 ) -> io::Result<u64> {
     let total = plan
@@ -838,15 +998,38 @@ fn write_plan(
             archive.add_directory(name, options)?;
         } else {
             file_index += 1;
+            use crate::archive_settings::{ZipCipher, ZipMethod};
+            let method = if settings.zip_level == 0 {
+                CompressionMethod::Stored
+            } else {
+                match settings.zip_method {
+                    ZipMethod::Store => CompressionMethod::Stored,
+                    ZipMethod::Deflate if settings.zip_level == 0 => CompressionMethod::Stored,
+                    ZipMethod::Deflate => CompressionMethod::Deflated,
+                    ZipMethod::Bzip2 => CompressionMethod::Bzip2,
+                    ZipMethod::Lzma => CompressionMethod::Lzma,
+                    ZipMethod::Ppmd => CompressionMethod::Ppmd,
+                    ZipMethod::Xz => CompressionMethod::Xz,
+                    ZipMethod::Zstd => CompressionMethod::Zstd,
+                }
+            };
+            let level = (!matches!(method, CompressionMethod::Stored | CompressionMethod::Lzma))
+                .then_some(i64::from(settings.zip_level.max(1)));
             let options = options
-                .compression_method(CompressionMethod::Deflated)
+                .compression_method(method)
+                .compression_level(level)
                 .large_file(
                     !matches!(encryption, Some(ZipEncryption::ZipCrypto(_)))
                         || meta.len() >= 0xf000_0000,
                 );
             let options = match encryption {
                 Some(ZipEncryption::Aes(password)) => {
-                    options.with_aes_encryption(AesMode::Aes256, password)
+                    let mode = match settings.zip_cipher {
+                        ZipCipher::Aes128 => AesMode::Aes128,
+                        ZipCipher::Aes192 => AesMode::Aes192,
+                        _ => AesMode::Aes256,
+                    };
+                    options.with_aes_encryption(mode, password)
                 }
                 Some(ZipEncryption::ZipCrypto(password)) => {
                     options.with_deprecated_encryption(password.as_bytes())?
@@ -904,7 +1087,27 @@ pub(crate) fn extract_zip_selection_with_progress(
     password: Option<&str>,
     selection: Option<&crate::archive_view::Selection>,
     cancel: &AtomicBool,
+    progress: impl FnMut(files::Progress<'_>),
+) -> io::Result<usize> {
+    extract_zip_with_zone(
+        path,
+        destination,
+        password,
+        selection,
+        cancel,
+        progress,
+        Default::default(),
+    )
+}
+
+pub(crate) fn extract_zip_with_zone(
+    path: &Path,
+    destination: &Path,
+    password: Option<&str>,
+    selection: Option<&crate::archive_view::Selection>,
+    cancel: &AtomicBool,
     mut progress: impl FnMut(files::Progress<'_>),
+    policy: crate::archive_zone::ZonePolicy,
 ) -> io::Result<usize> {
     let mut archive = open_read_zip(path, cancel)?;
     let entries = members(&mut archive, cancel)?;
@@ -925,7 +1128,7 @@ pub(crate) fn extract_zip_selection_with_progress(
         |entry| entry.directory,
         cancel,
     )?;
-    let zone = crate::archive_zone::ArchiveZone::read(path, cancel)?;
+    let zone = crate::archive_zone::ArchiveZone::read_with_policy(path, cancel, policy)?;
     let total = entries
         .iter()
         .filter(|(member, _)| !member.directory)
@@ -1017,25 +1220,37 @@ fn copy_member_with_progress(
 ) -> io::Result<()> {
     let limit = member.size.saturating_add(1);
     let bytes = if member.compression == ZIP_BROTLI {
-        if member.encrypted {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Verschlüsselte ZIP-Brotli-Einträge werden nicht unterstützt.",
-            ));
-        }
         let raw = archive.by_index_raw(member.index)?;
-        let decoder = brotli_decompressor::Decompressor::new(raw, 64 * 1024);
+        let aes = raw.get_metadata().aes_settings();
+        let check_crc = aes.is_none_or(|(_, version)| !version.is_ae2_encrypted());
+        let (header, plain_size) = brotli_crypto_header(&raw)?;
+        let compressed_size = raw.compressed_size();
+        // Present the unchanged compressed/encrypted body as a stored ZIP stream.
+        // zip retains password verification and AES authentication; Brotli is
+        // decoded outside it. No archive mutation, custom crypto or extra file.
+        let mut stream = std::io::Cursor::new(header).chain(raw);
+        let options = zip::ZipReadOptions::new()
+            .password(password.map(str::as_bytes))
+            .ignore_crc32(true)
+            .override_compressed_size(compressed_size)
+            .override_uncompressed_size(plain_size);
+        let decrypted = zip::read::read_zipfile_from_stream_with_options(&mut stream, options)?
+            .ok_or_else(|| io::Error::other("ZIP-Brotli-Daten fehlen."))?;
+        let mut decoder = brotli_decompressor::Decompressor::new(decrypted, 64 * 1024);
         let mut writer = CrcWriter {
             output,
             crc: crc32fast::Hasher::new(),
         };
         let bytes = tools::copy_cancelled_with_progress(
-            decoder.take(limit),
+            (&mut decoder).take(limit),
             &mut writer,
             cancel,
             progress,
         )?;
-        if writer.crc.finalize() != member.crc32 {
+        // Brotli may stop before the encrypted body's end. Always drain it so
+        // a valid prefix cannot bypass the AES authentication trailer.
+        tools::copy_cancelled(decoder.into_inner(), io::sink(), cancel)?;
+        if check_crc && writer.crc.finalize() != member.crc32 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "ZIP-Brotli-Prüfsumme stimmt nicht.",
@@ -1058,6 +1273,61 @@ fn copy_member_with_progress(
         ));
     }
     Ok(())
+}
+
+fn brotli_crypto_header(
+    raw: &zip::read::ZipFile<'_, impl Read + Seek>,
+) -> io::Result<(Vec<u8>, u64)> {
+    let aes = raw.get_metadata().aes_settings();
+    let overhead = if let Some((mode, _)) = aes {
+        u64::from(mode.as_u8() + 1) * 4 + 12
+    } else if raw.encrypted() {
+        12
+    } else {
+        0
+    };
+    let size = raw
+        .compressed_size()
+        .checked_sub(overhead)
+        .ok_or_else(|| io::Error::other("ZIP-Verschlüsselungsheader ist abgeschnitten."))?;
+    let mut extra = Vec::new();
+    let zip64 = raw.compressed_size() >= u64::from(u32::MAX) || size >= u64::from(u32::MAX);
+    if zip64 {
+        extra.extend_from_slice(&[1, 0, 16, 0]);
+        extra.extend_from_slice(&size.to_le_bytes());
+        extra.extend_from_slice(&raw.compressed_size().to_le_bytes());
+    }
+    if let Some((mode, version)) = aes {
+        extra.extend_from_slice(&[0x01, 0x99, 7, 0]);
+        extra.extend_from_slice(&version.as_u16().to_le_bytes());
+        extra.extend_from_slice(b"AE");
+        extra.push(mode.as_u8());
+        extra.extend_from_slice(&0u16.to_le_bytes()); // inner method: stored
+    }
+    let mut header = b"PK\x03\x04".to_vec();
+    header.extend_from_slice(&51u16.to_le_bytes());
+    header.extend_from_slice(&(raw.flags().as_u16() & 9).to_le_bytes());
+    header.extend_from_slice(&(if aes.is_some() { 99u16 } else { 0 }).to_le_bytes());
+    let time = raw.last_modified().map_or(0u16, |date| {
+        u16::from(date.hour()) << 11 | u16::from(date.minute()) << 5 | u16::from(date.second()) / 2
+    });
+    header.extend_from_slice(&time.to_le_bytes());
+    header.extend_from_slice(&0u16.to_le_bytes());
+    header.extend_from_slice(&raw.crc32().to_le_bytes());
+    header.extend_from_slice(
+        &(if zip64 {
+            u32::MAX
+        } else {
+            raw.compressed_size() as u32
+        })
+        .to_le_bytes(),
+    );
+    header.extend_from_slice(&(if zip64 { u32::MAX } else { size as u32 }).to_le_bytes());
+    header.extend_from_slice(&1u16.to_le_bytes());
+    header.extend_from_slice(&(extra.len() as u16).to_le_bytes());
+    header.push(b'x');
+    header.extend(extra);
+    Ok((header, size))
 }
 
 pub(crate) struct CrcWriter<W> {

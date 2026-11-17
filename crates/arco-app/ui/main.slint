@@ -14,8 +14,8 @@ export { MetadataForm, MutationData, PropertiesData } from "metadata-dialogs.sli
 export { DiffData } from "comparison-dialog.slint";
 import { ComboBox, LineEdit, ListView, Palette, ScrollView, TextEdit } from "std-widgets.slint";
 import { Colors, Button, CheckBox, NavButton, ActionButton, DetailCell, FocusBoundary } from "dialog-theme.slint";
-import { DialogHeading, FieldLabel, FileOperationCard, ReaderPane, ImagePane, TransferManagerCard, TransferManagerData, CompactDialogCard, ProgressRail, TransferProgressCard, JobMetrics, OperationKind, FormSection, ProgressMeter, ProgressMetrics, ReviewRow, ReviewTable, ReviewCard } from "operation-dialogs.slint";
-export { JobMetrics, OperationKind, ReviewRow } from "operation-dialogs.slint";
+import { DialogHeading, FieldLabel, FileOperationCard, ReaderPane, ImagePane, TransferManagerCard, TransferManagerData, CompactDialogCard, ProgressRail, TransferProgressCard, JobMetrics, OperationKind, FormSection, ProgressMeter, ProgressMetrics, ReviewRow, ReviewTable, ReviewCard, PackSelection } from "operation-dialogs.slint";
+export { JobMetrics, OperationKind, ReviewRow, PackSelection } from "operation-dialogs.slint";
 export { Colors } from "dialog-theme.slint";
 export { TransferManagerData } from "operation-dialogs.slint";
 
@@ -135,7 +135,15 @@ export struct PanelData {
     wdx-headings: [string],
 }
 
+export struct ArchiveDefaults {
+    zone: int, zip-level: int, zip-method: int, zip-cipher: int, seven-level: int,
+    seven-method: int, solid: bool, gzip-level: int, tar-dialect: int,
+    threads: string, dictionary: string, word-size: string, solid-block: string,
+    encrypt-headers: bool, newest-timestamp: bool, verify: bool,
+}
+
 export struct SettingsData {
+    archives: ArchiveDefaults,
     toolbar: bool,
     panel-toolbar: bool,
     drive-buttons: bool,
@@ -2067,8 +2075,8 @@ component SettingsCard inherits Rectangle {
     in property <int> error-page: -1;
     in property <string> status;
     in property <bool> shortcut-dirty;
-    property <[string]> page-titles: [@tr("Allgemein"), @tr("Layout"), @tr("Bedienung"), @tr("Tastatur"), @tr("Schrift"), @tr("Dateiübertragung"), @tr("Programme")];
-    property <[string]> page-details: [@tr("Sprache und Erscheinungsbild der Anwendung."), @tr("Sichtbare Leisten und Aufbau der Dateifenster."), @tr("Auswahl, versteckte Dateien und Schnellsuche."), @tr("Befehle suchen und eigene Tastenkürzel zuweisen."), @tr("Schrift und Größe mit direkter Vorschau."), @tr("Geschwindigkeit, Protokoll und Dateieigenschaften."), @tr("Externe Werkzeuge für Bearbeitung und Suche.")];
+    property <[string]> page-titles: [@tr("Allgemein"), @tr("Layout"), @tr("Bedienung"), @tr("Tastatur"), @tr("Schrift"), @tr("Dateiübertragung"), @tr("Programme"), @tr("Archive")];
+    property <[string]> page-details: [@tr("Sprache und Erscheinungsbild der Anwendung."), @tr("Sichtbare Leisten und Aufbau der Dateifenster."), @tr("Auswahl, versteckte Dateien und Schnellsuche."), @tr("Befehle suchen und eigene Tastenkürzel zuweisen."), @tr("Schrift und Größe mit direkter Vorschau."), @tr("Geschwindigkeit, Protokoll und Dateieigenschaften."), @tr("Externe Werkzeuge für Bearbeitung und Suche."), @tr("Kompression, Verschlüsselung und Herkunft entpackter Dateien.")];
     changed error => { if (root.error != "" && root.error-page >= 0) { root.page = root.error-page; } }
     changed initial-page => { root.page = root.initial-page; }
     property <bool> dirty: root.draft != root.current || root.shortcut-dirty;
@@ -2113,6 +2121,7 @@ component SettingsCard inherits Rectangle {
     property <string> transfer-rate: root.current.transfer-rate;
     property <string> transfer-log: root.current.transfer-log;
     property <bool> transfer-comments: root.current.transfer-comments;
+    property <ArchiveDefaults> archives: root.current.archives;
     property <bool> ntfs-streams: root.current.ntfs.streams;
     property <bool> ntfs-permissions: root.current.ntfs.permissions;
     property <bool> ntfs-owner: root.current.ntfs.owner;
@@ -2151,6 +2160,7 @@ component SettingsCard inherits Rectangle {
         root.transfer-rate = root.current.transfer-rate;
         root.transfer-log = root.current.transfer-log;
         root.transfer-comments = root.current.transfer-comments;
+        root.archives = root.current.archives;
         root.ntfs-streams = root.current.ntfs.streams;
         root.ntfs-permissions = root.current.ntfs.permissions;
         root.ntfs-owner = root.current.ntfs.owner;
@@ -2161,6 +2171,7 @@ component SettingsCard inherits Rectangle {
         root.ntfs-copy-links = root.current.ntfs.copy-links;
     }
     property <SettingsData> draft: {
+        archives: root.archives,
         toolbar: root.toolbar, panel-toolbar: root.panel-toolbar, drive-buttons: root.drive-buttons,
         drive-list: root.drive-list, folder-tabs: root.folder-tabs, current-path: root.current-path,
         breadcrumbs: root.breadcrumbs, history-buttons: root.history-buttons,
@@ -2187,7 +2198,7 @@ component SettingsCard inherits Rectangle {
         width: 100%; height: 100%; focus-on-tab-navigation: false;
         key-pressed(event) => {
             if (!root.shortcut-recording && event.modifiers.control && (event.text == Key.PageUp || event.text == Key.PageDown)) {
-                root.page = Math.mod(root.page + (event.text == Key.PageUp ? 6 : 1), 7);
+                root.page = Math.mod(root.page + (event.text == Key.PageUp ? 7 : 1), 8);
                 if (root.page != 3) { root.edit-shortcut("stop", ""); }
                 return accept;
             }
@@ -2205,7 +2216,7 @@ component SettingsCard inherits Rectangle {
                     width: 178px;
                     alignment: start;
                     spacing: 5px;
-                    for label[index] in [@tr("Allgemein"), @tr("Layout"), @tr("Bedienung"), @tr("Tastatur"), @tr("Schrift"), @tr("Dateiübertragung"), @tr("Programme")] : ActionButton {
+                    for label[index] in root.page-titles : ActionButton {
                         property <int> cycle: root.focus-cycle;
                         property <int> active-page: root.page;
                         changed active-page => { if (index == root.page) { self.focus(); } }
@@ -2217,7 +2228,7 @@ component SettingsCard inherits Rectangle {
                             : index == 2 ? @image-url("icons/check.svg")
                             : index == 3 ? @image-url("icons/terminal.svg")
                             : index == 4 ? @image-url("icons/edit.svg")
-                            : index == 5 ? @image-url("icons/move.svg") : @image-url("icons/code.svg");
+                            : index == 5 ? @image-url("icons/move.svg") : index == 7 ? @image-url("icons/archive.svg") : @image-url("icons/code.svg");
                         checkable: true;
                         checked: root.page == index;
                         clicked => { root.page = index; if (index != 3) { root.edit-shortcut("stop", ""); } }
@@ -2407,6 +2418,50 @@ component SettingsCard inherits Rectangle {
                                 LineEdit { text <=> root.everything; placeholder-text: @tr("Pfad zu es.exe"); accessible-label: @tr("Everything-Suche"); }
                                 DetailCell { text: @tr("Bei leerem Feld verwendet Arco die interne Suche."); wrap: word-wrap; }
 
+                            }
+                        }
+                    }
+                    if root.page == 7 : ScrollView {
+                        viewport-width: self.visible-width;
+                        VerticalLayout {
+                            alignment: start; spacing: 10px;
+                            FormSection { title: @tr("ZIP-Kompression");
+                                FieldLabel { text: @tr("Kompressionsmethode"); }
+                                ComboBox { model: ["Deflate", @tr("Ohne Kompression"), "BZIP2", "LZMA", "PPMd", "XZ", "Zstandard"]; current-index <=> root.archives.zip-method; accessible-label: @tr("Kompressionsmethode"); }
+                                FieldLabel { text: @tr("Kompressionsrate"); }
+                                ComboBox { model: ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]; current-index <=> root.archives.zip-level; accessible-label: @tr("ZIP-Kompressionsrate"); }
+                                FieldLabel { text: @tr("Verschlüsselung bei gesetztem Passwort"); }
+                                ComboBox { model: ["AES-256", "AES-192", "AES-128", "ZipCrypto"]; current-index <=> root.archives.zip-cipher; accessible-label: @tr("ZIP-Verschlüsselung"); }
+                            }
+                            FormSection { title: @tr("7z-Kompression");
+                                FieldLabel { text: @tr("Kompressionsmethode"); }
+                                ComboBox { model: ["LZMA2", "LZMA", "PPMd", "BZIP2"]; current-index <=> root.archives.seven-method; accessible-label: @tr("7z-Kompressionsmethode"); }
+                                FieldLabel { text: @tr("Kompressionsrate"); }
+                                ComboBox { model: ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]; current-index <=> root.archives.seven-level; accessible-label: @tr("7z-Kompressionsrate"); }
+                                CheckBox { text: @tr("Solid-Archiv erstellen"); checked <=> root.archives.solid; }
+                                CheckBox { text: @tr("Auch Dateinamen verschlüsseln"); checked <=> root.archives.encrypt-headers; }
+                                FieldLabel { text: @tr("CPU-Threads (0 = automatisch)"); }
+                                LineEdit { text <=> root.archives.threads; accessible-label: @tr("CPU-Threads (0 = automatisch)"); }
+                                FieldLabel { text: @tr("Wörterbuch in KiB (0 = automatisch)"); }
+                                LineEdit { text <=> root.archives.dictionary; accessible-label: @tr("Wörterbuch in KiB (0 = automatisch)"); }
+                                FieldLabel { text: @tr("Wortgröße (0 = automatisch)"); }
+                                LineEdit { text <=> root.archives.word-size; accessible-label: @tr("Wortgröße (0 = automatisch)"); }
+                                FieldLabel { text: @tr("Solid-Block in MiB (0 = automatisch)"); }
+                                LineEdit { text <=> root.archives.solid-block; accessible-label: @tr("Solid-Block in MiB (0 = automatisch)"); }
+                                DetailCell { text: @tr("Eigene Speicher- und Threadwerte verwenden den mitgelieferten 7-Zip-Konsolenadapter."); wrap: word-wrap; }
+                            }
+                            FormSection { title: @tr("TAR und GZIP");
+                                FieldLabel { text: @tr("TAR-Format"); }
+                                ComboBox { model: ["GNU (Linux)", "POSIX/PAX (SunOS)"]; current-index <=> root.archives.tar-dialect; accessible-label: @tr("TAR-Format"); }
+                                FieldLabel { text: @tr("GZIP-Kompressionsrate"); }
+                                ComboBox { model: ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]; current-index <=> root.archives.gzip-level; accessible-label: @tr("GZIP-Kompressionsrate"); }
+                            }
+                            FormSection { title: @tr("Prüfung und Dateieigenschaften");
+                                CheckBox { text: @tr("ZIP nach dem Packen prüfen"); checked <=> root.archives.verify; }
+                                CheckBox { text: @tr("Archivdatum auf neueste Quelldatei setzen"); checked <=> root.archives.newest-timestamp; }
+                                FieldLabel { text: @tr("Herkunftsmarkierung beim Entpacken"); }
+                                ComboBox { model: [@tr("Zone.Identifier übernehmen"), @tr("Herkunftsmarkierung weglassen")]; current-index <=> root.archives.zone; accessible-label: @tr("Herkunftsmarkierung beim Entpacken"); }
+                                DetailCell { text: @tr("Gilt auch für Packer-Plugins. Bei Mehrteilern wird die strengste vorhandene Markierung übernommen."); wrap: word-wrap; }
                             }
                         }
                     }
@@ -2815,6 +2870,7 @@ export component MainWindow inherits Window {
     in property <bool> dialog-operation-move;
     in property <TransferManagerData> transfer-manager-data;
     in-out property <int> dialog-transfer-filter;
+    in-out property <PackSelection> dialog-pack-selection;
     in property <SyncOptionsData> sync-draft;
     in property <int> sync-draft-revision;
     in property <[string]> sync-roots;
@@ -3662,6 +3718,8 @@ export component MainWindow inherits Window {
                 target-folder <=> root.dialog-operation-target;
                 browse-target => { return root.browse-operation-target(); }
                 kind: (root.dialog-kind == "archive-pack" || root.dialog-kind == "archive-pack-profile") ? OperationKind.pack : root.dialog-kind == "archive-extract" ? OperationKind.extract : root.dialog-operation-move ? OperationKind.move : OperationKind.copy;
+                pack-settings: root.dialog-kind == "archive-pack";
+                pack-selection <=> root.dialog-pack-selection;
                 multiple: root.dialog-operation-multiple;
                 password-enabled: root.dialog-second-secret;
                 note: root.dialog-operation-note;

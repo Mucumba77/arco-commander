@@ -1,3 +1,4 @@
+pub use crate::archive_zone::ZonePolicy;
 use crate::{archive_parts, archives, external_archives::ExternalArchiver, files, tools};
 use crate::{legacy_archives, seven_zip};
 use chrono::{Local, NaiveDateTime, TimeZone};
@@ -58,16 +59,25 @@ pub fn is_supported(path: &Path) -> bool {
 pub fn is_openable(path: &Path) -> bool {
     is_supported(path)
         || crate::external_archives::is_sfx(path)
+        || crate::external_volumes::is_sfx(path)
         || archives::is_zip_sfx(path)
         || legacy_archives::Format::of(path).is_some()
 }
 
 fn is_zip_container(path: &Path) -> bool {
-    is_zip(path) || archives::is_zip_sfx(path)
+    (is_zip(path) || archives::is_zip_sfx(path)) && archives::spanned_disks(path).is_none()
 }
 
 pub fn supports_password(path: &Path) -> bool {
-    is_zip_container(path) || seven_zip::can_read(path)
+    is_zip(path)
+        || is_zip_container(path)
+        || seven_zip::can_read(path)
+        || crate::external_archives::is_supported(path)
+        || crate::external_volumes::is_sfx(path)
+        || matches!(
+            legacy_archives::Format::of(path),
+            Some(legacy_archives::Format::Ace)
+        )
 }
 
 pub fn uses_legacy_adapter(path: &Path) -> bool {
@@ -84,6 +94,17 @@ pub fn pack_7z(
     seven_zip::pack(paths, base, target, password, cancel)
 }
 
+pub fn pack_7z_with_options(
+    paths: &[PathBuf],
+    base: &Path,
+    target: &Path,
+    password: Option<&str>,
+    settings: crate::archive_settings::Settings,
+    cancel: &AtomicBool,
+) -> io::Result<()> {
+    seven_zip::pack_with_options(paths, base, target, password, settings, cancel)
+}
+
 pub fn pack_encrypted_7z_sfx(
     paths: &[PathBuf],
     base: &Path,
@@ -94,12 +115,43 @@ pub fn pack_encrypted_7z_sfx(
     seven_zip::pack_sfx(paths, base, target, password, cancel)
 }
 
+pub fn pack_7z_sfx_with_options(
+    paths: &[PathBuf],
+    base: &Path,
+    target: &Path,
+    password: Option<&str>,
+    settings: crate::archive_settings::Settings,
+    cancel: &AtomicBool,
+) -> io::Result<()> {
+    seven_zip::pack_sfx_with_options(paths, base, target, password, settings, cancel)
+}
+
 pub fn pack_split(
     paths: &[PathBuf],
     base: &Path,
     target: &Path,
     part_size: u64,
     password: Option<&str>,
+    cancel: &AtomicBool,
+) -> io::Result<usize> {
+    pack_split_with_options(
+        paths,
+        base,
+        target,
+        part_size,
+        password,
+        Default::default(),
+        cancel,
+    )
+}
+
+pub fn pack_split_with_options(
+    paths: &[PathBuf],
+    base: &Path,
+    target: &Path,
+    part_size: u64,
+    password: Option<&str>,
+    settings: crate::archive_settings::Settings,
     cancel: &AtomicBool,
 ) -> io::Result<usize> {
     if part_size == 0 {
@@ -136,12 +188,20 @@ pub fn pack_split(
     let working = tempfile::tempdir_in(&parent)?;
     let archive = working.path().join(leaf);
     if seven_zip::is_7z(target) {
-        seven_zip::pack(paths, base, &archive, password, cancel)?;
+        seven_zip::pack_with_options(paths, base, &archive, password, settings, cancel)?;
     } else if target
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
     {
-        archives::create_zip(paths, base, &archive, password, cancel)?;
+        archives::create_zip_with_options(
+            paths,
+            base,
+            &archive,
+            password,
+            settings,
+            cancel,
+            |_| {},
+        )?;
     } else {
         return Err(io::Error::other(
             "ZIP oder 7z als Mehrteilerformat erforderlich.",
@@ -153,6 +213,12 @@ pub fn pack_split(
         ));
     }
     let parts = tools::split(&archive, working.path(), part_size, cancel)?;
+    if settings.newest_timestamp {
+        let modified = filetime::FileTime::from_last_modification_time(&fs::metadata(&archive)?);
+        for part in &parts {
+            filetime::set_file_mtime(part, modified)?;
+        }
+    }
     test(&parts[0], password, cancel)?;
     let parts = parts
         .into_iter()
@@ -165,7 +231,11 @@ pub fn pack_split(
 }
 
 pub fn is_editable(path: &Path) -> bool {
+    if archives::spanned_disks(path).is_some() {
+        return false;
+    }
     archive_parts::kind(path).is_some()
+        || crate::archive_rewrite::supports(path)
         || seven_zip::is_7z(path)
         || path
             .extension()
@@ -182,6 +252,11 @@ fn supports_sync_write(path: &Path) -> bool {
 
 pub fn supports_encrypted_edit(path: &Path) -> bool {
     archive_parts::kind(path).is_some()
+        || path.extension().is_some_and(|ext| {
+            ext.eq_ignore_ascii_case("ace")
+                || ext.eq_ignore_ascii_case("rar")
+                || ext.eq_ignore_ascii_case("arj")
+        })
         || seven_zip::is_7z(path)
         || path
             .extension()
@@ -189,15 +264,26 @@ pub fn supports_encrypted_edit(path: &Path) -> bool {
 }
 
 pub fn needs_header_password(error: &io::Error) -> bool {
-    error
-        .get_ref()
-        .is_some_and(|error| error.is::<seven_zip::HeaderPassword>())
+    error.get_ref().is_some_and(|error| {
+        error.is::<seven_zip::HeaderPassword>()
+            || error.is::<crate::external_archives::HeaderPassword>()
+    })
 }
 
 pub fn edit(
     file: &Path,
     change: archives::ZipEdit,
     password: Option<&str>,
+    cancel: &AtomicBool,
+) -> io::Result<usize> {
+    edit_with_packer(file, change, password, None, cancel)
+}
+
+pub fn edit_with_packer(
+    file: &Path,
+    change: archives::ZipEdit,
+    password: Option<&str>,
+    packer: Option<&crate::packer_profile::PackerProfile>,
     cancel: &AtomicBool,
 ) -> io::Result<usize> {
     if archive_parts::kind(file).is_some() {
@@ -210,7 +296,19 @@ pub fn edit(
         legacy_archives::Format::of(file),
         Some(legacy_archives::Format::Ace)
     ) {
-        crate::ace::edit(file, change, cancel)
+        crate::ace_volumes::ensure_writable(file)?;
+        if password.is_some() || !crate::ace_volumes::snapshot(file, cancel)?.is_empty() {
+            crate::archive_rewrite::edit(file, change, password, packer, cancel)
+        } else {
+            match crate::ace::edit(file, change.clone(), cancel) {
+                Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                    crate::archive_rewrite::edit(file, change, password, packer, cancel)
+                }
+                result => result,
+            }
+        }
+    } else if crate::archive_rewrite::supports(file) {
+        crate::archive_rewrite::edit(file, change, password, packer, cancel)
     } else {
         archives::edit_zip_with_password(file, change, password, cancel)
     }
@@ -224,6 +322,18 @@ pub fn append(
     password: Option<&str>,
     cancel: &AtomicBool,
 ) -> io::Result<usize> {
+    append_with_packer(file, folder, paths, base, password, None, cancel)
+}
+
+pub fn append_with_packer(
+    file: &Path,
+    folder: &Path,
+    paths: &[PathBuf],
+    base: &Path,
+    password: Option<&str>,
+    packer: Option<&crate::packer_profile::PackerProfile>,
+    cancel: &AtomicBool,
+) -> io::Result<usize> {
     if archive_parts::kind(file).is_some() {
         archive_parts::rewrite(file, password, paths, cancel, |joined| {
             append(joined, folder, paths, base, password, cancel)
@@ -234,7 +344,21 @@ pub fn append(
         legacy_archives::Format::of(file),
         Some(legacy_archives::Format::Ace)
     ) {
-        crate::ace::append(file, folder, paths, base, cancel)
+        crate::ace_volumes::ensure_writable(file)?;
+        if password.is_some() || !crate::ace_volumes::snapshot(file, cancel)?.is_empty() {
+            crate::archive_rewrite::append(file, folder, paths, base, password, packer, cancel)
+        } else {
+            match crate::ace::append(file, folder, paths, base, cancel) {
+                Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                    crate::archive_rewrite::append(
+                        file, folder, paths, base, password, packer, cancel,
+                    )
+                }
+                result => result,
+            }
+        }
+    } else if crate::archive_rewrite::supports(file) {
+        crate::archive_rewrite::append(file, folder, paths, base, password, packer, cancel)
     } else {
         archives::append_zip(file, folder, paths, base, password, cancel)
     }
@@ -328,7 +452,7 @@ impl Catalog {
         let volumes = if archive_parts::kind(file).is_some() {
             archive_parts::following(file, cancel)?
         } else {
-            crate::uc2_volumes::snapshot(file)?
+            legacy_archives::storage_parts(file, cancel)?
         };
         let mut header_encrypted = false;
         let entries: Vec<_> = if is_zip_container(file) {
@@ -357,9 +481,20 @@ impl Catalog {
                 encrypted: false,
                 modified: None,
             }]
+        } else if crate::external_archives::is_empty_lha(file) {
+            Vec::new()
+        } else if crate::read_archives::recognizes(file) {
+            crate::read_archives::list(file, cancel)?
         } else {
-            ExternalArchiver::discover(cancel)?
-                .list(file, cancel)?
+            let entries = if crate::compressed_tar::recognizes(file) {
+                crate::compressed_tar::with_inner(file, cancel, |inner, adapter| {
+                    adapter.list(inner, cancel)
+                })?
+            } else {
+                ExternalArchiver::discover(cancel)?.list_with_password(file, password, cancel)?
+            };
+            header_encrypted = password.is_some() && entries.iter().any(|item| item.encrypted);
+            entries
                 .into_iter()
                 .map(|item| Item {
                     path: item.path,
@@ -389,12 +524,25 @@ impl Catalog {
     }
 
     pub fn storage_paths(&self) -> impl Iterator<Item = &Path> {
-        std::iter::once(self.file.as_path())
-            .chain(self.volumes.iter().map(|(path, _)| path.as_path()))
+        std::iter::once(self.file.as_path()).chain(
+            self.volumes
+                .iter()
+                .map(|(path, _)| path.as_path())
+                .filter(|path| *path != self.file),
+        )
     }
 
     pub fn can_sync_write(&self) -> bool {
         supports_sync_write(&self.file)
+            && !self.metadata.permissions().readonly()
+            && self
+                .volumes
+                .iter()
+                .all(|(_, metadata)| !metadata.permissions().readonly())
+    }
+
+    pub fn can_edit(&self) -> bool {
+        is_editable(&self.file)
             && !self.metadata.permissions().readonly()
             && self
                 .volumes
@@ -413,11 +561,24 @@ impl Catalog {
         base: &Path,
         password: Option<&str>,
         cancel: &AtomicBool,
+        resolve: impl FnMut(WriteConflict<'_>) -> io::Result<files::ConflictDecision>,
+    ) -> io::Result<files::TransferReport> {
+        self.append_resolving_with_packer(folder, sources, base, password, cancel, None, resolve)
+    }
+
+    pub fn append_resolving_with_packer(
+        &self,
+        folder: &Path,
+        sources: &[PathBuf],
+        base: &Path,
+        password: Option<&str>,
+        cancel: &AtomicBool,
+        packer: Option<&crate::packer_profile::PackerProfile>,
         mut resolve: impl FnMut(WriteConflict<'_>) -> io::Result<files::ConflictDecision>,
     ) -> io::Result<files::TransferReport> {
         use files::{Conflict, ConflictDecision, Kind};
         self.check_unchanged()?;
-        if !self.can_sync_write() || !self.has_directory(folder) {
+        if !self.can_edit() || !self.has_directory(folder) {
             return Err(io::Error::other(
                 "Der Archivordner ist für Änderungen gesperrt.",
             ));
@@ -587,7 +748,14 @@ impl Catalog {
             report.completed += 1;
         }
         let additions: Vec<_> = additions.into_iter().collect();
-        self.apply_sync_changes(removals, &additions, staging.path(), password, cancel)?;
+        self.apply_archive_changes(
+            removals,
+            &additions,
+            staging.path(),
+            password,
+            cancel,
+            packer,
+        )?;
         Ok(report)
     }
 
@@ -599,11 +767,28 @@ impl Catalog {
         password: Option<&str>,
         cancel: &AtomicBool,
     ) -> io::Result<()> {
+        if !self.can_sync_write() {
+            return Err(io::Error::other(
+                "Der Archivsatz ist für den Synchronisierungs-Schreibpfad gesperrt.",
+            ));
+        }
+        self.apply_archive_changes(removals, additions, base, password, cancel, None)
+    }
+
+    pub fn apply_archive_changes(
+        &self,
+        removals: Vec<PathBuf>,
+        additions: &[PathBuf],
+        base: &Path,
+        password: Option<&str>,
+        cancel: &AtomicBool,
+        packer: Option<&crate::packer_profile::PackerProfile>,
+    ) -> io::Result<()> {
         self.check_unchanged()?;
         if removals.is_empty() && additions.is_empty() {
             return Ok(());
         }
-        if !self.can_sync_write() {
+        if !self.can_edit() {
             return Err(io::Error::other(
                 "Der Archivsatz ist für Änderungen gesperrt.",
             ));
@@ -626,12 +811,22 @@ impl Catalog {
                 }
             }
         }
+        if !self.volumes.is_empty() && archive_parts::kind(&self.file).is_none() {
+            crate::archive_rewrite::sync(
+                &self.file, removals, additions, base, password, packer, cancel,
+            )?;
+            return Ok(());
+        }
         let modify = |archive: &Path| -> io::Result<usize> {
             self.check_unchanged()?;
             let changed = if seven_zip::is_7z(archive) {
                 seven_zip::sync_changes(archive, removals, additions, base, password, cancel)?
-            } else {
+            } else if is_zip_container(archive) {
                 archives::sync_zip_changes(archive, removals, additions, base, password, cancel)?
+            } else {
+                crate::archive_rewrite::sync(
+                    archive, removals, additions, base, password, packer, cancel,
+                )?
             };
             self.check_unchanged()?;
             Ok(changed)
@@ -692,6 +887,17 @@ impl Catalog {
         {
             return Err(io::Error::other(
                 "Ein neues Archivsegment ist hinzugekommen.",
+            ));
+        }
+        if !self.volumes.is_empty()
+            && matches!(
+                legacy_archives::Format::of(&self.file),
+                Some(legacy_archives::Format::Ace)
+            )
+            && crate::ace_volumes::part_path(&self.file, self.volumes.len()).try_exists()?
+        {
+            return Err(io::Error::other(
+                "Ein neuer ACE-Folgeteil ist hinzugekommen.",
             ));
         }
         Ok(())
@@ -1183,44 +1389,100 @@ pub fn extract_with_progress(
     cancel: &AtomicBool,
     progress: impl FnMut(files::Progress<'_>),
 ) -> io::Result<usize> {
+    extract_with_options(
+        file,
+        destination,
+        Some(selection),
+        password,
+        cancel,
+        progress,
+        ZonePolicy::Preserve,
+    )
+}
+
+/// Extract a selection (or the whole archive) using an explicit per-job policy.
+pub fn extract_with_options(
+    file: &Path,
+    destination: &Path,
+    selection: Option<&Selection>,
+    password: Option<&str>,
+    cancel: &AtomicBool,
+    progress: impl FnMut(files::Progress<'_>),
+    zone: ZonePolicy,
+) -> io::Result<usize> {
+    if crate::external_archives::is_empty_lha(file) {
+        files::check_cancel(cancel)?;
+        if selection.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "Der ausgewählte Archiveintrag fehlt.",
+            ));
+        }
+        if !files::regular_metadata(destination)?.is_dir() {
+            return Err(io::ErrorKind::NotADirectory.into());
+        }
+        return Ok(0);
+    }
     if is_zip_container(file) {
-        archives::extract_zip_selection_with_progress(
+        archives::extract_zip_with_zone(
             file,
             destination,
             password,
-            Some(selection),
+            selection,
             cancel,
             progress,
+            zone,
         )
     } else if seven_zip::can_read(file) {
-        seven_zip::extract(file, destination, Some(selection), password, cancel)
+        seven_zip::extract_with_zone(file, destination, selection, password, cancel, zone)
     } else if let Some(format) = legacy_archives::Format::of(file) {
-        format.extract(file, destination, Some(selection), cancel)
+        format.extract_with_zone(file, destination, selection, password, cancel, zone)
     } else if is_brotli(file) {
-        extract_brotli(file, destination, Some(selection), cancel)
+        extract_brotli(file, destination, selection, cancel, zone)
+    } else if crate::compressed_tar::recognizes(file) {
+        crate::compressed_tar::with_inner(file, cancel, |inner, adapter| {
+            crate::archive_zone::ArchiveZone::read_with_policy(file, cancel, zone)?.apply(inner)?;
+            adapter.extract_with_zone(inner, destination, selection, password, cancel, zone)
+        })
+    } else if crate::read_archives::recognizes(file) {
+        crate::read_archives::extract(file, destination, selection, cancel, zone)
     } else {
-        ExternalArchiver::discover(cancel)?.extract_selection(
+        ExternalArchiver::discover(cancel)?.extract_with_zone(
             file,
             destination,
-            Some(selection),
+            selection,
+            password,
             cancel,
+            zone,
         )
     }
 }
 
 pub fn test(file: &Path, password: Option<&str>, cancel: &AtomicBool) -> io::Result<usize> {
+    if crate::external_archives::is_empty_lha(file) {
+        files::check_cancel(cancel)?;
+        return Ok(0);
+    }
     if is_zip_container(file) {
         archives::test_zip(file, password, cancel)
     } else if seven_zip::can_read(file) {
         seven_zip::test(file, password, cancel)
     } else if let Some(format) = legacy_archives::Format::of(file) {
-        format.test(file, cancel)
+        format.test_with_password(file, password, cancel)
     } else if is_brotli(file) {
         let metadata = files::regular_metadata(file)?;
         decode_brotli(file, &metadata, io::sink(), MAX_EXTRACT, cancel)?;
         Ok(1)
+    } else if crate::read_archives::recognizes(file) {
+        crate::read_archives::test(file, cancel)
     } else {
-        ExternalArchiver::discover(cancel)?.test(file, cancel)
+        if crate::compressed_tar::recognizes(file) {
+            crate::compressed_tar::with_inner(file, cancel, |inner, adapter| {
+                adapter.test(inner, cancel)
+            })
+        } else {
+            ExternalArchiver::discover(cancel)?.test_with_password(file, password, cancel)
+        }
     }
 }
 
@@ -1240,24 +1502,15 @@ pub fn extract_all_with_progress(
     cancel: &AtomicBool,
     progress: impl FnMut(files::Progress<'_>),
 ) -> io::Result<usize> {
-    if is_zip_container(file) {
-        archives::extract_zip_selection_with_progress(
-            file,
-            destination,
-            password,
-            None,
-            cancel,
-            progress,
-        )
-    } else if seven_zip::can_read(file) {
-        seven_zip::extract(file, destination, None, password, cancel)
-    } else if let Some(format) = legacy_archives::Format::of(file) {
-        format.extract(file, destination, None, cancel)
-    } else if is_brotli(file) {
-        extract_brotli(file, destination, None, cancel)
-    } else {
-        ExternalArchiver::discover(cancel)?.extract(file, destination, cancel)
-    }
+    extract_with_options(
+        file,
+        destination,
+        None,
+        password,
+        cancel,
+        progress,
+        ZonePolicy::Preserve,
+    )
 }
 
 fn extract_brotli(
@@ -1265,6 +1518,7 @@ fn extract_brotli(
     destination: &Path,
     selection: Option<&Selection>,
     cancel: &AtomicBool,
+    policy: ZonePolicy,
 ) -> io::Result<usize> {
     let metadata = files::regular_metadata(file)?;
     let entries = project(
@@ -1274,7 +1528,7 @@ fn extract_brotli(
         cancel,
     )?;
     let base = check_destination(destination, &entries, |_| false, cancel)?;
-    let zone = crate::archive_zone::ArchiveZone::read(file, cancel)?;
+    let zone = crate::archive_zone::ArchiveZone::read_with_policy(file, cancel, policy)?;
     let mut staged = tempfile::NamedTempFile::new_in(&base)?;
     decode_brotli(
         file,

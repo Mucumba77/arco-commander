@@ -16,6 +16,7 @@ pub struct TcImport {
     pub favorites: Vec<DirectoryFavorite>,
     pub shortcuts: BTreeMap<String, String>,
     pub skipped: usize,
+    pub packers: crate::packer_profile::TcPackers,
 }
 
 pub fn read_tc_ini(
@@ -28,6 +29,7 @@ pub fn read_tc_ini(
         favorites: Vec::new(),
         shortcuts: BTreeMap::new(),
         skipped: 0,
+        packers: crate::packer_profile::read_tc_packers(path, &resolve_variable)?,
     };
     let mut hotlist: BTreeMap<usize, [&str; 3]> = BTreeMap::new();
     for (section, key, value) in ini_entries(&data) {
@@ -2374,6 +2376,7 @@ pub struct Profile {
     pub ftp_profiles: BTreeMap<String, FtpProfile>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub packer_profiles: BTreeMap<String, crate::packer_profile::PackerProfile>,
+    pub archives: crate::archive_settings::Settings,
     pub editor: Option<PathBuf>,
 }
 
@@ -2476,6 +2479,7 @@ impl Default for Profile {
             sync_profiles: BTreeMap::new(),
             ftp_profiles: BTreeMap::new(),
             packer_profiles: BTreeMap::new(),
+            archives: Default::default(),
             editor: None,
         }
     }

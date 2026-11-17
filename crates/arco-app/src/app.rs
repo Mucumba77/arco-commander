@@ -323,6 +323,7 @@ struct QuickTarget {
 
 #[derive(Clone)]
 pub struct JobContext {
+    pub archives: arco_core::archive_settings::Settings,
     pub cancel: Arc<AtomicBool>,
     sender: Sender<Event>,
 }
@@ -1432,6 +1433,7 @@ impl App {
             transfer_rate: profile.transfer_rate_kib.to_string().into(),
             transfer_log: settings::path_label(profile.transfer_log.as_deref()).into(),
             transfer_comments: profile.transfer_descriptions,
+            archives: settings::archive_draft(profile.archives),
             ntfs: settings::ntfs_draft(profile.transfer_ntfs),
         };
         ui.set_settings_current(settings.clone());
@@ -1879,6 +1881,7 @@ impl App {
                 hidden,
             } = request;
             let job = JobContext {
+                archives: Default::default(),
                 cancel,
                 sender: sender.clone(),
             };
@@ -1968,9 +1971,11 @@ impl App {
         ui.set_job_pausable(self.transfers.pausable());
         ui.set_job_paused(false);
         let language = self.profile.language;
+        let archives = self.profile.archives;
         std::thread::spawn(move || {
             crate::locale::worker_language(language);
             let context = JobContext {
+                archives,
                 cancel,
                 sender: sender.clone(),
             };
