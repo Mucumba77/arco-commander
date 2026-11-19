@@ -28,13 +28,13 @@ Voraussetzung ist die aktuelle **Microsoft Visual C++ v14-Laufzeit (x64)**; für
 
 ## Einblicke
 
-Die Beispielbilder zeigen Version 1.0.0. Für die überarbeiteten Dialoge enthält die [UI-Prüfliste](docs/UI-PRUEFUNG.md) die erwarteten Arbeitsabläufe. [Nächster Arbeitsblock](docs/WEITERARBEIT.md).
+Die Aufnahmen zeigen Version 1.7.0 mit neutralen Beispieldateien. Die [UI-Prüfliste](docs/UI-PRUEFUNG.md) beschreibt die Bedienabläufe.
 
 ### Kopierfortschritt
 
 Die Fortschrittskarte zeigt die aktuelle Datei und den Stand der Kopie. Über **Im Hintergrund** arbeitest du in den Dateifenstern weiter.
 
-![Kopierfortschritt für ein neutrales Beispielarchiv bei 39 Prozent](docs/screenshots/kopierfortschritt.jpg)
+![Kopierfortschritt mit Prozentanzeige, Durchsatz und geschätzter Restzeit](docs/screenshots/kopierfortschritt.jpg)
 
 ### Lister
 
