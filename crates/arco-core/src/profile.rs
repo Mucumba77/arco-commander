@@ -2395,6 +2395,8 @@ pub struct Profile {
     pub sync_profiles: BTreeMap<String, SavedSyncProfile>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub ftp_profiles: BTreeMap<String, FtpProfile>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub network_transfer_presets: Vec<crate::transfer_presets::TransferPreset>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub packer_profiles: BTreeMap<String, crate::packer_profile::PackerProfile>,
     pub archives: crate::archive_settings::Settings,
@@ -2499,6 +2501,7 @@ impl Default for Profile {
             sync_options: Default::default(),
             sync_profiles: BTreeMap::new(),
             ftp_profiles: BTreeMap::new(),
+            network_transfer_presets: Vec::new(),
             packer_profiles: BTreeMap::new(),
             archives: Default::default(),
             editor: None,
@@ -2634,6 +2637,15 @@ pub enum FtpSecurity {
     ImplicitTls,
     Plain,
     Sftp,
+    Scp,
+    WebDav,
+    S3,
+}
+
+impl FtpSecurity {
+    pub fn is_ssh(self) -> bool {
+        matches!(self, Self::Sftp | Self::Scp)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -2645,14 +2657,55 @@ pub enum FtpListing {
     List,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SshAgent {
+    OpenSsh,
+    Pageant,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FtpTransferMode {
+    #[default]
+    Binary,
+    Text,
+    Automatic,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FtpTransfer {
+    pub mode: FtpTransferMode,
+    pub speed_kib: Option<u32>,
+    pub preserve_time: Option<bool>,
+    pub masks: String,
+}
+
+impl FtpTransfer {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FtpProfile {
     pub address: String,
     pub user: String,
+    pub recycle_remote: bool,
+    pub recycle_overwrites: bool,
     pub security: FtpSecurity,
     pub proxy: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub proxy_user: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_credential: Option<String>,
     pub active: bool,
+    #[serde(skip_serializing_if = "FtpTransfer::is_default")]
+    pub transfer: FtpTransfer,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transfer_preset: Option<String>,
     pub listing: FtpListing,
     pub address_family: FtpAddressFamily,
     pub charset: String,
@@ -2666,6 +2719,23 @@ pub struct FtpProfile {
     pub ssh_fingerprint: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ssh_private_key: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_agent: Option<SshAgent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_kerberos: Option<String>,
+    pub ssh_kerberos_delegate: bool,
+    pub ssh_kerberos_kex: bool,
+    pub ssh_interactive: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_jump: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_timeout: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_keepalive: Option<u64>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub s3_region: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub s3_aws_profile: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_directory: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]

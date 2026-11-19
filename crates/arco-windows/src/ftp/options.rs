@@ -21,6 +21,116 @@ pub enum TransferMode {
     Text,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PreferredTransferMode {
+    #[default]
+    Binary,
+    Text,
+    Automatic,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TransferSettings {
+    pub preset: Option<String>,
+    pub mode: PreferredTransferMode,
+    pub speed_kib: Option<u32>,
+    pub preserve_time: Option<bool>,
+    pub masks: String,
+}
+
+impl super::Connection {
+    pub fn with_transfer_settings(mut self, settings: TransferSettings) -> io::Result<Self> {
+        if settings
+            .speed_kib
+            .is_some_and(|rate| rate == 0 || rate > 1_048_576)
+        {
+            return Err(invalid_input(
+                "Das Durchsatzlimit muss zwischen 1 und 1048576 KiB/s liegen.",
+            ));
+        }
+        if !self.security.is_ftp() && settings.mode != PreferredTransferMode::Binary {
+            return Err(invalid_input(
+                "ASCII und automatische Textauswahl benötigen FTP oder FTPS.",
+            ));
+        }
+        self.transfer = settings;
+        Ok(self)
+    }
+}
+
+impl Session {
+    pub fn with_transfer_snapshot(&self, settings: TransferSettings) -> Self {
+        let mut session = self.clone();
+        session.transfer_override = Some(settings);
+        session
+    }
+
+    pub fn configured_transfer_preset(&self) -> Option<String> {
+        self.configured_transfer_preset
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    pub fn rename_transfer_preset(&self, old: &str, new: Option<&str>) {
+        let mut preset = self
+            .configured_transfer_preset
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if preset.as_deref() == Some(old) {
+            *preset = new.map(str::to_owned);
+        }
+    }
+
+    pub fn transfer_username(&self) -> &str {
+        &self.connection.user
+    }
+
+    pub fn transfer_settings(&self) -> &TransferSettings {
+        self.transfer_override
+            .as_ref()
+            .unwrap_or(&self.connection.transfer)
+    }
+
+    pub fn transfer_masks(&self) -> &str {
+        &self.transfer_settings().masks
+    }
+
+    pub fn preserve_transfer_time(&self, default: bool) -> bool {
+        self.transfer_settings().preserve_time.unwrap_or(default)
+    }
+
+    pub fn preferred_transfer_mode(&self, name: &str) -> TransferMode {
+        let text = match self.transfer_settings().mode {
+            PreferredTransferMode::Text => true,
+            PreferredTransferMode::Binary => false,
+            PreferredTransferMode::Automatic => PathBuf::from(name)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| {
+                    [
+                        "txt", "csv", "tsv", "html", "htm", "xml", "css", "js", "json", "ini", "md",
+                    ]
+                    .iter()
+                    .any(|candidate| ext.eq_ignore_ascii_case(candidate))
+                }),
+        };
+        if text {
+            TransferMode::Text
+        } else {
+            TransferMode::Binary
+        }
+    }
+
+    pub(super) fn apply_curl_rate(&self, command: &mut std::process::Command) {
+        if let Some(rate) = self.transfer_settings().speed_kib {
+            command
+                .arg("--limit-rate")
+                .arg((u64::from(rate) * 1024).to_string());
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct ConnectionOptions {
     pub family: AddressFamily,
@@ -163,8 +273,19 @@ impl Session {
     pub fn connection_details(&self, directory: &Url, cancel: &AtomicBool) -> io::Result<String> {
         if self.is_sftp() {
             self.validate(directory)?;
-            self.sftp_operation(cancel, |_| Ok(()))?;
+            self.check_sftp_connection(cancel)?;
             return Ok(format!("{directory}\nSSH · {}", self.sftp_fingerprint()?));
+        }
+        if !self.security().is_ftp() {
+            self.list(directory, cancel)?;
+            let mut detail = format!("{directory}\n{}", self.security().label());
+            if self.security().is_ssh() {
+                detail.push_str(&format!(" · {}", self.sftp_fingerprint()?));
+            }
+            if self.security() == super::Security::S3 {
+                detail.push_str(&format!(" · {}", self.connection.s3_region));
+            }
+            return Ok(detail);
         }
         let response = self.server_command(directory, "FEAT", cancel)?;
         let options = &self.connection.options;

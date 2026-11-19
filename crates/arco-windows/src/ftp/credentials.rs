@@ -5,6 +5,43 @@ use windows::Win32::System::Com::CoCreateGuid;
 use zeroize::Zeroizing;
 
 impl Connection {
+    pub fn store_proxy_password(&self, password: &str) -> io::Result<String> {
+        self.check_proxy_password(password)?;
+        let guid = unsafe { CoCreateGuid() }.map_err(io::Error::other)?;
+        let id = format!("{:032x}", guid.to_u128());
+        credentials::write(&self.proxy_credential_target(&id)?, password)?;
+        Ok(id)
+    }
+
+    pub fn use_proxy_password(self, id: &str) -> io::Result<Self> {
+        let password = credentials::read(&self.proxy_credential_target(id)?)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "Speichere das Proxy-Passwort erneut in den Windows-Anmeldeinformationen.",
+            )
+        })?;
+        self.with_proxy_password(&password)
+    }
+
+    pub fn delete_proxy_password(&self, id: &str) -> io::Result<()> {
+        credentials::delete(&self.proxy_credential_target(id)?)
+    }
+
+    fn proxy_credential_target(&self, id: &str) -> io::Result<String> {
+        let proxy = self
+            .proxy
+            .as_ref()
+            .filter(|_| !self.proxy_user.is_empty())
+            .ok_or_else(|| super::invalid_input("Die Proxy-Anmeldung ist unvollständig."))?;
+        if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(super::invalid_input(
+                "Ungültiger Verweis auf das Proxy-Passwort.",
+            ));
+        }
+        let scope = blake3::hash(format!("{proxy}\n{}", self.proxy_user).as_bytes());
+        Ok(format!("Arco Commander Proxy/{id}-{scope}"))
+    }
+
     pub fn store_password(&self, password: &str) -> io::Result<String> {
         check_password(password)?;
         if password.is_empty() {
@@ -59,9 +96,15 @@ impl Connection {
         if let Some(ssh) = &self.ssh {
             use base64::Engine;
             scope.push('\n');
-            scope.push_str(
-                &base64::engine::general_purpose::STANDARD_NO_PAD.encode(ssh.fingerprint),
-            );
+            if let Some(fingerprint) = ssh.fingerprint {
+                scope.push_str(
+                    &base64::engine::general_purpose::STANDARD_NO_PAD.encode(fingerprint),
+                );
+            }
+            if ssh.kerberos_kex {
+                scope.push_str("\nkerberos-kex:");
+                scope.push_str(ssh.kerberos_spn.as_deref().unwrap_or_default());
+            }
             if ssh.uses_key() {
                 scope.push_str("\nprivate-key-passphrase");
             }

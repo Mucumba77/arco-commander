@@ -31,7 +31,7 @@ DOCS = (
     "docs/SUCHE-UND-WERKZEUGE.md", "docs/AREA3-ABSCHLUSS.md",
     "docs/NAVIGATION-UND-DATEIEN.md", "docs/BEREICH1-2-ABSCHLUSS.md",
     "docs/ARCHIVE.md", "docs/AREA4-ABSCHLUSS.md",
-    "docs/FTP.md", "docs/SFTP.md",
+    "docs/FTP.md", "docs/SFTP.md", "docs/AUTOMATISIERUNG.md",
     "docs/branding/arco-commander.svg",
     "docs/screenshots/hauptfenster.jpg", "docs/screenshots/kopierfortschritt.jpg",
     "docs/screenshots/lister.jpg",
@@ -39,6 +39,14 @@ DOCS = (
 LICENSE_NAME = re.compile(
     r"^(?:licen[cs]es?|copying|copyright|notice|unlicense|third[-_ ]?party[-_ ]?notices)(?:$|[_. -])",
     re.IGNORECASE,
+)
+
+AUTOMATION_FILES = (
+    "ArcoCommander.Automation.dll",
+    "ArcoCommander.Automation.comhost.dll",
+    "ArcoCommander.Automation.deps.json",
+    "ArcoCommander.Automation.runtimeconfig.json",
+    "ArcoCommander.Automation.X.manifest",
 )
 
 
@@ -61,6 +69,7 @@ def metadata(target):
 def dependencies(meta, workspace_names):
     packages = {package["id"]: package for package in meta["packages"]}
     nodes = {node["id"]: node for node in meta["resolve"]["nodes"]}
+    workspace_members = set(meta["workspace_members"])
     pending = [member for member in meta["workspace_members"] if packages[member]["name"] in workspace_names]
     seen = set()
     while pending:
@@ -69,7 +78,7 @@ def dependencies(meta, workspace_names):
             continue
         seen.add(package_id)
         package = packages[package_id]
-        if package["source"]:
+        if package_id not in workspace_members:
             yield package
         pending.extend(
             dep["pkg"] for dep in nodes[package_id]["deps"]
@@ -98,17 +107,18 @@ def write_notices(stage, packages):
             path = (crate / package["license_file"]).resolve()
             if path.is_file() and path.is_relative_to(crate.resolve()):
                 files.add(path)
-        if name == "libssh2-sys":
-            files.add(crate / "libssh2" / "COPYING")
-            files.update((crate / "libssh2" / "LICENSES").glob("*.txt"))
-        if name == "libz-sys":
-            files.add(crate / "src" / "zlib" / "LICENSE")
         for path in sorted(files):
             destination = licenses / f"{name}-{version}" / path.relative_to(crate)
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(path, destination)
         license_label = (package["license"] or package["license_file"] or "Siehe Paketquelle").replace("|", " / ")
         notice.append(f"| [{name} {version}](https://crates.io/crates/{name}/{version}) | {license_label} |")
+
+    notice.extend([
+        "",
+        "Arco verwendet eine um Kerberos-Schlüsselaustausch erweiterte Fassung von Russh.",
+        f"[Quellstand und Änderungen]({REPO}/tree/main/vendor/russh).",
+    ])
 
     sdk = licenses / f"microsoft-webview2-sdk-{WEBVIEW2_SDK}"
     sdk.mkdir(parents=True)
@@ -175,6 +185,17 @@ def smoke_test(archive, name, version, *, run_app=True, run_sfx=True):
             require(f"Arco Commander {version}".encode() in app.read_bytes(),
                     "The application binary does not contain the release version")
 
+        console = run(app.with_name("arco-net.exe"), "--help")
+        require(console.returncode == 0 and b"--script" in console.stdout,
+                "The network scripting tool failed its help check")
+        console = run(app.with_name("arco-net.exe"), "--script", "-", "--profile", root / "test-profile.json",
+                      stdin=b"lpwd\n")
+        require(console.returncode == 0 and "local" in json.loads(console.stdout)["event"],
+                "The network scripting tool did not accept a UTF-8 script from stdin")
+        automation = app.parent / "automation"
+        require(all((automation / file).is_file() for file in AUTOMATION_FILES),
+                "The COM and .NET automation files are incomplete")
+
         protocols = set()
         for helper in ("arco-plugin-host.exe", "arco-plugin-host-x86.exe"):
             command = run(app.with_name(helper), stdin=b"{}\n")
@@ -223,6 +244,12 @@ def package_release(*, run_app=True, run_sfx=True, seven_zip_dir=TARGET / "tools
     final_archive = output / f"{name}.zip"
     require(not final_archive.exists(), f"Release archive already exists: {final_archive}")
 
+    automation = TARGET / "automation-release"
+    subprocess.run(
+        ["dotnet", "build", "automation/ArcoCommander.Automation.csproj", "-c", "Release",
+         "--nologo", "-o", automation],
+        cwd=ROOT, check=True,
+    )
     native_binaries = TARGET / X64 / "release"
     wow_binaries = TARGET / X86 / "release"
     with tempfile.TemporaryDirectory(prefix="arco-package-", dir=output) as scratch:
@@ -230,6 +257,7 @@ def package_release(*, run_app=True, run_sfx=True, seven_zip_dir=TARGET / "tools
         stage.mkdir()
         for filename, folder, machine, subsystem in (
             ("arco-commander.exe", native_binaries, 0x8664, 2),
+            ("arco-net.exe", native_binaries, 0x8664, 3),
             ("arco-zip-sfx.exe", native_binaries, 0x8664, 2),
             ("arco-plugin-host.exe", native_binaries, 0x8664, 3),
             ("arco-plugin-host-x86.exe", wow_binaries, 0x14c, 3),
@@ -237,6 +265,9 @@ def package_release(*, run_app=True, run_sfx=True, seven_zip_dir=TARGET / "tools
             source_name = "arco-plugin-host.exe" if folder == wow_binaries else filename
             copy_executable(folder / source_name, stage / filename, machine, subsystem)
         copy_seven_zip(seven_zip_dir, stage)
+        (stage / "automation").mkdir()
+        for filename in AUTOMATION_FILES:
+            shutil.copyfile(automation / filename, stage / "automation" / filename)
         for document in (*DOCS, f"docs/releases/v{version}.md"):
             destination = stage / document
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -251,7 +282,7 @@ https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist/
 Die Laufzeit-Installer sind nicht im ZIP enthalten.
 
 1. Entpacke das gesamte ZIP in einen Ordner deiner Wahl.
-2. Starte arco-commander.exe. Die drei Hilfsprogramme bleiben daneben.
+2. Starte arco-commander.exe. Die Hilfsprogramme bleiben daneben.
 3. Mit --portable speichert Arco das Profil im Programmordner. Standardmäßig
    verwendet Arco das Profil unter %LOCALAPPDATA%\\Arco Commander.
 
@@ -261,6 +292,8 @@ https://developer.microsoft.com/microsoft-edge/webview2/#download
 
 7-Zip 26.06 ist unter 7zip/ enthalten (Konsole, SFX-Modul, Lizenz und Quellcode).
 ACE/UC2 benoetigen die optionale Python-Umgebung aus README.md.
+Die optionale .NET-/COM-Automatisierung benoetigt die .NET-10-Laufzeit (x64).
+Die Anleitung steht in docs/AUTOMATISIERUNG.md.
 Archiveinstellungen und Formatgrenzen: docs/ARCHIVE.md
 
 Das Paket ist unsigniert. Release-Hinweise und SHA-256-Prüfsumme stehen auf GitHub.

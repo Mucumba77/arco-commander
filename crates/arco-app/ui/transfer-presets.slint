@@ -1,0 +1,155 @@
+import { ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
+import { Button, CheckBox, Colors } from "dialog-theme.slint";
+import { DialogHeading, FieldLabel, FormSection } from "operation-dialogs.slint";
+
+export struct TransferPresetData {
+    name: string,
+    mode: int,
+    speed: string,
+    time: int,
+    masks: string,
+    automatic: bool,
+    host: string,
+    user: string,
+    local: string,
+    remote: string,
+}
+
+export component TransferPresetsCard inherits Rectangle {
+    in property <[string]> names;
+    in property <int> index;
+    in property <int> revision;
+    in property <int> focus-cycle;
+    in property <TransferPresetData> data;
+    in property <string> notice;
+    callback operate(string, int, TransferPresetData);
+    callback close();
+
+    background: Colors.panel;
+    border-radius: 16px;
+    border-width: 1px;
+    border-color: Colors.edge;
+
+    changed revision => { root.reset(); }
+    changed focus-cycle => {
+        if root.focus-cycle > 0 { presets.focus(); }
+        else if save-button.enabled { save-button.focus(); }
+        else { close-button.focus(); }
+    }
+    init => { root.reset(); presets.focus(); }
+
+    function reset() {
+        presets.current-index = root.index;
+        name.text = root.data.name;
+        mode.current-index = root.data.mode;
+        speed.text = root.data.speed;
+        time.current-index = root.data.time;
+        masks.text = root.data.masks;
+        automatic.checked = root.data.automatic;
+        host.text = root.data.host;
+        user.text = root.data.user;
+        local.text = root.data.local;
+        remote.text = root.data.remote;
+    }
+
+    function draft() -> TransferPresetData {
+        return { name: name.text, mode: mode.current-index, speed: speed.text, time: time.current-index,
+            masks: masks.text, automatic: automatic.checked, host: host.text, user: user.text,
+            local: local.text, remote: remote.text };
+    }
+
+    VerticalLayout {
+        padding: 20px;
+        spacing: 10px;
+        DialogHeading {
+            icon: @image-url("icons/network.svg");
+            title: @tr("Transfervorgaben");
+            subtitle: @tr("Arco verwendet die erste passende Auswahlregel von oben.");
+        }
+        HorizontalLayout {
+            spacing: 7px;
+            presets := ComboBox {
+                model: root.names;
+                horizontal-stretch: 1;
+                accessible-label: @tr("Gespeicherte Transfervorgaben");
+                selected => { root.operate("select", self.current-index, root.data); }
+            }
+            Button { text: @tr("Neu"); clicked => { root.operate("select", 0, root.data); name.focus(); } }
+            Button { text: "↑"; accessible-label: @tr("Priorität erhöhen"); enabled: root.index > 1; clicked => { root.operate("up", root.index, root.data); } }
+            Button { text: "↓"; accessible-label: @tr("Priorität senken"); enabled: root.index > 0 && root.index + 1 < root.names.length; clicked => { root.operate("down", root.index, root.data); } }
+        }
+        ScrollView {
+            vertical-stretch: 1;
+            viewport-width: self.visible-width;
+            VerticalLayout {
+                width: parent.visible-width;
+                spacing: 9px;
+                alignment: start;
+                FormSection { title: @tr("Übertragung");
+                    FieldLabel { text: @tr("Name"); }
+                    name := LineEdit { accessible-label: @tr("Name der Transfervorgabe"); }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        VerticalLayout {
+                            FieldLabel { text: @tr("Übertragungsmodus"); }
+                            mode := ComboBox { model: [@tr("Binär"), @tr("Text (ASCII)"), @tr("Automatisch nach Dateiendung")]; accessible-label: @tr("Übertragungsmodus"); }
+                        }
+                        VerticalLayout {
+                            FieldLabel { text: @tr("Änderungszeiten"); }
+                            time := ComboBox { model: [@tr("Je nach Aktion"), @tr("Beibehalten"), @tr("Nicht übernehmen")]; accessible-label: @tr("Änderungszeiten"); }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        VerticalLayout {
+                            FieldLabel { text: @tr("Durchsatzlimit (KiB/s)"); }
+                            speed := LineEdit { placeholder-text: @tr("Unbegrenzt"); accessible-label: @tr("Durchsatzlimit (KiB/s)"); }
+                        }
+                        VerticalLayout {
+                            FieldLabel { text: @tr("Dateimaske für Transfers"); }
+                            masks := LineEdit { placeholder-text: "*.txt;*.csv | *.tmp"; accessible-label: @tr("Dateimaske für Transfers"); }
+                        }
+                    }
+                }
+                FormSection { title: @tr("Automatische Auswahl");
+                    automatic := CheckBox { text: @tr("Auswahlregel aktivieren"); }
+                    Text { visible: automatic.checked; text: @tr("Leere Felder passen auf jeden Wert. Trenne Masken mit ; und Ausschlüsse mit |. ** erfasst Unterordner."); color: Colors.muted; wrap: word-wrap; }
+                    HorizontalLayout {
+                        visible: automatic.checked;
+                        spacing: 8px;
+                        VerticalLayout {
+                            FieldLabel { text: @tr("Servermaske"); }
+                            host := LineEdit { placeholder-text: "*.example.org"; accessible-label: @tr("Servermaske"); }
+                        }
+                        VerticalLayout {
+                            FieldLabel { text: @tr("Benutzermaske"); }
+                            user := LineEdit { placeholder-text: "deploy-*"; accessible-label: @tr("Benutzermaske"); }
+                        }
+                    }
+                    HorizontalLayout {
+                        visible: automatic.checked;
+                        spacing: 8px;
+                        VerticalLayout {
+                            FieldLabel { text: @tr("Lokale Ordnermaske"); }
+                            local := LineEdit { placeholder-text: "C:/Projekte/**"; accessible-label: @tr("Lokale Ordnermaske"); }
+                        }
+                        VerticalLayout {
+                            FieldLabel { text: @tr("Server-Ordnermaske"); }
+                            remote := LineEdit { placeholder-text: "/incoming/**"; accessible-label: @tr("Server-Ordnermaske"); }
+                        }
+                    }
+                }
+            }
+        }
+        Text { visible: root.notice != ""; text: root.notice; color: Colors.text; wrap: word-wrap; }
+        Rectangle { height: 1px; background: Colors.edge; }
+        HorizontalLayout {
+            spacing: 8px;
+            Button { text: @tr("Duplizieren"); enabled: root.index > 0; clicked => { root.operate("duplicate", root.index, root.data); } }
+            Button { text: @tr("Löschen"); enabled: root.index > 0; clicked => { root.operate("delete", root.index, root.data); } }
+            Rectangle { horizontal-stretch: 1; }
+            close-button := Button { text: @tr("Schließen"); clicked => { root.close(); } }
+            save-button := Button { text: @tr("Speichern"); primary: true; enabled: name.text != ""; clicked => { root.operate("save", root.index, root.draft()); } }
+        }
+    }
+}

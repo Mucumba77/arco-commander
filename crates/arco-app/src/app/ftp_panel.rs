@@ -18,14 +18,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub(crate) enum FtpEdit {
     Create,
     Rename(ftp::Entry),
-    Delete(Vec<ftp::Entry>),
+    Delete(Vec<ftp::Entry>, bool),
     Permissions(Vec<ftp::Entry>),
+    Modified(Vec<ftp::Entry>),
 }
 
 pub(crate) struct SearchHit {
     folder: ftp::Url,
     name: PathBuf,
     directory: bool,
+}
+
+pub(crate) struct S3History {
+    endpoint: FtpEndpoint,
+    name: String,
+    versions: Vec<ftp::S3Version>,
 }
 
 pub(super) fn search_remote(
@@ -141,6 +148,572 @@ pub(super) fn read_panel(
 }
 
 impl App {
+    pub(crate) fn open_remote_recycle_bin(&mut self) -> io::Result<()> {
+        let location = self
+            .current()
+            .ftp
+            .as_ref()
+            .ok_or_else(|| io::Error::other("Öffne zuerst ein Netzwerk-Dateifenster."))?
+            .location
+            .clone();
+        location.session.recycle_directory()?;
+        let side = self.active;
+        let request = self.panels[side].request;
+        let detail = location.directory.to_string();
+        self.start_operation_job(
+            "Server-Papierkorb öffnen",
+            false,
+            super::JobDescription::new(crate::OperationKind::Ftp, detail, String::new()),
+            move |job| {
+                let directory = location.session.ensure_recycle_directory(&job.cancel)?;
+                Ok(Outcome::FtpRecycleBin(
+                    side,
+                    request,
+                    location.at(directory),
+                ))
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn restore_remote_recycle_dialog(&mut self) -> io::Result<()> {
+        let tab = self.current();
+        let ftp = tab
+            .ftp
+            .as_ref()
+            .ok_or_else(|| io::Error::other("Öffne zuerst den Server-Papierkorb."))?;
+        let location = ftp.location.clone();
+        let bin = location.session.recycle_directory()?;
+        let slot = if bin == location.directory {
+            tab.display_row(tab.cursor)
+                .and_then(|row| ftp.entry(&row.path))
+                .filter(|entry| entry.directory == Some(true))
+                .map(|entry| entry.name.clone())
+        } else if location.session.parent_directory(&location.directory)? == bin {
+            ftp::Session::directory_name(&location.directory)
+        } else {
+            None
+        }
+        .ok_or_else(|| io::Error::other("Wähle einen Eintrag im Server-Papierkorb."))?;
+        let detail = format!("{} · {slot}", crate::locale::tr("Papierkorbeintrag"));
+        self.dialog(
+            "input",
+            Pending::RestoreRemoteRecycle(location.session, slot),
+            Dialog {
+                title: "Servereintrag wiederherstellen",
+                description: &detail,
+                placeholder: "Zielordner relativ zum Netzwerk-Startordner oder vollständige URL",
+                value: ".",
+                confirm_label: "Wiederherstellen",
+                ..Default::default()
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn restore_remote_recycle_entry(
+        &mut self,
+        session: Arc<ftp::Session>,
+        slot: String,
+        destination: &str,
+    ) -> io::Result<()> {
+        let target = session.recycle_restore_destination(destination)?;
+        let description =
+            super::JobDescription::new(crate::OperationKind::Ftp, slot.clone(), target.to_string());
+        self.start_operation_job(
+            "Servereintrag wiederherstellen",
+            true,
+            description,
+            move |job| {
+                let entry = session.restore_recycled_entry(&slot, &target, &job.cancel)?;
+                Ok(Outcome::Notice(format!(
+                    "Wiederhergestellt · {}",
+                    entry.name
+                )))
+            },
+        );
+        Ok(())
+    }
+    pub(crate) fn open_s3_history(&mut self) {
+        let tab = self.current();
+        let Some(remote) = tab
+            .ftp
+            .as_ref()
+            .filter(|tab| tab.location.session.security() == ftp::Security::S3)
+        else {
+            self.status("Öffne ein S3-Dateifenster.");
+            return;
+        };
+        let name = tab
+            .display_row(tab.cursor)
+            .and_then(|row| remote.entry(&row.path))
+            .filter(|entry| entry.directory == Some(false))
+            .map_or_else(String::new, |entry| entry.name.clone());
+        let endpoint = (
+            remote.location.session.clone(),
+            remote.location.directory.clone(),
+        );
+        self.dialog(
+            "input",
+            Pending::S3History(endpoint),
+            Dialog {
+                title: "S3-Versionshistorie",
+                value: &name,
+                placeholder: "Exakter Objektname",
+                confirm_label: "Versionen anzeigen",
+                ..Default::default()
+            },
+        );
+    }
+
+    pub(crate) fn read_s3_history(&mut self, endpoint: FtpEndpoint, name: &str) -> io::Result<()> {
+        files::leaf_name(OsStr::new(name))?;
+        let name = name.to_owned();
+        let description = super::JobDescription::new(
+            crate::OperationKind::Ftp,
+            format!("{}{name}", endpoint.1),
+            String::new(),
+        );
+        self.start_operation_job("S3-Versionen lesen", false, description, move |job| {
+            let versions = endpoint
+                .0
+                .list_s3_versions(&endpoint.1, &name, &job.cancel)?;
+            Ok(Outcome::S3History(Box::new(S3History {
+                endpoint,
+                name,
+                versions,
+            })))
+        });
+        Ok(())
+    }
+
+    pub(super) fn show_s3_history(&mut self, history: Box<S3History>) {
+        use crate::locale::tr;
+        let rows = history
+            .versions
+            .iter()
+            .map(|version| {
+                let state = match (version.latest, version.size) {
+                    (true, None) => tr("Aktuelle Löschmarkierung").into(),
+                    (false, None) => tr("Löschmarkierung").into(),
+                    (true, Some(size)) => {
+                        format!("{} · {}", tr("Aktuell"), crate::human_size(size))
+                    }
+                    (false, Some(size)) => crate::human_size(size),
+                };
+                crate::ReviewRow {
+                    primary: format!("{} · {state}", version.modified).into(),
+                    secondary: version.id.as_str().into(),
+                    kind: if version.size.is_some() {
+                        "file"
+                    } else {
+                        "delete"
+                    }
+                    .into(),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        self.management_review(
+            crate::OperationKind::Ftp,
+            rows,
+            ["Stand", "Versions-ID"],
+            "Version herunterladen",
+        );
+        let local = self.panels[1 - self.active].current().is_local();
+        self.ui().set_review_can_confirm(
+            local
+                && history
+                    .versions
+                    .iter()
+                    .any(|version| version.size.is_some()),
+        );
+        let status = if history.versions.is_empty() {
+            tr("Keine Objektversionen gefunden.")
+        } else if !local {
+            tr("Öffne im anderen Dateifenster einen lokalen Zielordner zum Herunterladen.")
+        } else {
+            tr("Wähle eine Dateiversion zum Herunterladen.")
+        };
+        let description = format!("{} · {status}", history.name);
+        self.dialog(
+            "management-review",
+            Pending::S3VersionSelect(history),
+            Dialog {
+                title: "S3-Versionshistorie",
+                description: &description,
+                ..Default::default()
+            },
+        );
+    }
+
+    pub(crate) fn choose_s3_version(
+        &mut self,
+        mut history: S3History,
+        index: usize,
+    ) -> io::Result<()> {
+        if !history
+            .versions
+            .get(index)
+            .is_some_and(|version| version.size.is_some())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Wähle eine S3-Dateiversion.",
+            ));
+        }
+        let target = self.panels[1 - self.active].current();
+        if !target.is_local() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Öffne im anderen Dateifenster einen lokalen Zielordner zum Herunterladen.",
+            ));
+        }
+        let version = history.versions.remove(index);
+        let description = format!("{} · {}", version.modified, display_path(&target.path));
+        let name = history.name.clone();
+        self.dialog(
+            "input",
+            Pending::S3VersionSave(Box::new((
+                history.endpoint,
+                history.name,
+                version,
+                target.path.clone(),
+            ))),
+            Dialog {
+                title: "S3-Version herunterladen",
+                description: &description,
+                value: &name,
+                placeholder: "Zielname",
+                confirm_label: "Herunterladen",
+                ..Default::default()
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn save_s3_version(
+        &mut self,
+        ((session, directory), name, version, target): (
+            FtpEndpoint,
+            String,
+            ftp::S3Version,
+            PathBuf,
+        ),
+        output: &str,
+    ) -> io::Result<()> {
+        let target = target.join(files::leaf_name(OsStr::new(output.trim()))?);
+        let description = super::JobDescription::new(
+            crate::OperationKind::Ftp,
+            format!("{directory}{name}"),
+            display_path(&target),
+        );
+        self.enqueue_virtual_operation("S3-Version herunterladen", true, description, move |job| {
+            session.download_s3_version(
+                &directory,
+                &name,
+                &version,
+                &target,
+                &job.cancel,
+                job.ftp_download_progress(name.clone(), version.size),
+            )?;
+            Ok(Outcome::Report(
+                "S3-Version heruntergeladen".into(),
+                TransferReport {
+                    completed: 1,
+                    ..Default::default()
+                },
+            ))
+        });
+        Ok(())
+    }
+
+    pub(crate) fn open_webdav_locks(&mut self) {
+        let tab = self.current();
+        let Some(ftp) = tab
+            .ftp
+            .as_ref()
+            .filter(|ftp| ftp.location.session.security() == ftp::Security::WebDav)
+        else {
+            self.status("Öffne ein WebDAV-Dateifenster.");
+            return;
+        };
+        let session = &ftp.location.session;
+        let selected = tab
+            .display_row(tab.cursor)
+            .and_then(|row| ftp.entry(&row.path));
+        let (url, recursive) = match selected {
+            Some(entry) => match session.entry_url(&ftp.location.directory, entry) {
+                Ok(url) => (url, entry.directory == Some(true)),
+                Err(error) => {
+                    self.status(error.to_string());
+                    return;
+                }
+            },
+            None => (ftp.location.directory.clone(), true),
+        };
+        use crate::locale::tr;
+        let address = url.to_string();
+        self.dialog(
+            "input",
+            Pending::WebDavLocks((session.clone(), url), recursive),
+            Dialog {
+                title: "WebDAV-Sperren verwalten",
+                description: &address,
+                value: "600",
+                placeholder: "Sperrdauer in Sekunden",
+                options_label: "Aktion",
+                options: &[
+                    tr("Sperrstatus anzeigen"),
+                    tr("Schreibsperre anlegen"),
+                    tr("Eigene Sperre verlängern"),
+                    tr("Eigene Sperre aufheben"),
+                ],
+                ..Default::default()
+            },
+        );
+    }
+
+    pub(crate) fn run_webdav_lock_action(
+        &mut self,
+        (session, url): FtpEndpoint,
+        recursive: bool,
+        action: usize,
+        value: &str,
+    ) -> io::Result<()> {
+        let seconds = if matches!(action, 1 | 2) {
+            value
+                .trim()
+                .parse()
+                .ok()
+                .filter(|seconds| (30..=3600).contains(seconds))
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Gib für die WebDAV-Sperre eine Dauer von 30 bis 3600 Sekunden ein.",
+                    )
+                })?
+        } else {
+            600
+        };
+        let description =
+            super::JobDescription::new(crate::OperationKind::Ftp, url.to_string(), String::new());
+        self.start_operation_job("WebDAV-Sperren verwalten", false, description, move |job| {
+            use crate::locale::tr;
+            let result = match action {
+                0 => {
+                    let locks = session.webdav_locks(&url, &job.cancel)?;
+                    let mut details = url.to_string();
+                    if locks.is_empty() {
+                        details.push_str("\n\n");
+                        details.push_str(tr("Der WebDAV-Server meldet keine Sperren."));
+                    }
+                    for lock in locks {
+                        use std::fmt::Write as _;
+                        let ownership = if lock.owned {
+                            tr("Eigene Sperre")
+                        } else {
+                            tr("Serverseitige Sperre")
+                        };
+                        let _ = write!(
+                            details,
+                            "\n\n{ownership}\n{}  {}\n{}  {}\n{}  {}",
+                            tr("Besitzer"),
+                            lock.owner,
+                            tr("Tiefe"),
+                            lock.depth,
+                            tr("Restdauer"),
+                            lock.timeout
+                        );
+                    }
+                    return Ok(Outcome::Text(tr("WebDAV-Sperren").into(), details));
+                }
+                1 => {
+                    session.webdav_lock(&url, recursive, seconds, &job.cancel)?;
+                    "WebDAV-Schreibsperre angelegt."
+                }
+                2 => {
+                    session.webdav_refresh_lock(&url, seconds, &job.cancel)?;
+                    "WebDAV-Schreibsperre verlängert."
+                }
+                3 => {
+                    session.webdav_unlock(&url, &job.cancel)?;
+                    "WebDAV-Schreibsperre aufgehoben."
+                }
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Wähle eine WebDAV-Sperraktion.",
+                    ));
+                }
+            };
+            Ok(Outcome::Notice(tr(result).into()))
+        });
+        Ok(())
+    }
+
+    pub(crate) fn open_s3_tags(&mut self) {
+        let tab = self.current();
+        let selected = tab
+            .ftp
+            .as_ref()
+            .filter(|ftp| ftp.location.session.security() == ftp::Security::S3)
+            .and_then(|ftp| {
+                Some((
+                    ftp.location.clone(),
+                    ftp.entry(&tab.display_row(tab.cursor)?.path)?.clone(),
+                ))
+            })
+            .filter(|(_, entry)| entry.directory == Some(false));
+        let Some((location, entry)) = selected else {
+            self.status("Wähle ein S3-Objekt.");
+            return;
+        };
+        let description = super::JobDescription::new(
+            crate::OperationKind::Metadata,
+            entry.name.clone(),
+            String::new(),
+        );
+        self.start_operation_job("S3-Objekt-Tags lesen", false, description, move |job| {
+            let tags = location
+                .session
+                .s3_tags(&location.directory, &entry, &job.cancel)?;
+            Ok(Outcome::S3Tags(Box::new((location, entry, tags))))
+        });
+    }
+
+    pub(super) fn edit_s3_tags(&mut self, tags: Box<(FtpLocation, ftp::Entry, ftp::S3Tags)>) {
+        let description = tags.1.name.clone();
+        let data = serde_json::to_string_pretty(&tags.2.tags)
+            .expect("S3 tag strings are JSON-serializable");
+        self.dialog(
+            "multiline",
+            Pending::S3Tags(tags),
+            Dialog {
+                title: "S3-Objekt-Tags bearbeiten",
+                description: &description,
+                placeholder: "Tags als JSON-Objekt aus Schlüssel und Wert",
+                value: &data,
+                ..Default::default()
+            },
+        );
+    }
+
+    pub(crate) fn save_s3_tags(
+        &mut self,
+        (location, entry, before): (FtpLocation, ftp::Entry, ftp::S3Tags),
+        text: &str,
+    ) -> io::Result<()> {
+        let tags: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(text).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Ungültiges S3-Tag-JSON. {error}"),
+                )
+            })?;
+        let description = super::JobDescription::new(
+            crate::OperationKind::Metadata,
+            entry.name.clone(),
+            String::new(),
+        );
+        self.start_operation_job("S3-Objekt-Tags speichern", false, description, move |job| {
+            location.session.replace_s3_tags(
+                &location.directory,
+                &entry,
+                &before,
+                &tags,
+                &job.cancel,
+            )?;
+            Ok(Outcome::Notice(format!(
+                "S3-Objekt-Tags gespeichert · {}",
+                entry.name
+            )))
+        });
+        Ok(())
+    }
+
+    pub(crate) fn sftp_checksums(&mut self) {
+        use std::fmt::Write as _;
+        let tab = self.current();
+        let Some(ftp) = tab
+            .ftp
+            .as_ref()
+            .filter(|ftp| ftp.location.session.is_sftp())
+        else {
+            self.status("Wähle einen Eintrag im SFTP-Dateifenster.");
+            return;
+        };
+        let entries: Vec<_> = tab
+            .selected_paths()
+            .iter()
+            .filter_map(|path| ftp.entry(path))
+            .filter(|entry| entry.directory == Some(false))
+            .cloned()
+            .collect();
+        if entries.is_empty() {
+            self.status("Wähle mindestens eine SFTP-Datei.");
+            return;
+        }
+        let location = ftp.location.clone();
+        let description = super::JobDescription::new(
+            crate::OperationKind::Ftp,
+            location.directory.to_string(),
+            String::new(),
+        );
+        self.start_operation_job("SFTP-Prüfsummen", false, description, move |job| {
+            let mut result = String::new();
+            let total = entries.len();
+            for (index, entry) in entries.into_iter().enumerate() {
+                job.entry_progress(entry.name.clone(), index, total, "SHA-256 berechnen …");
+                let progress = job.ftp_progress(
+                    entry.name.clone(),
+                    entry.size,
+                    "SHA-256 berechnen …",
+                    "Datei prüfen …",
+                );
+                let hash = location.session.sftp_sha256(
+                    &location.directory,
+                    &entry,
+                    &job.cancel,
+                    progress,
+                )?;
+                let _ = writeln!(result, "{hash} *{}", entry.name);
+                job.entry_progress(entry.name, index + 1, total, "SHA-256 berechnen …");
+            }
+            Ok(Outcome::Text("SFTP-Prüfsummen · SHA-256".into(), result))
+        });
+    }
+
+    pub(crate) fn copy_remote_location(&self, as_url: bool) -> io::Result<()> {
+        let tab = self.current();
+        let ftp = tab
+            .ftp
+            .as_ref()
+            .ok_or_else(|| io::Error::other("Wähle ein FTP- oder SFTP-Dateifenster."))?;
+        let session = &ftp.location.session;
+        let directory = &ftp.location.directory;
+        let mut addresses = tab
+            .selected_paths()
+            .iter()
+            .filter_map(|path| ftp.entry(path))
+            .map(|entry| session.entry_url(directory, entry))
+            .collect::<io::Result<Vec<_>>>()?;
+        if addresses.is_empty() {
+            addresses.push(directory.clone());
+        }
+        let lines = addresses
+            .iter()
+            .map(|address| {
+                if as_url {
+                    Ok(address.to_string())
+                } else {
+                    session.remote_path(address)
+                }
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        arco_windows::copy_text(&lines.join("\r\n"))
+    }
+
     pub(crate) fn search_ftp(
         &mut self,
         side: usize,
@@ -279,6 +852,7 @@ impl App {
             ));
         }
         let list = list.to_owned();
+        let presets = self.profile.network_transfer_presets.clone();
         let description = super::JobDescription::new(
             crate::OperationKind::Ftp,
             directory.to_string(),
@@ -306,6 +880,14 @@ impl App {
                     ));
                 }
                 let (parent, name) = session.download_location(&directory, line)?;
+                let transfer = arco_app::network_transfer::resolve(
+                    &presets,
+                    &session,
+                    &parent,
+                    Some(&target),
+                    None,
+                )?;
+                arco_app::network_sync::check_transfer_mask(&transfer, &name)?;
                 let output = target.join(files::leaf_name(OsStr::new(&name))?);
                 if !names.insert(name.to_lowercase()) || output.try_exists()? {
                     return Err(io::Error::new(
@@ -313,7 +895,7 @@ impl App {
                         format!("Doppeltes oder vorhandenes Downloadziel: {name}"),
                     ));
                 }
-                downloads.push((parent, name, output));
+                downloads.push((transfer, parent, name, output));
             }
             if downloads.is_empty() {
                 return Err(io::Error::other(
@@ -322,11 +904,11 @@ impl App {
             }
             let mut report = TransferReport::default();
             let total = downloads.len();
-            for (index, (parent, name, output)) in downloads.into_iter().enumerate() {
+            for (index, (transfer, parent, name, output)) in downloads.into_iter().enumerate() {
                 files::check_cancel(&job.cancel)?;
                 job.step_progress(name.clone(), index + 1, total);
-                session
-                    .download(&parent, &name, &output, &job.cancel)
+                transfer
+                    .download_preferred(&parent, &name, &output, &job.cancel, |_| {})
                     .map_err(|error| {
                         io::Error::new(
                             error.kind(),
@@ -362,11 +944,55 @@ impl App {
             .or_else(browser)
     }
 
+    pub(crate) fn open_server_terminal(&mut self, in_current_directory: bool) {
+        #[cfg(windows)]
+        {
+            let Some((session, directory)) = self
+                .ftp_endpoint()
+                .filter(|endpoint| endpoint.0.security().is_ssh())
+            else {
+                self.status("Öffne ein SFTP- oder SCP-Dateifenster.");
+                return;
+            };
+            let result = (|| -> io::Result<()> {
+                let helper = std::env::current_exe()?.with_file_name("arco-net.exe");
+                if !helper.is_file() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "arco-net.exe fehlt neben Arco Commander.",
+                    ));
+                }
+                let sender = self.sender.clone();
+                std::thread::Builder::new()
+                    .name("arco-ssh-terminal".into())
+                    .spawn(move || {
+                        if let Err(error) = session.open_ssh_terminal(
+                            in_current_directory.then_some(&directory),
+                            &helper,
+                            &AtomicBool::new(false),
+                        ) {
+                            let _ = sender.send(super::Event::SshTerminalError(error.to_string()));
+                        }
+                    })?;
+                Ok(())
+            })();
+            self.report(result);
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = in_current_directory;
+            self.status("Die SSH-Terminalübergabe benötigt Windows.");
+        }
+    }
+
     pub(super) fn navigate_ftp_text(&mut self, mut location: FtpLocation, value: &str) {
         let result = (|| -> io::Result<FtpLocation> {
             if value.starts_with("ftp://")
                 || value.starts_with("ftps://")
                 || value.starts_with("sftp://")
+                || value.starts_with("scp://")
+                || value.starts_with("https://")
+                || value.starts_with("http://")
             {
                 let directory = location.session.directory_url(value)?;
                 return Ok(location.at(directory));
@@ -503,10 +1129,10 @@ impl App {
                     .unwrap_or_else(|| crate::locale::tr("Nicht verfügbar").into()),
             );
         }
-        if matches!(
-            ftp.listing.format,
-            ftp::ListFormat::Mlsd | ftp::ListFormat::Sftp
-        ) && !entries.is_empty()
+        if ftp.listing.format.structured()
+            && !entries.is_empty()
+            && (ftp.location.session.security().is_ftp()
+                || ftp.location.session.security().is_ssh())
         {
             sheet.field("Ausgewählte Einträge", entries.len().to_string());
             sheet.ftp = Some((ftp.location.clone(), entries));
@@ -522,6 +1148,7 @@ impl App {
             self.status("Beende zuerst die aktive FTP-Rückübertragung im Transfermanager.");
             return;
         }
+        self.stop_watch_for(&session);
         if self
             .ftp
             .as_ref()
@@ -585,6 +1212,44 @@ impl App {
         name: &str,
     ) -> io::Result<()> {
         match edit {
+            FtpEdit::Modified(entries) => {
+                let date = chrono::NaiveDateTime::parse_from_str(name.trim(), "%Y-%m-%d %H:%M:%S")
+                    .map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "Gib Datum und Uhrzeit als JJJJ-MM-TT HH:MM:SS (UTC) ein.",
+                        )
+                    })?;
+                let stamp = date.format("%Y%m%d%H%M%S").to_string();
+                let title = "Server-Änderungszeit setzen";
+                let description = super::JobDescription::new(
+                    crate::OperationKind::Metadata,
+                    location.directory.to_string(),
+                    String::new(),
+                );
+                self.start_operation_job(title, true, description, move |job| {
+                    let mut report = TransferReport::default();
+                    let total = entries.len();
+                    for (index, entry) in entries.into_iter().enumerate() {
+                        job.entry_progress(entry.name.clone(), index, total, title);
+                        match location.session.set_ssh_modified(
+                            &location.directory,
+                            &entry,
+                            &stamp,
+                            &job.cancel,
+                        ) {
+                            Ok(()) => report.completed += 1,
+                            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                                report.cancelled = true;
+                                break;
+                            }
+                            Err(error) => report.errors.push(format!("{}: {error}", entry.name)),
+                        }
+                        job.entry_progress(entry.name, index + 1, total, title);
+                    }
+                    Ok(Outcome::MetadataEdited(title, report))
+                });
+            }
             FtpEdit::Permissions(entries) => {
                 let permissions = super::metadata_edit::parse_mode(name)?;
                 let description = super::JobDescription::new(
@@ -625,22 +1290,29 @@ impl App {
                     Ok(Outcome::MetadataEdited("FTP-Dateirechte", report))
                 });
             }
-            FtpEdit::Delete(entries) => {
+            FtpEdit::Delete(entries, permanent) => {
                 let detail = format!(
                     "{} · {}",
                     crate::locale::tr("Ausgewählte Einträge"),
                     entries.len()
                 );
-                self.start_delete_job("Lösche FTP-Auswahl …", detail, move |job| {
+                let recycle = !permanent && location.session.will_recycle(&location.directory);
+                let title = if recycle {
+                    "In den Server-Papierkorb verschieben"
+                } else {
+                    "Lösche FTP-Auswahl …"
+                };
+                self.start_delete_job(title, detail, move |job| {
                     let report = delete_selection(
                         location,
                         &entries,
+                        recycle,
                         &job.cancel,
                         |path, processed, total| {
                             job.deletion_progress(display_path(path), processed, total);
                         },
                     )?;
-                    Ok(Outcome::Report("FTP-Löschen".into(), report))
+                    Ok(Outcome::Report(title.into(), report))
                 });
             }
             edit => {
@@ -671,7 +1343,11 @@ impl App {
                                 &name,
                                 &job.cancel,
                             )?,
-                            FtpEdit::Delete(_) | FtpEdit::Permissions(_) => unreachable!(),
+                            FtpEdit::Delete(..)
+                            | FtpEdit::Permissions(_)
+                            | FtpEdit::Modified(_) => {
+                                unreachable!()
+                            }
                         }
                         Ok(Outcome::Notice(format!(
                             "FTP-Eintrag aktualisiert · {name}"
@@ -687,9 +1363,44 @@ impl App {
 fn delete_selection(
     location: FtpLocation,
     selected: &[ftp::Entry],
+    recycle: bool,
     cancel: &AtomicBool,
     mut progress: impl FnMut(&Path, usize, usize),
 ) -> io::Result<TransferReport> {
+    for entry in selected {
+        if location
+            .session
+            .protects_recycle_directory(&location.directory, entry, cancel)?
+        {
+            return Err(io::Error::other(
+                "Öffne den Server-Papierkorb, um seine Inhalte zu entfernen.",
+            ));
+        }
+    }
+    if recycle {
+        let mut report = TransferReport::default();
+        for (index, entry) in selected.iter().enumerate() {
+            if cancel.load(Ordering::Relaxed) {
+                report.cancelled = true;
+                break;
+            }
+            let path = Path::new(&entry.name);
+            progress(path, index, selected.len());
+            match location
+                .session
+                .recycle_entry(&location.directory, entry, cancel)
+            {
+                Ok(_) => report.completed += 1,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                    report.cancelled = true;
+                    break;
+                }
+                Err(error) => report.errors.push(format!("{}: {error}", entry.name)),
+            }
+            progress(path, index + 1, selected.len());
+        }
+        return Ok(report);
+    }
     let paths = selected
         .iter()
         .map(|entry| PathBuf::from(&entry.name))
@@ -785,6 +1496,7 @@ mod tests {
         let report = delete_selection(
             panel.clone(),
             std::slice::from_ref(selected),
+            false,
             &cancel,
             |_, processed, total| progress.push((processed, total)),
         )

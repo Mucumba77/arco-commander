@@ -28,6 +28,8 @@ pub struct Options {
     pub selected_only: bool,
     pub by_content: bool,
     pub ignore_date: bool,
+    pub timestamps_only: bool,
+    pub timestamp_all_sizes: bool,
     pub masks: String,
 }
 
@@ -40,6 +42,8 @@ impl Default for Options {
             selected_only: false,
             by_content: false,
             ignore_date: false,
+            timestamps_only: false,
+            timestamp_all_sizes: false,
             masks: String::new(),
         }
     }
@@ -145,12 +149,20 @@ impl Entry {
     pub fn metadata(&self) -> Option<&Metadata> {
         self.meta.as_ref()
     }
+
+    pub fn info(&self) -> EntryInfo {
+        self.info
+    }
 }
 
 #[derive(Default)]
 pub struct Tree(BTreeMap<PathBuf, Entry>);
 
 impl Tree {
+    pub fn entries(&self) -> impl Iterator<Item = (&Path, EntryInfo)> {
+        self.0.values().map(|entry| (entry.path(), entry.info))
+    }
+
     pub fn discard_subtrees(&mut self, paths: &BTreeSet<PathBuf>) {
         let paths: BTreeSet<_> = paths.iter().map(|path| key(path)).collect();
         self.0
@@ -251,6 +263,7 @@ pub struct Plan {
     roots: [PathBuf; 2],
     root_metadata: [Metadata; 2],
     pub rows: Vec<Row>,
+    timestamps_only: bool,
 }
 
 pub struct LocalRoot {
@@ -267,6 +280,10 @@ impl LocalRoot {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn verify(&self) -> io::Result<()> {
+        check_parents(&self.path, &self.metadata, Path::new(""))
     }
 
     pub fn checked_path(&self, relative: &Path) -> io::Result<PathBuf> {
@@ -292,6 +309,19 @@ impl LocalRoot {
                 "Der Eintrag ist inzwischen lokal vorhanden.",
             )),
         }
+    }
+
+    pub fn delete_checked(&self, relative: &Path, before: &Metadata) -> io::Result<()> {
+        delete_checked(&self.checked_path(relative)?, before)
+    }
+
+    pub fn set_modified_checked(
+        &self,
+        relative: &Path,
+        before: &Metadata,
+        modified: SystemTime,
+    ) -> io::Result<()> {
+        files::set_modified_checked(&self.checked_path(relative)?, before, modified)
     }
 
     pub fn scan(&self, options: &Options, scope: &Scope, cancel: &AtomicBool) -> io::Result<Tree> {
@@ -431,6 +461,7 @@ pub fn compare_projected_ignoring_with_progress(
         roots,
         root_metadata,
         rows,
+        timestamps_only: options.timestamps_only,
     })
 }
 
@@ -440,6 +471,18 @@ pub fn compare_trees(
     scope: &Scope,
     cancel: &AtomicBool,
     mut same_content: impl FnMut(&Entry, &Entry) -> io::Result<bool>,
+) -> io::Result<Vec<Row>> {
+    compare_trees_by(trees, options, scope, cancel, |left, right| {
+        compare_file(left, right, options, &mut same_content)
+    })
+}
+
+pub fn compare_trees_by(
+    trees: [&Tree; 2],
+    options: &Options,
+    scope: &Scope,
+    cancel: &AtomicBool,
+    mut compare: impl FnMut(&Entry, &Entry) -> io::Result<(Comparison, Action)>,
 ) -> io::Result<Vec<Row>> {
     let masks = FileMasks::new(&options.masks)?;
     let maps = trees.map(|tree| &tree.0);
@@ -466,6 +509,11 @@ pub fn compare_trees(
     for id in relevant {
         files::check_cancel(cancel)?;
         let [left, right] = maps.each_ref().map(|map| map.get(&id));
+        if options.timestamps_only
+            && !matches!((left, right), (Some(a), Some(b)) if !a.info.is_dir() && !b.info.is_dir())
+        {
+            continue;
+        }
         let entry = left
             .or(right)
             .expect("A relevant entry or its ancestor was scanned");
@@ -481,7 +529,10 @@ pub fn compare_trees(
                 (Comparison::TypeConflict, Action::Skip)
             }
             (Some(a), Some(_)) if a.info.is_dir() => (Comparison::Equal, Action::Skip),
-            (Some(a), Some(b)) => compare_file(a, b, options, &mut same_content)?,
+            (Some(a), Some(b)) if options.timestamps_only => {
+                compare_timestamps(a.info, b.info, options)
+            }
+            (Some(a), Some(b)) => compare(a, b)?,
             (Some(_), None) => (
                 Comparison::OnlyLeft,
                 if options.mode == Mode::RightToLeft {
@@ -517,15 +568,113 @@ pub fn compare_trees(
             ],
             info: [left.map(|e| e.info), right.map(|e| e.info)],
             paths,
-            allowed: [
-                copy && right.is_some()
-                    && matches!(options.mode, Mode::BothWays | Mode::RightToLeft),
-                copy && left.is_some() && options.mode != Mode::RightToLeft,
-                suggested == Action::DeleteRight,
-            ],
+            allowed: if options.timestamps_only {
+                [
+                    suggested == Action::CopyLeft,
+                    suggested == Action::CopyRight,
+                    false,
+                ]
+            } else {
+                [
+                    copy && right.is_some()
+                        && matches!(options.mode, Mode::BothWays | Mode::RightToLeft),
+                    copy && left.is_some() && options.mode != Mode::RightToLeft,
+                    suggested == Action::DeleteRight,
+                ]
+            },
         });
     }
     Ok(rows)
+}
+
+fn compare_timestamps(
+    left: EntryInfo,
+    right: EntryInfo,
+    options: &Options,
+) -> (Comparison, Action) {
+    let Some((left_time, right_time)) = left.modified.zip(right.modified) else {
+        return (Comparison::Protected, Action::Skip);
+    };
+    if !options.timestamp_all_sizes && left.size != right.size {
+        return (Comparison::Protected, Action::Skip);
+    }
+    let seconds = |time| filetime::FileTime::from_system_time(time).unix_seconds();
+    let order = seconds(left_time).cmp(&seconds(right_time));
+    if order.is_eq() {
+        return (Comparison::Equal, Action::Skip);
+    }
+    let action = match options.mode {
+        Mode::RightToLeft => Action::CopyLeft,
+        Mode::LeftToRight | Mode::Mirror => Action::CopyRight,
+        Mode::BothWays if order.is_gt() => Action::CopyRight,
+        Mode::BothWays => Action::CopyLeft,
+    };
+    (Comparison::Different, action)
+}
+
+#[cfg(test)]
+mod timestamp_tests {
+    use super::*;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn time_only_preserves_bytes_and_rechecks_the_preview() {
+        let left = tempfile::tempdir().unwrap();
+        let right = tempfile::tempdir().unwrap();
+        let older = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let newer = older + Duration::from_secs(60);
+        let write = |root: &Path, name, bytes: &[u8], time| {
+            let path = root.join(name);
+            fs::write(&path, bytes).unwrap();
+            fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(time)
+                .unwrap();
+            path
+        };
+        let source = write(left.path(), "pair.txt", b"left", newer);
+        let target = write(right.path(), "pair.txt", b"rght", older);
+        write(left.path(), "different.txt", b"long", newer);
+        let different = write(right.path(), "different.txt", b"a", older);
+        let single = write(right.path(), "single.txt", b"only", older);
+        let options = Options {
+            timestamps_only: true,
+            ..Default::default()
+        };
+        let cancel = AtomicBool::new(false);
+        let scan = || compare([left.path(), right.path()], &options, &[], &cancel).unwrap();
+        let plan = scan();
+        assert_eq!(plan.rows.len(), 2);
+        assert_eq!(plan.rows[0].comparison, Comparison::Protected);
+        assert_eq!(plan.rows[1].action, Action::CopyRight);
+        let report = plan.apply(&cancel, |_| {});
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.completed, 1);
+        assert_eq!(fs::read(&target).unwrap(), b"rght");
+        assert_eq!(fs::metadata(&target).unwrap().modified().unwrap(), newer);
+        assert_eq!(fs::metadata(different).unwrap().modified().unwrap(), older);
+        assert!(single.is_file());
+
+        let all_sizes = Options {
+            timestamp_all_sizes: true,
+            ..options.clone()
+        };
+        let plan = compare([left.path(), right.path()], &all_sizes, &[], &cancel).unwrap();
+        assert_eq!(plan.apply(&cancel, |_| {}).completed, 1);
+        let different = right.path().join("different.txt");
+        assert_eq!(fs::metadata(&different).unwrap().modified().unwrap(), newer);
+        assert_eq!(fs::read(different).unwrap(), b"a");
+
+        write(right.path(), "pair.txt", b"rght", older);
+        let plan = scan();
+        fs::write(source, b"changed").unwrap();
+        let report = plan.apply(&cancel, |_| {});
+        assert_eq!(report.completed, 0);
+        assert_eq!(report.errors.len(), 1);
+        assert_eq!(fs::metadata(target).unwrap().modified().unwrap(), older);
+    }
 }
 
 fn relative_path(path: &Path) -> bool {
@@ -635,7 +784,7 @@ fn resolved_path(path: &Path, map: &BTreeMap<PathBuf, Entry>) -> PathBuf {
     path.to_path_buf()
 }
 
-fn compare_file(
+pub fn compare_file(
     a: &Entry,
     b: &Entry,
     options: &Options,
@@ -672,7 +821,7 @@ fn compare_file(
     Ok((Comparison::Different, action))
 }
 
-fn compare_time(left: SystemTime, right: SystemTime) -> Ordering {
+pub fn compare_time(left: SystemTime, right: SystemTime) -> Ordering {
     let difference = left
         .duration_since(right)
         .unwrap_or_else(|error| error.duration());
@@ -800,6 +949,10 @@ fn check_parents(root: &Path, expected: &Metadata, relative: &Path) -> io::Resul
 }
 
 impl Plan {
+    pub fn timestamps_only(&self) -> bool {
+        self.timestamps_only
+    }
+
     pub fn roots(&self) -> &[PathBuf; 2] {
         &self.roots
     }
@@ -842,10 +995,17 @@ impl Plan {
             .filter(|row| matches!(row.action, Action::CopyLeft | Action::CopyRight));
         for row in copies {
             if !apply_row(&mut report, row, cancel, &mut progress, || {
-                self.copy(row, cancel)
+                if self.timestamps_only {
+                    self.apply_timestamp(row)
+                } else {
+                    self.copy(row, cancel)
+                }
             }) {
                 return report;
             }
+        }
+        if self.timestamps_only {
+            return report;
         }
         let deletes = self
             .rows
@@ -866,6 +1026,25 @@ impl Plan {
 
     fn check_parents(&self, side: usize, relative: &Path) -> io::Result<()> {
         check_parents(&self.roots[side], &self.root_metadata[side], relative)
+    }
+
+    fn apply_timestamp(&self, row: &Row) -> io::Result<()> {
+        if !row.can(row.action) {
+            return Err(io::Error::other(
+                "Der Zeitstempel war nicht zur Änderung vorgesehen.",
+            ));
+        }
+        let source = usize::from(row.action == Action::CopyLeft);
+        let target = 1 - source;
+        self.check_parents(source, row.path(source))?;
+        self.check_parents(target, row.path(target))?;
+        let before = row.metadata(source).expect("timestamp source");
+        files::ensure_unchanged(&self.roots[source].join(row.path(source)), before)?;
+        files::set_modified_checked(
+            &self.roots[target].join(row.path(target)),
+            row.metadata(target).expect("timestamp target"),
+            before.modified()?,
+        )
     }
 
     fn copy(&self, row: &Row, cancel: &AtomicBool) -> io::Result<()> {
@@ -911,19 +1090,23 @@ impl Plan {
         self.check_parents(1, &row.paths[1])?;
         let target = self.roots[1].join(&row.paths[1]);
         let before = row.entries[1].as_ref().expect("delete target");
-        if before.is_dir() {
-            let meta = directory_metadata(&target)?;
-            if !files::same_identity_hint(&meta, before) {
-                return Err(io::Error::other(
-                    "Der Zielordner wurde seit dem Vergleich ersetzt.",
-                ));
-            }
-            // Never remove children that were not individually approved and checked.
-            fs::remove_dir(target)
-        } else {
-            files::ensure_unchanged(&target, before)?;
-            fs::remove_file(target)
+        delete_checked(&target, before)
+    }
+}
+
+fn delete_checked(target: &Path, before: &Metadata) -> io::Result<()> {
+    if before.is_dir() {
+        let meta = directory_metadata(target)?;
+        if !files::same_identity_hint(&meta, before) {
+            return Err(io::Error::other(
+                "Der Zielordner wurde seit dem Vergleich ersetzt.",
+            ));
         }
+        // Any children added since the comparison must stay in place.
+        fs::remove_dir(target)
+    } else {
+        files::ensure_unchanged(target, before)?;
+        fs::remove_file(target)
     }
 }
 

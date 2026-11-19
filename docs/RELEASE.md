@@ -34,7 +34,7 @@ cargo build --locked --release --target i686-pc-windows-msvc -p arco-plugin-host
 
 Bereite vor dem Paketieren den fest versionierten 7-Zip-Konsolenadapter mit `py -3 scripts/prepare-7zip.py --extractor <absoluter-Pfad-zu-7z.exe>` vor. Das Skript prüft Download-Hashes und liest den Originalinstaller ausschließlich als Archiv; es führt ihn nicht aus. Lizenz und zugehöriger Quellcode werden mitgeliefert. ACE/UC2 bleiben optionale, separat eingerichtete Python-Erweiterungen.
 
-Committe den Release-Stand vor dem Paketieren. Das Skript verwendet `HEAD` für den Quellverweis in der Kurzanleitung und schreibt nach `target/distribution/v<VERSION>/`.
+Committe den Release-Stand vor dem Paketieren. Das Skript benötigt das .NET-10-SDK (x64) für die Automatisierungsbibliothek, verwendet `HEAD` für den Quellverweis in der Kurzanleitung und schreibt nach `target/distribution/v<VERSION>/`.
 
 ```powershell
 py -3 scripts/package-windows.py

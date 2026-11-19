@@ -5,6 +5,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::NamedTempFile;
 pub use url::Url;
@@ -14,16 +15,31 @@ use zeroize::Zeroizing;
 mod credentials;
 mod data;
 mod fxp;
+mod http;
 mod listing;
 mod options;
 mod otp;
+mod rate;
 #[cfg(all(test, windows))]
 mod reference;
 mod resume;
+mod s3;
+mod s3_credentials;
 mod sftp;
 mod sync;
-pub use options::{AddressFamily, ConnectionOptions, TransferMode};
+mod webdav;
+mod webdav_locks;
+pub use options::{
+    AddressFamily, ConnectionOptions, PreferredTransferMode, TransferMode, TransferSettings,
+};
+#[cfg(windows)]
+pub fn ssh_console_bridge() -> io::Result<()> {
+    sftp::console_bridge()
+}
+pub use s3::{S3Tags, S3Version};
+pub use sftp::{MAX_SSH_JUMPS, SshAgent, SshChallenge};
 pub use sync::SyncUpload;
+pub use webdav_locks::WebDavLockInfo;
 
 const LIST_LIMIT: usize = 8 * 1024 * 1024;
 
@@ -33,6 +49,30 @@ pub enum Security {
     ImplicitTls,
     Plain,
     Sftp,
+    Scp,
+    WebDav,
+    S3,
+}
+
+impl Security {
+    pub fn is_ssh(self) -> bool {
+        matches!(self, Self::Sftp | Self::Scp)
+    }
+
+    pub fn is_ftp(self) -> bool {
+        matches!(self, Self::Plain | Self::ExplicitTls | Self::ImplicitTls)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Plain => "FTP",
+            Self::ExplicitTls | Self::ImplicitTls => "FTPS",
+            Self::Sftp => "SFTP",
+            Self::Scp => "SCP",
+            Self::WebDav => "WebDAV",
+            Self::S3 => "S3",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -47,6 +87,7 @@ pub enum ListingMode {
 pub enum DownloadPhase {
     Receiving,
     Verifying,
+    Reconnecting,
 }
 
 pub struct DownloadProgress {
@@ -59,18 +100,46 @@ pub struct Connection {
     url: Url,
     user: String,
     security: Security,
+    recycle_remote: bool,
+    recycle_overwrites: bool,
     proxy: Option<Url>,
+    proxy_user: String,
+    proxy_password: Zeroizing<String>,
     active: bool,
     listing_mode: ListingMode,
     options: options::Options,
+    transfer: TransferSettings,
     ssh: Option<sftp::Options>,
+    s3_region: String,
+    s3_aws_profile: Option<String>,
 }
 
 impl Connection {
+    pub fn with_remote_recycle_bin(mut self, enabled: bool) -> io::Result<Self> {
+        if enabled && self.security == Security::S3 {
+            return Err(invalid_input(
+                "S3 verwendet die Objektversionierung. Der Server-Papierkorb benötigt einen verschiebbaren Serverordner.",
+            ));
+        }
+        self.recycle_remote = enabled;
+        Ok(self)
+    }
+
+    pub fn with_recycled_overwrites(mut self, enabled: bool) -> io::Result<Self> {
+        if enabled && self.security != Security::Sftp {
+            return Err(invalid_input(
+                "Das Sichern überschriebener Serverdateien benötigt SFTP.",
+            ));
+        }
+        self.recycle_overwrites = enabled;
+        Ok(self)
+    }
     pub fn new(address: &str, user: &str, security: Security) -> io::Result<Self> {
         let wanted_scheme = match security {
             Security::ImplicitTls => "ftps",
             Security::Sftp => "sftp",
+            Security::Scp => "scp",
+            Security::WebDav | Security::S3 => "https",
             _ => "ftp",
         };
         let address = address.trim();
@@ -97,7 +166,8 @@ impl Connection {
                 "Die Serveradresse darf keine Zugangsdaten, Abfrage oder Fragment enthalten.",
             ));
         }
-        if url.scheme() != wanted_scheme {
+        let http_endpoint = matches!(security, Security::WebDav | Security::S3);
+        if url.scheme() != wanted_scheme && !(http_endpoint && url.scheme() == "http") {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("use {wanted_scheme}:// for this mode"),
@@ -108,10 +178,14 @@ impl Connection {
                 .map_err(|_| io::Error::other("invalid FTP directory"))?
                 .push("");
         }
-        if security == Security::Sftp && user.is_empty() {
-            return Err(invalid_input("Gib einen SFTP-Benutzernamen ein."));
+        if security.is_ssh() && user.is_empty() {
+            return Err(invalid_input("Gib einen SSH-Benutzernamen ein."));
         }
-        let user = if user.is_empty() { "anonymous" } else { user };
+        let user = if security.is_ftp() && user.is_empty() {
+            "anonymous"
+        } else {
+            user
+        };
         if user.contains(':') || user.chars().any(char::is_control) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -122,11 +196,18 @@ impl Connection {
             url,
             user: user.into(),
             security,
+            recycle_remote: false,
+            recycle_overwrites: false,
             proxy: None,
+            proxy_user: String::new(),
+            proxy_password: Zeroizing::default(),
             active: false,
             listing_mode: ListingMode::Automatic,
             options: Default::default(),
+            transfer: TransferSettings::default(),
             ssh: None,
+            s3_region: "us-east-1".into(),
+            s3_aws_profile: None,
         })
     }
 
@@ -156,6 +237,10 @@ impl Connection {
                 "erwartet eine HTTP-, HTTPS- oder SOCKS-Proxy-Adresse ohne Zugangsdaten",
             ));
         }
+        if self.proxy.as_ref() != Some(&proxy) {
+            self.proxy_user.clear();
+            self.proxy_password = Zeroizing::default();
+        }
         self.proxy = Some(proxy);
         self.validate_options()?;
         Ok(self)
@@ -173,6 +258,62 @@ impl Connection {
         Ok(self)
     }
 
+    pub fn with_proxy_user(mut self, user: &str) -> io::Result<Self> {
+        if !user.is_empty() {
+            let proxy = self
+                .proxy
+                .as_ref()
+                .ok_or_else(|| invalid_input("Trage zuerst eine Proxy-Adresse ein."))?;
+            if !matches!(proxy.scheme(), "http" | "https" | "socks5" | "socks5h")
+                || user.contains(':')
+                || user.chars().any(char::is_control)
+                || (matches!(proxy.scheme(), "socks5" | "socks5h") && user.len() > 255)
+            {
+                return Err(invalid_input(
+                    "Ungültiger Benutzername oder inkompatibler Proxy für die Anmeldung.",
+                ));
+            }
+        }
+        self.proxy_user = user.into();
+        self.proxy_password = Zeroizing::default();
+        Ok(self)
+    }
+
+    pub fn with_proxy_password(mut self, password: &str) -> io::Result<Self> {
+        self.check_proxy_password(password)?;
+        self.proxy_password = Zeroizing::new(password.to_owned());
+        Ok(self)
+    }
+
+    fn check_proxy_password(&self, password: &str) -> io::Result<()> {
+        check_password(password)?;
+        if self.proxy_user.is_empty()
+            || password.is_empty()
+            || self.proxy.as_ref().is_some_and(|url| {
+                matches!(url.scheme(), "socks5" | "socks5h") && password.len() > 255
+            })
+        {
+            return Err(invalid_input(
+                "Die Proxy-Anmeldung benötigt einen Benutzernamen und ein gültiges Passwort.",
+            ));
+        }
+        Ok(())
+    }
+
+    fn proxy_credentials(&self) -> Option<(&str, &str)> {
+        (!self.proxy_user.is_empty()).then_some((&self.proxy_user, &self.proxy_password))
+    }
+
+    fn append_proxy_config(&self, config: &mut Zeroizing<String>) {
+        if let Some((user, password)) = self.proxy_credentials() {
+            let credentials = Zeroizing::new(format!("{user}:{password}"));
+            let quoted = Zeroizing::new(config_value(&credentials));
+            config.push_str("proxy-user = ");
+            config.push_str(&quoted);
+            config.push('\n');
+        }
+    }
+
     pub fn with_listing_mode(mut self, listing_mode: ListingMode) -> Self {
         self.listing_mode = listing_mode;
         self
@@ -185,9 +326,8 @@ impl Connection {
     }
 
     fn validate_options(&self) -> io::Result<()> {
-        if self.security == Security::Sftp
-            && (self.proxy.is_some()
-                || self.active
+        if self.security.is_ssh()
+            && (self.active
                 || self.listing_mode != ListingMode::Automatic
                 || self.options.ca_bundle.is_some()
                 || self.options.client_certificate.is_some()
@@ -198,6 +338,16 @@ impl Connection {
         {
             return Err(invalid_input(
                 "SFTP verwendet eigene SSH-Verbindungsoptionen.",
+            ));
+        }
+        if self.security.is_ssh()
+            && self
+                .proxy
+                .as_ref()
+                .is_some_and(|url| !matches!(url.scheme(), "http" | "socks5" | "socks5h"))
+        {
+            return Err(invalid_input(
+                "SFTP und SCP unterstützen HTTP-CONNECT und SOCKS5.",
             ));
         }
         if self.security == Security::Plain
@@ -222,20 +372,36 @@ impl Connection {
         Ok(())
     }
 
-    pub fn authenticate(self, password: &str) -> io::Result<Session> {
+    pub fn authenticate(mut self, password: &str) -> io::Result<Session> {
         check_password(password)?;
         self.validate_options()?;
-        if self.security == Security::Sftp && self.ssh.is_none() {
+        if !self.proxy_user.is_empty() && self.proxy_password.is_empty() {
+            return Err(invalid_input(
+                "Hinterlege das Proxy-Passwort in den Netzwerkprofilen.",
+            ));
+        }
+        if self.security.is_ssh() && self.ssh.is_none() {
             return Err(invalid_input(
                 "Für SFTP ist ein SSH-Hostschlüssel erforderlich.",
             ));
         }
-        Ok(Session {
-            connection: self,
-            password: Zeroizing::new(password.to_string()),
+        let preset = self.transfer.preset.take();
+        let mut session = Session {
+            connection: Arc::new(self),
+            password: Arc::new(Zeroizing::new(password.to_string())),
             otp_lock: Default::default(),
             ssh: Default::default(),
-        })
+            scp: Default::default(),
+            s3_token: None,
+            aws_credentials: Default::default(),
+            webdav_locks: Default::default(),
+            transfer_override: None,
+            configured_transfer_preset: Arc::new(Mutex::new(preset)),
+        };
+        if session.security() == Security::S3 {
+            session.load_s3_credentials()?;
+        }
+        Ok(session)
     }
 }
 
@@ -249,11 +415,18 @@ fn check_password(password: &str) -> io::Result<()> {
     Ok(())
 }
 
+#[derive(Clone)]
 pub struct Session {
-    connection: Connection,
-    password: Zeroizing<String>,
-    otp_lock: std::sync::Mutex<()>,
-    ssh: std::sync::Mutex<Option<ssh2::Sftp>>,
+    connection: Arc<Connection>,
+    password: Arc<Zeroizing<String>>,
+    otp_lock: Arc<Mutex<()>>,
+    ssh: Arc<Mutex<Option<sftp::SftpConnection>>>,
+    scp: Arc<Mutex<Option<sftp::SshConnection>>>,
+    s3_token: Option<Arc<Zeroizing<String>>>,
+    aws_credentials: Arc<Mutex<Option<s3_credentials::CachedCredentials>>>,
+    webdav_locks: Arc<Mutex<std::collections::BTreeMap<Url, webdav_locks::WriteLock>>>,
+    transfer_override: Option<TransferSettings>,
+    configured_transfer_preset: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Debug)]
@@ -262,12 +435,42 @@ pub struct Listing {
     pub format: ListFormat,
 }
 
+impl Listing {
+    pub fn regular_file(&self, name: &str) -> io::Result<&Entry> {
+        let mut matching = self.entries.iter().filter(|entry| entry.name == name);
+        let entry = matching.next().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "Die in der URL genannte Datei fehlt auf dem Server.",
+            )
+        })?;
+        if matching.next().is_some() || entry.directory != Some(false) {
+            return Err(invalid_input(
+                "Die URL verweist nicht eindeutig auf eine reguläre Serverdatei.",
+            ));
+        }
+        Ok(entry)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ListFormat {
     Mlsd,
     List,
     Names,
     Sftp,
+    Scp,
+    WebDav,
+    S3,
+}
+
+impl ListFormat {
+    pub fn structured(self) -> bool {
+        matches!(
+            self,
+            Self::Mlsd | Self::Sftp | Self::Scp | Self::WebDav | Self::S3
+        )
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -280,8 +483,19 @@ pub struct Entry {
 }
 
 impl Session {
+    pub fn session_link_identity(&self) -> (&str, String) {
+        (
+            self.connection.user.as_str(),
+            self.sftp_fingerprint().unwrap_or_default(),
+        )
+    }
+
+    pub fn security(&self) -> Security {
+        self.connection.security
+    }
+
     pub fn is_sftp(&self) -> bool {
-        self.connection.security == Security::Sftp
+        self.security() == Security::Sftp
     }
 
     pub fn initial_directory(&self) -> Url {
@@ -307,7 +521,11 @@ impl Session {
         let mut segments = url
             .path_segments_mut()
             .map_err(|_| io::Error::other("invalid FTP directory"))?;
-        segments.clear();
+        if self.security() == Security::WebDav {
+            segments.pop_if_empty();
+        } else {
+            segments.clear();
+        }
         for segment in path
             .trim_matches('/')
             .split('/')
@@ -323,8 +541,12 @@ impl Session {
 
     pub fn list(&self, directory: &Url, cancel: &AtomicBool) -> io::Result<Listing> {
         self.validate(directory)?;
-        if self.is_sftp() {
-            return self.list_sftp(directory, false, cancel);
+        match self.security() {
+            Security::Sftp => return self.list_sftp(directory, false, cancel),
+            Security::Scp => return self.list_scp(directory, cancel),
+            Security::WebDav => return self.list_webdav(directory, cancel),
+            Security::S3 => return self.list_s3(directory, cancel),
+            _ => (),
         }
         let mode = self.connection.listing_mode;
         let settings = &self.connection.options;
@@ -470,6 +692,25 @@ impl Session {
         )
     }
 
+    pub fn download_preferred(
+        &self,
+        directory: &Url,
+        remote: &str,
+        destination: &Path,
+        cancel: &AtomicBool,
+        progress: impl FnMut(DownloadProgress),
+    ) -> io::Result<()> {
+        self.download_file(
+            directory,
+            remote,
+            destination,
+            self.preferred_transfer_mode(remote),
+            None,
+            cancel,
+            progress,
+        )
+    }
+
     pub fn download_text(
         &self,
         directory: &Url,
@@ -510,6 +751,15 @@ impl Session {
             ));
         }
         let temporary = NamedTempFile::new_in(parent)?;
+        let expected = if limit.is_none() && self.preserve_transfer_time(false) {
+            Some(
+                self.list_sync(directory, cancel)?
+                    .regular_file(remote)?
+                    .clone(),
+            )
+        } else {
+            None
+        };
         self.receive_file(&url, temporary.as_file(), mode, limit, cancel, || {
             progress(DownloadProgress {
                 received: temporary.as_file().metadata()?.len(),
@@ -530,12 +780,33 @@ impl Session {
                 "Die FTP-Datei überschreitet das Vorschaugrößenlimit.",
             ));
         }
+        if let Some(expected) = expected {
+            self.preserve_download_time(directory, &expected, temporary.as_file(), cancel)?;
+        }
         temporary.as_file().sync_all()?;
         check_cancel(cancel)?;
         temporary
             .persist_noclobber(destination)
             .map_err(|error| error.error)?;
         Ok(())
+    }
+
+    fn preserve_download_time(
+        &self,
+        directory: &Url,
+        expected: &Entry,
+        output: &File,
+        cancel: &AtomicBool,
+    ) -> io::Result<()> {
+        self.verify_sync_entry(directory, expected, cancel)?;
+        let stamp = expected
+            .modified
+            .as_deref()
+            .ok_or_else(|| invalid_input("Der Server liefert keine Änderungszeit."))?;
+        let modified = chrono::NaiveDateTime::parse_from_str(stamp, "%Y%m%d%H%M%S%.f")
+            .map_err(io::Error::other)?
+            .and_utc();
+        output.set_modified(modified.into())
     }
 
     pub fn upload(
@@ -566,11 +837,11 @@ impl Session {
         cancel: &AtomicBool,
     ) -> io::Result<()> {
         let url = self.file(directory, remote)?;
-        if self.is_sftp() {
+        if !self.security().is_ftp() {
             if mode == TransferMode::Text {
                 return Err(sftp::binary_only());
             }
-            return self.publish_sftp_upload(directory, source, remote, replace, cancel);
+            return self.publish_remote_upload(directory, source, remote, replace, cancel);
         }
         if !replace
             && self
@@ -584,7 +855,17 @@ impl Session {
                 "remote entry already exists",
             ));
         }
-        self.send_file(&url, source, mode, cancel)
+        let modified = if self.preserve_transfer_time(false) {
+            let time = chrono::DateTime::<chrono::Utc>::from(source.metadata()?.modified()?);
+            Some(time.format("%Y%m%d%H%M%S").to_string())
+        } else {
+            None
+        };
+        self.send_file(&url, source, mode, cancel)?;
+        if let Some(stamp) = modified {
+            self.set_ftp_upload_modified(directory, remote, &stamp, cancel)?;
+        }
+        Ok(())
     }
 
     fn validate(&self, url: &Url) -> io::Result<()> {
@@ -595,6 +876,8 @@ impl Session {
             || url.password().is_some()
             || url.query().is_some()
             || url.fragment().is_some()
+            || (self.security() == Security::WebDav
+                && !url.path().starts_with(self.connection.url.path()))
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -602,6 +885,25 @@ impl Session {
             ));
         }
         Ok(())
+    }
+
+    pub fn entry_url(&self, directory: &Url, entry: &Entry) -> io::Result<Url> {
+        let mut address = self.file(directory, &entry.name)?;
+        if entry.directory == Some(true) {
+            address
+                .path_segments_mut()
+                .map_err(|_| io::Error::other("invalid server directory"))?
+                .push("");
+        }
+        Ok(address)
+    }
+
+    pub fn remote_path(&self, address: &Url) -> io::Result<String> {
+        self.validate(address)?;
+        percent_encoding::percent_decode_str(address.path())
+            .decode_utf8()
+            .map(|path| path.into_owned())
+            .map_err(io::Error::other)
     }
 
     fn file(&self, directory: &Url, name: &str) -> io::Result<Url> {
@@ -617,10 +919,10 @@ impl Session {
 
     fn command(&self, url: &Url) -> io::Result<Request<'_>> {
         self.validate(url)?;
-        if self.is_sftp() {
+        if !self.security().is_ftp() {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "Dieser FTP-Befehl ist für SFTP nicht verfügbar.",
+                "Dieser Befehl benötigt eine FTP- oder FTPS-Verbindung.",
             ));
         }
         let root = std::env::var_os("SystemRoot")
@@ -704,7 +1006,7 @@ impl Session {
         if self.connection.security != Security::Plain {
             command.arg("--ssl-reqd");
         }
-        let config = if gateway_login {
+        let mut config = if gateway_login {
             // curl's user option splits at the first colon. A gateway USER
             // can contain a destination port, so use encoded URL userinfo
             // only in the private curl configuration pipe.
@@ -723,12 +1025,20 @@ impl Session {
                 config_value(&credential)
             ))
         };
+        self.connection.append_proxy_config(&mut config);
         Ok(Request {
             command,
             config: Zeroizing::new(config.as_bytes().to_vec()),
             encoding: settings.encoding,
             otp: settings.otp.then(|| (self, url.clone())),
+            protocol: "FTP",
         })
+    }
+
+    fn transfer_command(&self, url: &Url) -> io::Result<Request<'_>> {
+        let mut request = self.command(url)?;
+        self.apply_curl_rate(&mut request.command);
+        Ok(request)
     }
 }
 
@@ -756,6 +1066,7 @@ struct Request<'a> {
     config: Zeroizing<Vec<u8>>,
     encoding: &'static encoding_rs::Encoding,
     otp: Option<(&'a Session, Url)>,
+    protocol: &'static str,
 }
 
 fn run(
@@ -857,7 +1168,8 @@ fn run_observed(
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!(
-                    "FTPS-Zertifikatsprüfung fehlgeschlagen (curl {}). Prüfe Servername, Vertrauenskette und Zertifikatsdatei.",
+                    "{}-Zertifikatsprüfung fehlgeschlagen (curl {}). Prüfe Servername, Vertrauenskette und Zertifikatsdatei.",
+                    request.protocol,
                     status.code().unwrap()
                 ),
             ));
@@ -871,7 +1183,12 @@ fn run_observed(
         let error = String::from_utf8_lossy(&error);
         return Err(io::Error::new(
             kind,
-            format!("FTP {}: {}", status.code().unwrap_or(-1), error.trim()),
+            format!(
+                "{} {}: {}",
+                request.protocol,
+                status.code().unwrap_or(-1),
+                error.trim()
+            ),
         ));
     }
     observe()?;
@@ -993,6 +1310,101 @@ fn parse_mlsd_with_policy(bytes: &[u8], strict: bool) -> io::Result<Listing> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires Windows curl and opens a loopback socket"]
+    fn reference_curl_authenticated_http_proxy() {
+        use base64::Engine;
+        use std::io::{BufRead as _, BufReader};
+        use std::net::TcpListener;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let proxy = format!("http://{}", listener.local_addr().unwrap());
+        let peer = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut request = String::new();
+            reader.read_line(&mut request).unwrap();
+            assert!(request.starts_with("PROPFIND http://proxy-fixture.invalid/dav/ HTTP/"));
+            let auth =
+                base64::engine::general_purpose::STANDARD.encode(br#"proxy-user:gate:"\only"#);
+            let mut verified = false;
+            loop {
+                request.clear();
+                reader.read_line(&mut request).unwrap();
+                if matches!(request.as_str(), "" | "\r\n") {
+                    break;
+                }
+                verified |= request
+                    .strip_prefix("Proxy-Authorization: Basic ")
+                    .is_some_and(|token| token.trim() == auth);
+            }
+            assert!(verified);
+            let xml = r#"<D:multistatus xmlns:D="DAV:"><D:response><D:href>/dav/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response></D:multistatus>"#;
+            write!(stream, "HTTP/1.1 207 Multi-Status\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml}", xml.len()).unwrap();
+        });
+        let session = super::Connection::new(
+            "http://proxy-fixture.invalid/dav/",
+            "",
+            super::Security::WebDav,
+        )
+        .unwrap()
+        .with_proxy(&proxy)
+        .unwrap()
+        .with_proxy_user("proxy-user")
+        .unwrap()
+        .with_proxy_password(r#"gate:"\only"#)
+        .unwrap()
+        .authenticate("")
+        .unwrap();
+        let result = session.list(
+            &session.initial_directory(),
+            &std::sync::atomic::AtomicBool::new(false),
+        );
+        peer.join().unwrap();
+        assert!(result.unwrap().entries.is_empty());
+    }
+
+    #[test]
+    fn proxy_password_stays_in_curls_private_config() {
+        let session =
+            super::Connection::new("ftp://example.test/", "login", super::Security::ExplicitTls)
+                .unwrap()
+                .with_proxy("http://proxy.test:8080")
+                .unwrap()
+                .with_proxy_user("proxy-account")
+                .unwrap()
+                .with_proxy_password(r#"secret:"\part"#)
+                .unwrap()
+                .authenticate("server-password")
+                .unwrap();
+        let request = session.command(&session.initial_directory()).unwrap();
+        let config = std::str::from_utf8(&request.config).unwrap();
+        assert!(config.contains(r#"proxy-user = "proxy-account:secret:\"\\part""#));
+        assert!(
+            request
+                .command
+                .get_args()
+                .all(|arg| !arg.to_string_lossy().contains("secret"))
+        );
+    }
+
     use super::*;
 
     #[test]

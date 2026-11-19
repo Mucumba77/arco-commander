@@ -4,70 +4,29 @@ use super::{
         ConflictSide, VIRTUAL_CONFLICT_PREVIEW_LIMIT, ask_conflict, conflict_preview,
     },
 };
+pub(crate) use arco_app::network_sync::modified;
+use arco_app::network_sync::{
+    CopyChoices, IgnorePath, append_to_ftp_snapshot, ftp_timestamp, remote_parent, run_rows,
+    skip_existing_copies,
+};
+pub(super) use arco_app::network_sync::{FtpPlan, MAX_DEPTH, MAX_ENTRIES, ftp_ignores, scan};
 use arco_core::files::{self, Conflict, ConflictDecision, TransferReport};
-use arco_core::ignore::{IgnoreList, Source};
-use arco_core::sync::{self, Action, EntryInfo, LocalRoot, Mode, Options, Row, Scope, Tree};
-use arco_core::tools::{self, Hash};
+use arco_core::sync::{self, Action, EntryInfo, LocalRoot, Mode, Options, Row, Scope};
 use arco_windows::ftp::{self, SyncUpload};
-use chrono::{DateTime, NaiveDateTime, Utc};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{self, Seek, SeekFrom};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::SystemTime;
+use std::sync::atomic::AtomicBool;
 use tempfile::NamedTempFile;
-
-pub(super) const MAX_DEPTH: usize = 64;
-pub(super) const MAX_ENTRIES: usize = 200_000;
-type IgnorePath<'a> = dyn Fn(&Path, bool) -> bool + 'a;
-
-pub(super) fn ftp_ignores<'a>(
-    ignore: Option<&'a IgnoreList>,
-    url: &'a ftp::Url,
-    profile: Option<&'a str>,
-) -> impl Fn(&Path, bool) -> bool + 'a {
-    let root = ftp::Session::directory_path(url);
-    move |relative, directory| {
-        ignore.is_some_and(|ignore| {
-            let path = format!(
-                "{}/{}",
-                root.trim_end_matches('/'),
-                relative.to_string_lossy().replace('\\', "/")
-            );
-            ignore.matches(
-                Source::Ftp {
-                    server: url.host_str().unwrap_or_default(),
-                    profile,
-                },
-                &path,
-                directory,
-            )
-        })
-    }
-}
-
-pub(super) struct FtpPlan {
-    pub rows: Vec<Row>,
-    local: LocalRoot,
-    endpoint: FtpEndpoint,
-    expected: BTreeMap<PathBuf, ftp::Entry>,
-    choices: CopyChoices,
-}
 
 pub(super) struct FtpRelayPlan {
     pub rows: Vec<Row>,
     endpoints: [FtpEndpoint; 2],
     entries: [BTreeMap<PathBuf, ftp::Entry>; 2],
     choices: CopyChoices,
-}
-
-#[derive(Default)]
-struct CopyChoices {
-    alternate: BTreeMap<PathBuf, PathBuf>,
-    append: BTreeSet<PathBuf>,
 }
 
 impl FtpRelayPlan {
@@ -97,9 +56,14 @@ impl FtpRelayPlan {
             ..Options::default()
         };
         let scope = Scope::new(true, selected)?;
+        let [source_masks, target_masks] = [
+            sync::FileMasks::new(endpoints[0].0.transfer_masks())?,
+            sync::FileMasks::new(endpoints[1].0.transfer_masks())?,
+        ];
         let excluded = RefCell::new(BTreeSet::new());
         let skip = |path: &Path, directory| {
-            let skip = ignored(path, directory);
+            let skip = ignored(path, directory)
+                || (!directory && (!source_masks.includes(path) || !target_masks.includes(path)));
             if skip {
                 excluded.borrow_mut().insert(path.to_path_buf());
             }
@@ -192,7 +156,9 @@ impl FtpRelayPlan {
         } else {
             (temporary.as_ref(), metadata.len())
         };
-        let stamp = modified(entry)?.map(ftp_timestamp);
+        let stamp = modified(entry)?
+            .filter(|_| target.0.preserve_transfer_time(true))
+            .map(ftp_timestamp);
         target
             .0
             .upload_sync(
@@ -208,32 +174,6 @@ impl FtpRelayPlan {
                 cancel,
             )
             .map(|_| ())
-    }
-}
-
-fn append_to_ftp_snapshot(
-    session: &ftp::Session,
-    directory: &ftp::Url,
-    previous: Option<&ftp::Entry>,
-    source: &Path,
-    metadata: &fs::Metadata,
-    cancel: &AtomicBool,
-) -> io::Result<NamedTempFile> {
-    let previous =
-        previous.ok_or_else(|| io::Error::other("Die FTP-Zieldatei zum Anhängen fehlt."))?;
-    let mut combined = NamedTempFile::new()?;
-    session.fetch_sync(directory, previous, combined.as_file(), cancel)?;
-    combined.seek(SeekFrom::End(0))?;
-    files::copy_snapshot_to(source, metadata, &mut combined, cancel)?;
-    Ok(combined)
-}
-
-fn skip_existing_copies(rows: &mut Vec<Row>, source: usize) {
-    rows.retain(|row| row.info(source).is_some());
-    for row in rows {
-        if row.info(1 - source).is_some() {
-            row.action = Action::Skip;
-        }
     }
 }
 
@@ -471,394 +411,24 @@ fn target_side(action: Action) -> Option<usize> {
     }
 }
 
-impl FtpPlan {
-    pub(super) fn compare(
-        local: &Path,
-        endpoint: FtpEndpoint,
-        options: &Options,
-        selected: &[PathBuf],
-        ignored: &IgnorePath<'_>,
-        cancel: &AtomicBool,
-        progress: impl FnMut(&Path),
-    ) -> io::Result<Self> {
-        Self::prepare(
-            local, endpoint, options, selected, false, ignored, cancel, progress,
-        )
-    }
+pub(super) trait FtpPlanConflicts {
+    fn resolve_conflicts(&mut self, job: &JobContext) -> io::Result<usize>;
+}
 
-    pub(super) fn for_copy(
-        local: &Path,
-        endpoint: FtpEndpoint,
-        selected: &[PathBuf],
-        upload: bool,
-        ignored: &IgnorePath<'_>,
-        cancel: &AtomicBool,
-        progress: impl FnMut(&Path),
-    ) -> io::Result<Self> {
-        let options = Options {
-            mode: if upload {
-                Mode::LeftToRight
-            } else {
-                Mode::RightToLeft
-            },
-            selected_only: true,
-            by_content: true,
-            ignore_date: true,
-            ..Options::default()
-        };
-        let mut plan = Self::prepare(
-            local, endpoint, &options, selected, true, ignored, cancel, progress,
-        )?;
-        let source = usize::from(!upload);
-        skip_existing_copies(&mut plan.rows, source);
-        Ok(plan)
-    }
-
-    fn prepare(
-        local: &Path,
-        endpoint: FtpEndpoint,
-        options: &Options,
-        selected: &[PathBuf],
-        copy_only: bool,
-        ignored: &IgnorePath<'_>,
-        cancel: &AtomicBool,
-        mut progress: impl FnMut(&Path),
-    ) -> io::Result<Self> {
-        let local = LocalRoot::open(local)?;
-        let scope = Scope::new(options.selected_only, selected)?;
-        let excluded = RefCell::new(BTreeSet::new());
-        let skip = |path: &Path, directory| {
-            let skip = ignored(path, directory);
-            if skip {
-                excluded.borrow_mut().insert(path.to_path_buf());
-            }
-            skip
-        };
-        let mut local_entries = local.scan_ignoring(options, &scope, skip, cancel)?;
-        let (mut remote_entries, expected) = scan(
-            &endpoint,
-            &scope,
-            options.recursive,
-            &skip,
-            cancel,
-            &mut progress,
-        )?;
-        let excluded = excluded.into_inner();
-        local_entries.discard_subtrees(&excluded);
-        remote_entries.discard_subtrees(&excluded);
-        let mut checksum_method = None;
-        let mut rows = sync::compare_trees(
-            [&local_entries, &remote_entries],
-            options,
-            &scope,
-            cancel,
-            |left, right| {
-                if copy_only {
-                    return Ok(false);
-                }
-                progress(right.path());
-                let file = local.checked_path(left.path())?;
-                let meta = left.metadata().expect("local entry");
-                files::ensure_unchanged(&file, meta)?;
-                let remote = &expected[right.path()];
-                let parent = remote_parent(&endpoint, right.path())?;
-                let method = match checksum_method {
-                    Some(method) => method,
-                    None => {
-                        let method = endpoint.0.sync_checksum_method(&endpoint.1, cancel)?;
-                        checksum_method = Some(method);
-                        method
-                    }
-                };
-                if let Some(method) = method
-                    && let Some((algorithm, digest)) =
-                        endpoint.0.sync_checksum(&parent, remote, method, cancel)?
-                {
-                    let algorithm = Hash::parse(algorithm).expect("supported FTP checksum");
-                    let equal = tools::checksum(&file, algorithm, cancel)? == digest;
-                    files::ensure_unchanged(&file, meta)?;
-                    return Ok(equal);
-                }
-                let temporary = NamedTempFile::new()?;
-                endpoint
-                    .0
-                    .fetch_sync(&parent, remote, temporary.as_file(), cancel)?;
-                let equal = tools::checksum(&file, Hash::Blake3, cancel)?
-                    == tools::checksum(temporary.path(), Hash::Blake3, cancel)?;
-                files::ensure_unchanged(&file, meta)?;
-                Ok(equal)
-            },
-        )?;
-        let protected: BTreeSet<_> = excluded
-            .iter()
-            .flat_map(|path| path.ancestors().skip(1))
-            .map(|path| path.to_string_lossy().to_lowercase())
-            .collect();
-        for row in &mut rows {
-            if protected.contains(&row.relative.to_string_lossy().to_lowercase()) {
-                row.prevent_delete();
-            }
-        }
-        Ok(Self {
-            rows,
-            local,
-            endpoint,
-            expected,
-            choices: CopyChoices::default(),
-        })
-    }
-
-    pub(super) fn resolve_conflicts(&mut self, job: &JobContext) -> io::Result<usize> {
+impl FtpPlanConflicts for FtpPlan {
+    fn resolve_conflicts(&mut self, job: &JobContext) -> io::Result<usize> {
         let sides = [
             CopySide::Local(&self.local),
             CopySide::Remote(&self.endpoint, &self.expected),
         ];
         resolve_copy_conflicts(&mut self.rows, sides, &mut self.choices, job)
     }
-
-    pub(super) fn apply(
-        &self,
-        cancel: &AtomicBool,
-        mut progress: impl FnMut(&Path),
-    ) -> TransferReport {
-        let mut report = TransferReport::default();
-        let copies = self.rows.iter().filter(|row| {
-            matches!(row.action, Action::CopyLeft | Action::CopyRight) && row.can(row.action)
-        });
-        run_rows(copies, &mut report, cancel, &mut progress, |row| {
-            self.copy(row, cancel)
-        });
-        let deletes = self
-            .rows
-            .iter()
-            .rev()
-            .filter(|row| row.action == Action::DeleteRight && row.can(row.action));
-        if report.errors.is_empty() && !report.cancelled {
-            run_rows(deletes, &mut report, cancel, &mut progress, |row| {
-                self.delete(row, cancel)
-            });
-        } else {
-            report.skipped += deletes.count();
-        }
-        report
-    }
-
-    fn delete(&self, row: &Row, cancel: &AtomicBool) -> io::Result<()> {
-        self.local.verify_absent(row.path(0))?;
-        let parent = remote_parent(&self.endpoint, row.path(1))?;
-        let entry = &self.expected[row.path(1)];
-        self.endpoint.0.delete_sync_entry(&parent, entry, cancel)
-    }
-
-    fn copy(&self, row: &Row, cancel: &AtomicBool) -> io::Result<()> {
-        let alternate = self.choices.alternate.get(&row.relative);
-        let append = self.choices.append.contains(&row.relative);
-        let local_relative = if row.action == Action::CopyLeft {
-            alternate.map_or_else(|| row.path(0), PathBuf::as_path)
-        } else {
-            row.path(0)
-        };
-        let local = self.local.checked_path(local_relative)?;
-        let remote = row.path(1);
-        let parent = remote_parent(&self.endpoint, remote)?;
-        let session = &self.endpoint.0;
-        let expected = self.expected.get(remote);
-        if row.action == Action::CopyRight {
-            let before = row.metadata(0).expect("local copy source");
-            files::ensure_unchanged(&local, before)?;
-            let name = alternate
-                .map_or(remote, PathBuf::as_path)
-                .file_name()
-                .and_then(OsStr::to_str)
-                .ok_or_else(|| io::Error::other("FTP-Dateinamen benötigen Unicode."))?;
-            if before.is_dir() {
-                return session.create_sync_directory(&parent, name, cancel);
-            }
-            let modified = before.modified().ok().map(ftp_timestamp);
-            let previous = if alternate.is_some() { None } else { expected };
-            let joined = if append {
-                Some(append_to_ftp_snapshot(
-                    session, &parent, previous, &local, before, cancel,
-                )?)
-            } else {
-                None
-            };
-            let (upload, size) = if let Some(joined) = &joined {
-                (joined.path(), joined.as_file().metadata()?.len())
-            } else {
-                (local.as_path(), before.len())
-            };
-            return session
-                .upload_sync(
-                    &parent,
-                    SyncUpload {
-                        source: upload,
-                        name,
-                        expected: previous,
-                        size,
-                        modified_utc: modified.as_deref(),
-                    },
-                    || {
-                        self.local.checked_path(row.path(0))?;
-                        files::ensure_unchanged(&local, before)
-                    },
-                    cancel,
-                )
-                .map(|_| ());
-        }
-
-        let expected = expected.expect("remote copy source");
-        if expected.directory == Some(true) {
-            session.verify_sync_entry(&parent, expected, cancel)?;
-            self.local.checked_path(row.path(0))?;
-            return fs::create_dir(local);
-        }
-        let previous = if alternate.is_some() {
-            None
-        } else {
-            row.metadata(0)
-        };
-        if let Some(previous) = previous {
-            files::ensure_unchanged(&local, previous)?;
-        }
-        let temporary = NamedTempFile::new_in(local.parent().expect("local copy parent"))?;
-        session.fetch_sync(&parent, expected, temporary.as_file(), cancel)?;
-        if let Some(time) = modified(expected)? {
-            temporary.as_file().set_modified(time)?;
-        }
-        self.local.checked_path(local_relative)?;
-        if append {
-            let previous = previous
-                .ok_or_else(|| io::Error::other("Die lokale Zieldatei zum Anhängen fehlt."))?;
-            let temporary = temporary.into_temp_path();
-            let metadata = files::regular_metadata(&temporary)?;
-            return files::append_file_checked(&temporary, &local, &metadata, previous, cancel);
-        }
-        files::publish_checked(temporary, &local, previous, cancel)?;
-        Ok(())
-    }
-}
-
-fn ftp_timestamp(time: SystemTime) -> String {
-    DateTime::<Utc>::from(time)
-        .format("%Y%m%d%H%M%S")
-        .to_string()
-}
-
-fn run_rows<'a>(
-    rows: impl Iterator<Item = &'a Row>,
-    report: &mut TransferReport,
-    cancel: &AtomicBool,
-    progress: &mut impl FnMut(&Path),
-    mut apply: impl FnMut(&Row) -> io::Result<()>,
-) {
-    for row in rows {
-        if cancel.load(Ordering::Relaxed) {
-            break;
-        }
-        progress(&row.relative);
-        match apply(row) {
-            Ok(()) => report.completed += 1,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
-                report.cancelled = true;
-                break;
-            }
-            Err(error) => report
-                .errors
-                .push(format!("{}: {error}", row.relative.display())),
-        }
-    }
-    report.cancelled |= cancel.load(Ordering::Relaxed);
-}
-
-fn remote_parent(endpoint: &FtpEndpoint, path: &Path) -> io::Result<ftp::Url> {
-    endpoint
-        .0
-        .relative_directory(&endpoint.1, path.parent().unwrap_or(Path::new("")))
-}
-
-pub(super) fn scan(
-    endpoint: &FtpEndpoint,
-    scope: &Scope,
-    recursive: bool,
-    ignored: &IgnorePath<'_>,
-    cancel: &AtomicBool,
-    progress: &mut impl FnMut(&Path),
-) -> io::Result<(Tree, BTreeMap<PathBuf, ftp::Entry>)> {
-    let mut tree = Tree::default();
-    let mut expected = BTreeMap::new();
-    let mut unique = BTreeSet::new();
-    let mut queue = vec![(PathBuf::new(), 0)];
-    while let Some((relative, depth)) = queue.pop() {
-        if depth >= MAX_DEPTH {
-            return Err(io::Error::other(
-                "Der FTP-Ordnerbaum ist zu tief für einen sicheren Vergleich.",
-            ));
-        }
-        progress(&relative);
-        let url = endpoint.0.relative_directory(&endpoint.1, &relative)?;
-        for entry in endpoint.0.list_sync(&url, cancel)?.entries {
-            if cancel.load(Ordering::Relaxed) {
-                return Err(io::ErrorKind::Interrupted.into());
-            }
-            let name = files::leaf_name(OsStr::new(&entry.name))?;
-            let path = relative.join(name);
-            if !scope.visits(&path) || ignored(&path, entry.directory == Some(true)) {
-                continue;
-            }
-            let directory = entry.directory.ok_or_else(|| {
-                io::Error::other(format!(
-                    "Der Eintrag „{}“ kann im Serverabgleich nicht als Datei oder Ordner geprüft werden.",
-                    path.display()
-                ))
-            })?;
-            if expected.len() >= MAX_ENTRIES {
-                return Err(io::Error::other(
-                    "Der FTP-Ordnerbaum enthält zu viele Einträge.",
-                ));
-            }
-            let info = EntryInfo {
-                size: entry.size.filter(|_| !directory),
-                modified: modified(&entry)?,
-            };
-            tree.insert_remote(path.clone(), info)?;
-            if directory && recursive {
-                if let Some(id) = &entry.unique
-                    && !unique.insert(id.clone())
-                {
-                    return Err(io::Error::other(format!(
-                        "FTP-Ordner mehrfach erreicht: {}",
-                        path.display()
-                    )));
-                }
-                queue.push((path.clone(), depth + 1));
-            }
-            expected.insert(path, entry);
-        }
-    }
-    Ok((tree, expected))
-}
-
-pub(crate) fn modified(entry: &ftp::Entry) -> io::Result<Option<SystemTime>> {
-    entry
-        .modified
-        .as_deref()
-        .map(|time| {
-            NaiveDateTime::parse_from_str(time, "%Y%m%d%H%M%S%.f")
-                .map(|time| SystemTime::from(time.and_utc()))
-                .map_err(|_| {
-                    io::Error::other(format!(
-                        "Ungültiges MLSD-Änderungsdatum für „{}“.",
-                        entry.name
-                    ))
-                })
-        })
-        .transpose()
 }
 
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+    use arco_core::ignore::IgnoreList;
     use std::sync::Arc;
 
     fn test_server(variable: &str, name: &str, cancel: &AtomicBool) -> FtpEndpoint {
@@ -1228,28 +798,95 @@ mod tests {
                 .authenticate("test-only")
                 .unwrap(),
         );
-        compare_transfer_round_trip(session);
+        compare_transfer_round_trip(&session, &session.initial_directory());
     }
 
     #[test]
     #[ignore = "requires scripts/test-sftp-reference.py"]
-    fn sftp_search_and_bidirectional_sync() {
-        let session = Arc::new(
+    fn ssh_search_and_bidirectional_sync() {
+        for (prefix, security) in [
+            ("ARCO_SFTP_TEST", ftp::Security::Sftp),
+            ("ARCO_SCP_TEST", ftp::Security::Scp),
+        ] {
+            let mut address =
+                ftp::Url::parse(&std::env::var(format!("{prefix}_URL")).unwrap()).unwrap();
+            if security == ftp::Security::Scp {
+                address.set_scheme("scp").unwrap();
+            }
+            let session = Arc::new(
+                ftp::Connection::new(address.as_str(), "arco", security)
+                    .unwrap()
+                    .with_ssh(
+                        &std::env::var(format!("{prefix}_FINGERPRINT")).unwrap(),
+                        None,
+                    )
+                    .unwrap()
+                    .authenticate("fixture-only")
+                    .unwrap(),
+            );
+            compare_transfer_round_trip(&session, &session.initial_directory());
+        }
+    }
+
+    #[test]
+    #[ignore = "requires scripts/test-native-http-reference.py"]
+    fn webdav_and_s3_search_sync_and_relay() {
+        let cancel = AtomicBool::new(false);
+        let dav = Arc::new(
             ftp::Connection::new(
-                &std::env::var("ARCO_SFTP_TEST_URL").unwrap(),
+                &std::env::var("ARCO_TEST_WEBDAV").unwrap(),
                 "arco",
-                ftp::Security::Sftp,
+                ftp::Security::WebDav,
             )
-            .unwrap()
-            .with_ssh(&std::env::var("ARCO_SFTP_TEST_FINGERPRINT").unwrap(), None)
             .unwrap()
             .authenticate("fixture-only")
             .unwrap(),
         );
-        compare_transfer_round_trip(session);
+        let s3 = Arc::new(
+            ftp::Connection::new(
+                &std::env::var("ARCO_TEST_S3").unwrap(),
+                "ARCOACCESS",
+                ftp::Security::S3,
+            )
+            .unwrap()
+            .with_s3_region("eu-central-1")
+            .unwrap()
+            .authenticate("fixture-only")
+            .unwrap(),
+        );
+        let dav_root = dav.initial_directory();
+        let bucket = "arco-panel-copy";
+        let s3_root = s3.initial_directory();
+        s3.create_sync_directory(&s3_root, bucket, &cancel).unwrap();
+        let target = s3.relative_directory(&s3_root, Path::new(bucket)).unwrap();
+        let local = tempfile::tempdir().unwrap();
+        let source = local.path().join("example.data");
+        let output = local.path().join("verified");
+        let name = "Büro & Team.txt";
+        let data = b"relayed through the file panels";
+        fs::write(&source, data).unwrap();
+        dav.upload(&dav_root, &source, name, false, &cancel)
+            .unwrap();
+        let plan = FtpRelayPlan::for_copy(
+            [
+                (dav.clone(), dav_root.clone()),
+                (s3.clone(), target.clone()),
+            ],
+            &[PathBuf::from(name)],
+            &|_, _| false,
+            &cancel,
+        )
+        .unwrap();
+        let report = plan.apply(&cancel, |_| {});
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(report.completed, 1);
+        s3.download(&target, name, &output, &cancel).unwrap();
+        assert_eq!(fs::read(output).unwrap(), data);
+        compare_transfer_round_trip(&dav, &dav_root);
+        compare_transfer_round_trip(&s3, &target);
     }
 
-    fn compare_transfer_round_trip(session: Arc<ftp::Session>) {
+    fn compare_transfer_round_trip(session: &Arc<ftp::Session>, root: &ftp::Url) {
         let cancel = AtomicBool::new(false);
         let fixture = tempfile::tempdir().unwrap();
         let local = fixture.path().join("local");
@@ -1258,12 +895,11 @@ mod tests {
         fs::write(local.join("both.txt"), b"AAAA").unwrap();
         fs::write(local.join("skip.bin"), b"excluded").unwrap();
 
-        let root = session.initial_directory();
         session
-            .create_sync_directory(&root, "round trip", &cancel)
+            .create_sync_directory(root, "round trip", &cancel)
             .unwrap();
         let remote = session
-            .relative_directory(&root, Path::new("round trip"))
+            .relative_directory(root, Path::new("round trip"))
             .unwrap();
         session
             .create_sync_directory(&remote, "incoming", &cancel)

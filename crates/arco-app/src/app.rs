@@ -37,14 +37,19 @@ mod folder_actions;
 mod ftp_edit;
 mod ftp_panel;
 mod ftp_profiles;
+pub(crate) use ftp_profiles::{KnownHostProposal, NetworkImport};
 mod ftp_sync;
 mod ignore;
 mod job_progress;
+mod network_crypto;
+mod network_schedule;
+mod network_watch;
 pub(crate) use job_progress::Description as JobDescription;
 mod keyboard;
 mod pointer;
 mod settings;
 pub(crate) use settings::SettingsPage;
+mod linked_navigation;
 mod lister;
 pub(crate) mod menu;
 mod metadata_actions;
@@ -62,6 +67,7 @@ mod sync_actions;
 mod tabs;
 mod text_compare;
 mod thumbnails;
+mod transfer_presets;
 mod transfer_queue;
 pub(crate) mod utilities;
 mod view_setup;
@@ -78,8 +84,11 @@ pub(crate) use associations::Setup as AssociationSetup;
 pub(crate) use favorites::{Setup as FavoriteSetup, label as favorite_label, tc_profile};
 pub(crate) use ftp_edit::Draft as FtpDraft;
 pub(crate) use ftp_panel::FtpEdit;
+pub(crate) use ftp_panel::S3History;
 pub(crate) use ftp_panel::SearchHit as FtpSearchHit;
+pub(crate) use ftp_profiles::{FtpConnectMode, SshProfileLogin};
 pub(crate) use ftp_sync::modified as ftp_modified;
+pub(crate) use linked_navigation::LinkedFolder;
 pub(crate) use lister::ViewerRequest;
 pub(crate) use plugin_files::PluginFileAction;
 pub(crate) use rename_setup::Setup as RenameSetup;
@@ -100,6 +109,7 @@ pub enum Navigation {
     Up,
     Back,
     Forward,
+    Linked,
     FtpProfile {
         local: PathBuf,
         opposite_request: u64,
@@ -147,6 +157,8 @@ pub enum Outcome {
         skipped: usize,
     },
     Ftp(FtpView),
+    FtpRecycleBin(usize, u64, crate::panel::FtpLocation),
+    LinkedFolder(Box<LinkedFolder>),
     FtpSearch {
         side: usize,
         request: u64,
@@ -163,10 +175,15 @@ pub enum Outcome {
     PluginsUpdated(usize, Option<String>),
     FtpEditReady(Box<FtpDraft>),
     FtpEditUploaded(Box<FtpDraft>, Option<String>),
+    S3Tags(Box<(FtpLocation, ftp::Entry, ftp::S3Tags)>),
+    S3History(Box<S3History>),
     Imported(TcImport),
     ImportedTabs(String, Box<arco_core::profile::TcTabs>),
     TabFile(Box<arco_core::profile::TcTabs>, bool),
     ImportedFtp(Vec<(String, arco_core::profile::TcFtpSite)>),
+    ImportedNetwork(Vec<arco_core::winscp::ImportedSite>),
+    ImportedKnownHosts(Vec<KnownHostProposal>),
+    ScheduledNetworkTasks(Vec<arco_windows::task_schedule::Task>),
     PluginPreview(String, arco_core::plugin::HostProcess),
     PluginPackage(Box<arco_core::plugin::Package>),
     PluginImport(arco_core::plugin::TcRegistrations),
@@ -219,6 +236,9 @@ enum Event {
     },
     ProgressFeed(std::sync::Arc<std::sync::Mutex<Option<job_progress::Sample>>>),
     PluginPrompt(PromptTicket),
+    SshChallenge(ftp::SshChallenge),
+    #[cfg(windows)]
+    SshTerminalError(String),
     TransferConflict(ConflictTicket),
     WdxValues(wdx::Values),
     WfxDefaultView(PathBuf, Option<arco_core::view_settings::CustomView>),
@@ -227,6 +247,8 @@ enum Event {
     TreeLoaded(directory_tree::Loaded),
     QuickPreview(QuickTarget, wlx::QuickResult),
     SeparateSearch(u64, Box<advanced_search::WindowAction>),
+    NetworkPublished(usize, usize),
+    NetworkWatchEnded(Result<(), String>),
     Finished {
         outcome: Result<Outcome, String>,
         refresh: bool,
@@ -461,14 +483,34 @@ impl JobContext {
         source: String,
         expected: Option<u64>,
     ) -> impl FnMut(ftp::DownloadProgress) + '_ {
+        self.ftp_progress(
+            source,
+            expected,
+            "Datei herunterladen …",
+            "Download prüfen …",
+        )
+    }
+
+    pub fn ftp_progress(
+        &self,
+        source: String,
+        expected: Option<u64>,
+        receiving: &'static str,
+        verifying: &'static str,
+    ) -> impl FnMut(ftp::DownloadProgress) + '_ {
         let mut last = Instant::now() - Duration::from_secs(1);
         move |p| {
-            if p.phase == ftp::DownloadPhase::Verifying {
+            if p.phase != ftp::DownloadPhase::Receiving {
+                let phase = match p.phase {
+                    ftp::DownloadPhase::Reconnecting => "Verbindung erneut herstellen …",
+                    _ => verifying,
+                };
+                last = Instant::now() - Duration::from_secs(1);
                 self.measured_progress(
                     String::new(),
                     job_progress::Sample {
                         source: source.clone(),
-                        phase: "FTP-Download prüfen …".into(),
+                        phase: phase.into(),
                         ..Default::default()
                     },
                 );
@@ -477,7 +519,7 @@ impl JobContext {
                 self.measured_progress(
                     String::new(),
                     job_progress::Sample {
-                        phase: "FTP-Datei herunterladen …".into(),
+                        phase: receiving.into(),
                         source: source.clone(),
                         completed: p.received,
                         total: p.total.or(expected).filter(|&total| total >= p.received),
@@ -540,7 +582,7 @@ pub struct FtpView {
     pub listing: ftp::Listing,
 }
 
-pub type FtpEndpoint = (Arc<ftp::Session>, ftp::Url);
+pub use arco_app::network_sync::FtpEndpoint;
 
 pub struct App {
     pub window: slint::Weak<MainWindow>,
@@ -557,6 +599,7 @@ pub struct App {
     notices: RefCell<auxiliary::Notices>,
     deferred_results: std::collections::VecDeque<Outcome>,
     plugin_prompts: std::collections::VecDeque<PromptTicket>,
+    ssh_challenges: std::collections::VecDeque<ftp::SshChallenge>,
     wdx_pending: Option<wdx::Running>,
     wdx_sort_request: Option<wdx::SortRequest>,
     wdx_next_side: usize,
@@ -590,6 +633,8 @@ pub struct App {
     pub ftp: Option<FtpView>,
     pub fxp_source: Option<FtpEndpoint>,
     ftp_drafts: Vec<FtpDraft>,
+    network_watch: Option<network_watch::Running>,
+    linked_navigation: Option<linked_navigation::Pair>,
     sender: Sender<Event>,
     receiver: Receiver<Event>,
     pub job: Option<Arc<AtomicBool>>,
@@ -650,6 +695,7 @@ pub fn run(
         notices: Default::default(),
         deferred_results: Default::default(),
         plugin_prompts: Default::default(),
+        ssh_challenges: Default::default(),
         wdx_pending: None,
         wdx_sort_request: None,
         wdx_next_side: 0,
@@ -683,6 +729,8 @@ pub fn run(
         ftp: None,
         fxp_source: None,
         ftp_drafts: Vec::new(),
+        network_watch: None,
+        linked_navigation: None,
         sender,
         receiver,
         job: None,
@@ -1179,6 +1227,13 @@ pub fn run(
         }
     });
     let weak = Rc::downgrade(&app);
+    window.on_transfer_preset_operate(move |operation, index, data| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut()
+                .operate_transfer_preset(&operation, index, data);
+        }
+    });
+    let weak = Rc::downgrade(&app);
     window.on_plugin_filter(move |query| {
         if let Some(app) = weak.upgrade() {
             app.borrow_mut().filter_plugins(query.as_str());
@@ -1557,6 +1612,7 @@ impl App {
     }
 
     pub fn publish(&self, side: usize) {
+        self.ui().set_navigation_linked(self.navigation_linked());
         let mut data = self.panels[side].snapshot(self.effective_light_theme());
         self.publish_columns(side, &mut data);
         self.publish_view_icons(side, &mut data);
@@ -2051,6 +2107,9 @@ impl App {
                     }
                 }
                 Event::PluginPrompt(ticket) => self.plugin_prompts.push_back(ticket),
+                Event::SshChallenge(challenge) => self.ssh_challenges.push_back(challenge),
+                #[cfg(windows)]
+                Event::SshTerminalError(error) => self.status(error),
                 Event::TransferConflict(ticket) => self.transfers.prompt = Some(ticket),
                 Event::WdxValues(values) => self.apply_wdx_values(values),
                 Event::WfxDefaultView(path, columns) => self.apply_wfx_default_view(path, columns),
@@ -2058,6 +2117,23 @@ impl App {
                 Event::Thumbnails(loaded) => self.apply_thumbnails(loaded),
                 Event::TreeLoaded(loaded) => self.tree_loaded(loaded),
                 Event::SeparateSearch(id, action) => self.separate_search_action(id, *action),
+                Event::NetworkPublished(0, 0) => self.status("Ordnerüberwachung läuft."),
+                Event::NetworkPublished(count, 0) => self.status(format!(
+                    "Ordnerüberwachung · {count} Einträge veröffentlicht"
+                )),
+                Event::NetworkPublished(0, count) => self.status(format!(
+                    "Ordnerüberwachung · {count} Dateien auf dem Server gelöscht."
+                )),
+                Event::NetworkPublished(uploaded, deleted) => self.status(format!(
+                    "Ordnerüberwachung · {uploaded} Einträge veröffentlicht, {deleted} Dateien gelöscht."
+                )),
+                Event::NetworkWatchEnded(result) => {
+                    self.network_watch = None;
+                    match result {
+                        Ok(()) => self.status("Ordnerüberwachung beendet."),
+                        Err(error) => self.error("Ordnerüberwachung beendet", &error),
+                    }
+                }
                 Event::QuickPreview(target, result) => {
                     self.quick_running = false;
                     let cancelled = self
@@ -2138,6 +2214,7 @@ impl App {
             }
         }
         self.open_next_plugin_prompt();
+        self.open_next_ssh_challenge();
         self.open_next_transfer_conflict();
         self.advance_transfers();
         self.refresh_ftp_edit_status();
@@ -2169,7 +2246,9 @@ impl App {
             let paused = self.transfers.paused();
             let waiting = matches!(
                 &self.pending,
-                Some(Pending::TransferConflict(_) | Pending::WfxPrompt(_))
+                Some(
+                    Pending::TransferConflict(_) | Pending::WfxPrompt(_) | Pending::SshChallenge(_)
+                )
             );
             ui.set_job_paused(paused);
             if let Some(metrics) = self.job_progress.render(paused, waiting, ui.get_job_kind()) {
@@ -2435,12 +2514,19 @@ impl App {
         navigation: Navigation,
         directory: io::Result<Box<LoadedDirectory>>,
     ) {
+        let accepts =
+            !matches!(navigation, Navigation::Linked) || self.accepts_linked_load(side, id);
         let panel = &mut self.panels[side];
         if panel.request != id {
             return;
         }
         panel.loading = false;
         panel.pending_parent = None;
+        if !accepts {
+            self.publish(side);
+            return;
+        }
+        let can_fallback = panel.current().deferred.is_none();
         match directory {
             Ok(loaded) => {
                 let LoadedDirectory {
@@ -2453,6 +2539,11 @@ impl App {
                 let tab = panel.current_mut();
                 let restored = matches!(navigation, Navigation::Refresh) && tab.deferred.is_some();
                 let previous = tab.location();
+                let follow = previous != target
+                    && !matches!(
+                        navigation,
+                        Navigation::Refresh | Navigation::Linked | Navigation::FtpProfile { .. }
+                    );
                 let focus = if let Navigation::Focus(path) = &navigation {
                     Some(path.clone())
                 } else if previous == target {
@@ -2472,6 +2563,7 @@ impl App {
                         Navigation::Jump
                         | Navigation::Focus(_)
                         | Navigation::Up
+                        | Navigation::Linked
                         | Navigation::FtpProfile { .. } => {
                             tab.back.push(previous);
                             tab.forward.clear();
@@ -2521,6 +2613,7 @@ impl App {
                     String::new(),
                     focus.as_deref(),
                 );
+                self.clear_link_on_scope_change();
                 if !directory.errors.is_empty() {
                     self.status(format!(
                         "{} Einträge konnten nicht gelesen werden.",
@@ -2535,8 +2628,17 @@ impl App {
                 {
                     self.load(1 - side, local, Navigation::Jump);
                 }
+                if follow {
+                    self.follow_linked_navigation(side, &target);
+                }
             }
             Err(error) => {
+                if matches!(navigation, Navigation::Linked)
+                    && self.offer_linked_folder(side, id, &target, &error)
+                {
+                    self.publish(side);
+                    return;
+                }
                 if archive_view::needs_header_password(&error)
                     && side == self.active
                     && self.pending.is_none()
@@ -2551,7 +2653,6 @@ impl App {
                     self.publish(side);
                     return;
                 }
-                let can_fallback = panel.current().deferred.is_none();
                 self.status(format!("{}: {error}", target.display()));
                 if matches!(navigation, Navigation::Refresh)
                     && can_fallback
@@ -2687,6 +2788,12 @@ impl App {
                 self.show_folder_sizes(side, request, &root, sizes, skipped);
             }
             Outcome::Ftp(view) => self.show_ftp(view),
+            Outcome::FtpRecycleBin(side, request, location) => {
+                if self.panels[side].request == request {
+                    self.load_location(side, Location::Ftp(location), Navigation::Jump);
+                }
+            }
+            Outcome::LinkedFolder(request) => self.open_created_linked_folder(*request),
             Outcome::FtpSearch {
                 side,
                 request,
@@ -2729,10 +2836,15 @@ impl App {
             }
             Outcome::FtpEditReady(draft) => self.open_downloaded_ftp_draft(*draft),
             Outcome::FtpEditUploaded(draft, log_error) => self.finish_ftp_upload(*draft, log_error),
+            Outcome::S3Tags(tags) => self.edit_s3_tags(tags),
+            Outcome::S3History(history) => self.show_s3_history(history),
             Outcome::Imported(import) => self.show_tc_import(import),
             Outcome::ImportedTabs(name, import) => self.review_tab_import(name, *import),
             Outcome::TabFile(import, replace) => self.apply_tab_file(*import, replace),
             Outcome::ImportedFtp(sites) => self.review_ftp_import(sites),
+            Outcome::ImportedNetwork(sites) => self.review_imported_network(sites),
+            Outcome::ImportedKnownHosts(proposals) => self.review_known_hosts(proposals),
+            Outcome::ScheduledNetworkTasks(tasks) => self.review_network_schedule(tasks),
             Outcome::PluginPreview(name, host) => {
                 self.status(format!("WLX-Vorschau geöffnet · {name}"));
                 self.plugin_previews.push((name, host));

@@ -1681,7 +1681,7 @@ pub fn publish_checked(
     published.map_err(|error| error.error)
 }
 
-fn open_for_read(path: &Path) -> io::Result<File> {
+pub(crate) fn open_for_read(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(windows)]
@@ -1747,6 +1747,41 @@ pub fn ensure_unchanged(path: &Path, expected: &Metadata) -> io::Result<()> {
             path.display()
         )))
     }
+}
+
+pub fn set_modified_checked(
+    path: &Path,
+    expected: &Metadata,
+    modified: std::time::SystemTime,
+) -> io::Result<()> {
+    ensure_unchanged(path, expected)?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+            FILE_WRITE_ATTRIBUTES,
+        };
+        options
+            .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(path)?;
+    let actual = checked_regular_metadata(path, file.metadata()?)?;
+    if !actual.is_file()
+        || actual.len() != expected.len()
+        || actual.modified()? != expected.modified()?
+        || !same_identity_hint(&actual, expected)
+    {
+        return Err(io::Error::other(format!(
+            "Datei wurde seit dem Vergleich geändert: {}",
+            path.display()
+        )));
+    }
+    file.set_modified(modified)
 }
 
 #[cfg(windows)]

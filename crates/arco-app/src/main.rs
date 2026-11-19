@@ -3,6 +3,7 @@
 mod app;
 mod commands;
 mod locale;
+mod network_profile;
 mod panel;
 mod preview;
 mod shortcuts;
@@ -29,12 +30,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut profile = None;
     let mut portable = false;
     let mut instance = None;
+    let mut session_url = None;
     while let Some(argument) = arguments.next() {
         match argument.to_str() {
             Some("--help" | "-h" | "/?") => {
                 arco_windows::attach_parent_console_for_help();
                 println!(
-                    "{VERSION}\n  --left PFAD | /L=PFAD\n  --right PFAD | /R=PFAD\n  --portable\n  --profile DATEI\n  --instance NAME\n  --version"
+                    "{VERSION}\n  --left PFAD | /L=PFAD\n  --right PFAD | /R=PFAD\n  --portable\n  --profile DATEI\n  --instance NAME\n  --session-url URL\n  --version"
                 );
                 return Ok(());
             }
@@ -47,6 +49,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some("--right") => paths[1] = Some(next_path(&mut arguments, "--right")?),
             Some("--portable") => portable = true,
             Some("--profile") => profile = Some(next_path(&mut arguments, "--profile")?),
+            Some("--session-url") => {
+                if session_url.is_some() {
+                    return Err("Gib genau eine Sitzungs-URL an.".into());
+                }
+                session_url = Some(
+                    arguments
+                        .next()
+                        .and_then(|arg| arg.into_string().ok())
+                        .ok_or("Die Sitzungs-URL fehlt oder ist ungültig.")?,
+                );
+            }
+            Some("--arco-link") => {
+                if session_url.is_some() {
+                    return Err("Gib genau eine Sitzungs-URL an.".into());
+                }
+                session_url = Some(registered_session_url(&mut arguments)?);
+            }
+            Some(url) if url.starts_with("arco://") => {
+                if session_url.is_some() {
+                    return Err("Gib genau eine Sitzungs-URL an.".into());
+                }
+                session_url = Some(url.to_owned());
+            }
             Some("--instance") => {
                 let name = next_path(&mut arguments, "--instance")?;
                 let name = name.to_str().filter(|name| !name.is_empty() && name.len() <= 64
@@ -111,10 +136,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .window()
         .set_size(slint::LogicalSize::new(1200.0, 760.0));
     let placement = saved.window_placement.clone();
-    let _state = app::run(&window, saved, fallback, profile, profile_error);
+    let state = app::run(&window, saved, fallback, profile, profile_error);
     window.show()?;
     window_placement::restore(window.window(), &placement);
     window.invoke_focus_panels();
+    if let Some(url) = session_url {
+        let mut app = state.borrow_mut();
+        if let Err(error) = app.prepare_session_url(&url) {
+            app.error("Sitzungs-URL öffnen", &error.to_string());
+        }
+    }
     slint::run_event_loop()?;
     Ok(())
 }
@@ -127,6 +158,38 @@ fn next_path(
         .next()
         .map(PathBuf::from)
         .ok_or_else(|| format!("Pfad für {name} fehlt"))
+}
+
+fn registered_session_url(
+    arguments: &mut impl Iterator<Item = OsString>,
+) -> Result<String, &'static str> {
+    let url = arguments
+        .next()
+        .and_then(|value| value.into_string().ok())
+        .filter(|url| {
+            url.len() <= 8192
+                && url
+                    .get(.."arco://session/".len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("arco://session/"))
+                && !url.contains('"')
+                && !url.chars().any(char::is_control)
+        })
+        .ok_or("Der Windows-Protokollhandler erwartet einen Arco-Profil-Link.")?;
+    if arguments.next().is_some() {
+        return Err("Der Windows-Protokollhandler akzeptiert genau einen Link.");
+    }
+    Ok(url)
+}
+
+#[cfg(test)]
+#[test]
+fn windows_url_handler_accepts_only_one_arco_link() {
+    let parse =
+        |values: &[&str]| registered_session_url(&mut values.iter().copied().map(OsString::from));
+    assert!(parse(&["arco://session/profile=Team?path=%2F"]).is_ok());
+    assert!(parse(&["arco://session/profile=Team", "--search-worker"]).is_err());
+    assert!(parse(&["arco://session/team\" --left C:\\"]).is_err());
+    assert!(parse(&["sftp://user@example.test/"]).is_err());
 }
 
 fn file_color(rgb: u32) -> slint::Color {
