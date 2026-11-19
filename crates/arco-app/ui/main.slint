@@ -496,6 +496,16 @@ export struct FtpProfileData {
     active: bool,
     listing: int,
     remember: bool,
+    address-family: int,
+    charset: string,
+    list-pattern: string,
+    show-hidden: bool,
+    ca-bundle: string,
+    client-certificate: string,
+    mode-z: bool,
+    otp: bool,
+    ssh-fingerprint: string,
+    ssh-private-key: string,
 }
 
 export struct PluginRowData {
@@ -517,10 +527,16 @@ component FtpProfilesCard inherits Rectangle {
     in property <int> revision;
     in property <string> notice;
     in property <bool> busy;
+    property <bool> ssh-mode: security.current-index == 3;
     property <bool> dirty: name.text != root.data.name || address.text != root.data.address
         || user.text != root.data.user || proxy.text != root.data.proxy || local.text != root.data.local-directory
         || security.current-index != root.data.security || active.checked != root.data.active
-        || listing.current-index != root.data.listing || remember.checked != root.data.remember || password-field.text != "";
+        || listing.current-index != root.data.listing || remember.checked != root.data.remember || password-field.text != ""
+        || address-family.current-index != root.data.address-family || charset.text != root.data.charset
+        || list-pattern.text != root.data.list-pattern || show-hidden.checked != root.data.show-hidden
+        || ca-bundle.text != root.data.ca-bundle || client-certificate.text != root.data.client-certificate
+        || mode-z.checked != root.data.mode-z || otp.checked != root.data.otp
+        || ssh-fingerprint.text != root.data.ssh-fingerprint || ssh-private-key.text != root.data.ssh-private-key;
     callback select(int);
     callback operate(string, FtpProfileData, string);
     callback close();
@@ -530,13 +546,13 @@ component FtpProfilesCard inherits Rectangle {
     VerticalLayout {
         padding: 20px;
         spacing: 10px;
-        DialogHeading { icon: @image-url("icons/network.svg"); title: @tr("FTP-Verbindungen"); subtitle: @tr("Verbindung auswählen oder ein neues Profil anlegen."); }
+        DialogHeading { icon: @image-url("icons/network.svg"); title: @tr("FTP- und SFTP-Verbindungen"); subtitle: @tr("Verbindung auswählen oder ein neues Profil anlegen."); }
         HorizontalLayout {
             spacing: 8px;
             profile-list := ComboBox {
                 model: root.profiles; enabled: !root.busy;
                 current-index: root.selected;
-                accessible-label: @tr("Gespeicherte FTP-Verbindungen");
+                accessible-label: @tr("Gespeicherte Verbindungen");
                 horizontal-stretch: 1;
                 selected => { root.select(self.current-index); }
             }
@@ -562,33 +578,35 @@ component FtpProfilesCard inherits Rectangle {
                         VerticalLayout {
                             horizontal-stretch: 2;
                             spacing: 4px;
-                            FieldLabel { text: @tr("FTP-Adresse und Startordner"); }
-                            address := LineEdit { text: root.data.address; placeholder-text: "ftp://server:port/startordner/"; accessible-label: @tr("FTP-Adresse und Startordner"); }
+                            FieldLabel { text: @tr("Serveradresse und Startordner"); }
+                            address := LineEdit { text: root.data.address; placeholder-text: root.ssh-mode ? "sftp://server:22/startordner/" : "ftp://server:port/startordner/"; accessible-label: @tr("Serveradresse und Startordner"); }
                         }
                     }
                     HorizontalLayout {
                         spacing: 10px;
                         VerticalLayout {
                             spacing: 4px;
-                            FieldLabel { text: @tr("Verschlüsselungsmodus"); }
+                            FieldLabel { text: @tr("Protokoll"); }
                             security := ComboBox {
-                                model: [@tr("Explizites FTPS (FTP mit TLS)"), @tr("Implizites FTPS"), @tr("Klartext-FTP")];
+                                model: [@tr("Explizites FTPS (FTP mit TLS)"), @tr("Implizites FTPS"), @tr("Klartext-FTP"), "SFTP (SSH)"];
                                 current-index: root.data.security;
-                                accessible-label: @tr("Verschlüsselungsmodus");
+                                accessible-label: @tr("Protokoll");
                             }
                         }
                         VerticalLayout {
                             spacing: 4px;
+                            visible: !root.ssh-mode;
                             FieldLabel { text: @tr("Format der Verzeichnisliste"); }
                             listing := ComboBox {
-                                model: [@tr("Automatisch"), @tr("Nur MLSD"), @tr("Nur LIST (Unix / IIS)")];
+                                model: [@tr("Automatisch"), @tr("Nur MLSD"), @tr("Nur LIST (Unix / IIS / VMS)")];
                                 current-index: root.data.listing;
                                 accessible-label: @tr("Format der Verzeichnisliste");
                             }
                         }
                     }
                     Text {
-                        text: security.current-index == 2
+                        text: root.ssh-mode ? @tr("SFTP verwendet SSH. Der Hostschlüssel muss beim Serverbetreiber geprüft werden.")
+                            : security.current-index == 2
                             ? @tr("Klartext-FTP überträgt Passwort und Dateien unverschlüsselt.")
                             : security.current-index == 1 ? @tr("Für implizites FTPS ftps:// verwenden.") : @tr("Für explizites FTPS ftp:// verwenden.");
                         color: security.current-index == 2 ? Colors.archive : Colors.muted;
@@ -605,11 +623,41 @@ component FtpProfilesCard inherits Rectangle {
                         }
                         VerticalLayout {
                             spacing: 4px;
+                            visible: !root.ssh-mode;
                             FieldLabel { text: @tr("Proxy"); }
-                            proxy := LineEdit { text: root.data.proxy; placeholder-text: @tr("HTTP-/SOCKS-Proxy (optional)"); accessible-label: @tr("Proxy"); }
+                            proxy := LineEdit { text: root.data.proxy; placeholder-text: @tr("HTTP-, SOCKS- oder FTP-Proxy"); accessible-label: @tr("Proxy"); }
                         }
                     }
-                    active := CheckBox { text: @tr("Aktiver FTP-Modus (Direktverbindung)"); checked: root.data.active; }
+                    active := CheckBox { visible: !root.ssh-mode; text: @tr("Aktiver FTP-Modus (Direktverbindung)"); checked: root.data.active; }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        VerticalLayout {
+                            FieldLabel { text: @tr("IP-Version"); }
+                            address-family := ComboBox { model: [@tr("Automatisch"), "IPv4", "IPv6"]; current-index: root.data.address-family; accessible-label: @tr("IP-Version"); }
+                        }
+                        VerticalLayout {
+                            visible: !root.ssh-mode;
+                            FieldLabel { text: @tr("Serverzeichensatz"); }
+                            charset := LineEdit { text: root.data.charset; placeholder-text: "UTF-8 / windows-1252 / Shift_JIS"; accessible-label: @tr("Serverzeichensatz"); }
+                        }
+                    }
+                    mode-z := CheckBox { visible: !root.ssh-mode; text: @tr("Dateitransfers mit MODE Z komprimieren"); checked: root.data.mode-z; }
+                    show-hidden := CheckBox { visible: !root.ssh-mode; text: @tr("Versteckte Dateien mit LIST -a anfordern"); checked: root.data.show-hidden; }
+                    FieldLabel { visible: !root.ssh-mode; text: @tr("Eigenes LIST-Format (regulärer Ausdruck)"); }
+                    list-pattern := LineEdit { visible: !root.ssh-mode; text: root.data.list-pattern; accessible-label: @tr("Eigenes LIST-Format (regulärer Ausdruck)"); }
+                    Text { visible: !root.ssh-mode; text: @tr("Benannte Gruppen: name, kind und optional size. Ein eigenes Format verwendet LIST."); wrap: word-wrap; color: Colors.muted; }
+                }
+                FormSection { title: @tr("FTPS-Zertifikate"); visible: security.current-index < 2;
+                    FieldLabel { text: @tr("CA-Datei (PEM, optional)"); }
+                    ca-bundle := LineEdit { text: root.data.ca-bundle; enabled: security.current-index != 2; accessible-label: @tr("CA-Datei (PEM, optional)"); }
+                    FieldLabel { text: @tr("Clientzertifikat (Windows-Fingerabdruck, optional)"); }
+                    client-certificate := LineEdit { text: root.data.client-certificate; enabled: security.current-index != 2; accessible-label: @tr("Clientzertifikat (Windows-Fingerabdruck, optional)"); }
+                }
+                FormSection { title: @tr("SSH-Server und Schlüssel"); visible: root.ssh-mode;
+                    FieldLabel { text: @tr("SSH-Hostschlüssel (SHA256)"); }
+                    ssh-fingerprint := LineEdit { text: root.data.ssh-fingerprint; placeholder-text: "SHA256:…"; accessible-label: @tr("SSH-Hostschlüssel (SHA256)"); }
+                    FieldLabel { text: @tr("Private SSH-Schlüsseldatei (optional)"); }
+                    ssh-private-key := LineEdit { text: root.data.ssh-private-key; placeholder-text: @tr("Absoluter Pfad (optional)"); accessible-label: @tr("Private SSH-Schlüsseldatei (optional)"); }
                 }
                 FormSection { title: @tr("Anmeldung");
                     HorizontalLayout {
@@ -617,20 +665,21 @@ component FtpProfilesCard inherits Rectangle {
                         VerticalLayout {
                             spacing: 4px;
                             FieldLabel { text: @tr("Benutzername"); }
-                            user := LineEdit { text: root.data.user; placeholder-text: @tr("Leer für anonyme Anmeldung"); accessible-label: @tr("Benutzername"); }
+                            user := LineEdit { text: root.data.user; placeholder-text: root.ssh-mode ? "" : @tr("Leer für anonyme Anmeldung"); accessible-label: @tr("Benutzername"); }
                         }
                         VerticalLayout {
                             spacing: 4px;
-                            FieldLabel { text: @tr("FTP-Passwort"); }
+                            FieldLabel { text: root.ssh-mode && ssh-private-key.text != "" ? @tr("Schlüsselpassphrase") : @tr("Passwort"); }
                             password-field := LineEdit {
                                 placeholder-text: root.data.remember ? @tr("Neues Passwort (optional)") : @tr("Passwort zum Speichern");
                                 input-type: password;
                                 enabled: remember.checked;
-                                accessible-label: @tr("FTP-Passwort");
+                                accessible-label: root.ssh-mode && ssh-private-key.text != "" ? @tr("Schlüsselpassphrase") : @tr("Passwort");
                             }
                         }
                     }
                     remember := CheckBox { text: @tr("Passwort in Windows-Anmeldeinformationen speichern"); checked: root.data.remember; }
+                    otp := CheckBox { visible: !root.ssh-mode; text: @tr("Einmalpasswort nach RFC 2289 (OTP)"); checked: root.data.otp; enabled: security.current-index == 2 && !active.checked && proxy.text == ""; }
                 }
             }
         }
@@ -649,10 +698,17 @@ component FtpProfilesCard inherits Rectangle {
                 text: @tr("Speichern"); enabled: root.dirty && !root.busy && name.text != "" && address.text != "";
                 clicked => {
                     root.operate("save", {
-                        name: name.text, address: address.text, user: user.text, proxy: proxy.text,
+                        name: name.text, address: address.text, user: user.text, proxy: root.ssh-mode ? "" : proxy.text,
                         local-directory: local.text,
-                        security: security.current-index, active: active.checked, remember: remember.checked,
-                        listing: listing.current-index,
+                        security: security.current-index, active: !root.ssh-mode && active.checked, remember: remember.checked,
+                        listing: root.ssh-mode ? 0 : listing.current-index,
+                        address-family: address-family.current-index, charset: root.ssh-mode ? "" : charset.text,
+                        list-pattern: root.ssh-mode ? "" : list-pattern.text, show-hidden: !root.ssh-mode && show-hidden.checked, mode-z: !root.ssh-mode && mode-z.checked,
+                        ca-bundle: security.current-index >= 2 ? "" : ca-bundle.text,
+                        client-certificate: security.current-index >= 2 ? "" : client-certificate.text,
+                        otp: otp.enabled && otp.checked,
+                            ssh-fingerprint: root.ssh-mode ? ssh-fingerprint.text : "",
+                            ssh-private-key: root.ssh-mode ? ssh-private-key.text : "",
                     }, password-field.text);
                 }
             }
@@ -663,9 +719,16 @@ component FtpProfilesCard inherits Rectangle {
                 clicked => {
                     if (root.dirty || root.selected == 0) {
                         root.operate("save-connect", {
-                            name: name.text, address: address.text, user: user.text, proxy: proxy.text,
+                            name: name.text, address: address.text, user: user.text, proxy: root.ssh-mode ? "" : proxy.text,
                             local-directory: local.text, security: security.current-index,
-                            active: active.checked, remember: remember.checked, listing: listing.current-index,
+                            active: !root.ssh-mode && active.checked, remember: remember.checked, listing: root.ssh-mode ? 0 : listing.current-index,
+                            address-family: address-family.current-index, charset: root.ssh-mode ? "" : charset.text,
+                            list-pattern: root.ssh-mode ? "" : list-pattern.text, show-hidden: !root.ssh-mode && show-hidden.checked, mode-z: !root.ssh-mode && mode-z.checked,
+                            ca-bundle: security.current-index >= 2 ? "" : ca-bundle.text,
+                            client-certificate: security.current-index >= 2 ? "" : client-certificate.text,
+                            otp: otp.enabled && otp.checked,
+                            ssh-fingerprint: root.ssh-mode ? ssh-fingerprint.text : "",
+                            ssh-private-key: root.ssh-mode ? ssh-private-key.text : "",
                         }, password-field.text);
                     } else { root.operate("connect", root.data, ""); }
                 }
@@ -683,6 +746,16 @@ component FtpProfilesCard inherits Rectangle {
         security.current-index = root.data.security;
         active.checked = root.data.active;
         listing.current-index = root.data.listing;
+        address-family.current-index = root.data.address-family;
+        charset.text = root.data.charset;
+        list-pattern.text = root.data.list-pattern;
+        show-hidden.checked = root.data.show-hidden;
+        ca-bundle.text = root.data.ca-bundle;
+        client-certificate.text = root.data.client-certificate;
+        mode-z.checked = root.data.mode-z;
+        otp.checked = root.data.otp;
+        ssh-fingerprint.text = root.data.ssh-fingerprint;
+        ssh-private-key.text = root.data.ssh-private-key;
         remember.checked = root.data.remember;
         password-field.text = "";
         if (root.selected == 0) { name.focus(); }

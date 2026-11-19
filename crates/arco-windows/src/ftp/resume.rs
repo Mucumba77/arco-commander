@@ -12,9 +12,73 @@ const OVERLAP: u64 = 64 * 1024;
 struct Stamp {
     size: u64,
     modified: String,
+    #[serde(default)]
+    unique: Option<String>,
 }
 
 impl Session {
+    pub fn upload_resuming(
+        &self,
+        directory: &Url,
+        source: &Path,
+        remote: &str,
+        cancel: &AtomicBool,
+    ) -> io::Result<()> {
+        let url = self.file(directory, remote)?;
+        let source_name = source
+            .to_str()
+            .ok_or_else(|| io::Error::other("curl benötigt einen Unicode-Dateipfad."))?;
+        let original = fs::metadata(source)?;
+        if !original.is_file() {
+            return Err(io::Error::other(
+                "Für FTP-Resume wird eine reguläre lokale Datei benötigt.",
+            ));
+        }
+        let expected = self.remote_stamp(directory, remote, cancel)?;
+        if expected.size == 0 || expected.size >= original.len() {
+            return Err(io::Error::other(
+                "Die entfernte Teildatei muss kleiner als die lokale Quelle und darf nicht leer sein.",
+            ));
+        }
+        let staged = tempfile::tempdir()?;
+        let partial = staged.path().join("partial");
+        self.download_bounded(directory, remote, &partial, expected.size, cancel)?;
+        compare_prefix(source, &partial, expected.size, cancel)?;
+        if self.remote_stamp(directory, remote, cancel)? != expected
+            || fs::metadata(source)?.modified()? != original.modified()?
+            || fs::metadata(source)?.len() != original.len()
+        {
+            return Err(io::Error::other(
+                "Quelle oder FTP-Teildatei hat sich vor dem Fortsetzen geändert.",
+            ));
+        }
+        let offset = expected.size.to_string();
+        run(
+            self.command(&url)?,
+            &["--continue-at", &offset, "--upload-file", source_name],
+            None,
+            cancel,
+        )?;
+        let actual = self.remote_stamp(directory, remote, cancel)?;
+        if actual.size != original.len() {
+            return Err(io::Error::other(
+                "FTP-Resume: Die entfernte Datei hat nach dem Anhängen nicht die erwartete Größe.",
+            ));
+        }
+        let finished = staged.path().join("complete");
+        self.download_bounded(directory, remote, &finished, original.len(), cancel)?;
+        compare_prefix(source, &finished, original.len(), cancel)?;
+        if self.remote_stamp(directory, remote, cancel)? != actual
+            || fs::metadata(source)?.modified()? != original.modified()?
+            || fs::metadata(source)?.len() != original.len()
+        {
+            return Err(io::Error::other(
+                "Quelle oder FTP-Datei hat sich während der Abschlussprüfung geändert.",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn download_resuming(
         &self,
         directory: &Url,
@@ -86,7 +150,7 @@ impl Session {
         cancel: &AtomicBool,
     ) -> io::Result<Stamp> {
         let entry = self
-            .list(directory, cancel)?
+            .list_sync(directory, cancel)?
             .entries
             .into_iter()
             .find(|entry| entry.name == remote && entry.directory == Some(false))
@@ -98,7 +162,11 @@ impl Session {
                 "FTP-Resume erfordert Größe und Änderungszeit vom Server",
             ));
         };
-        Ok(Stamp { size, modified })
+        Ok(Stamp {
+            size,
+            modified,
+            unique: entry.unique,
+        })
     }
 
     fn checkpoint_paths(&self, url: &Url, destination: &Path) -> io::Result<(PathBuf, PathBuf)> {
@@ -121,6 +189,37 @@ impl Session {
             parent.join(format!("{basename}.json")),
         ))
     }
+}
+
+fn compare_prefix(
+    source: &Path,
+    downloaded: &Path,
+    size: u64,
+    cancel: &AtomicBool,
+) -> io::Result<()> {
+    let mut source = File::open(source)?;
+    let mut downloaded = File::open(downloaded)?;
+    if downloaded.metadata()?.len() != size {
+        return Err(io::Error::other(
+            "FTP-Resume: Die heruntergeladene Dateigröße stimmt nicht.",
+        ));
+    }
+    let mut left = [0; 64 * 1024];
+    let mut right = [0; 64 * 1024];
+    let mut remaining = size;
+    while remaining > 0 {
+        check_cancel(cancel)?;
+        let width = remaining.min(left.len() as u64) as usize;
+        source.read_exact(&mut left[..width])?;
+        downloaded.read_exact(&mut right[..width])?;
+        if left[..width] != right[..width] {
+            return Err(io::Error::other(
+                "FTP-Resume: Der Inhalt der entfernten Datei weicht von der lokalen Quelle ab.",
+            ));
+        }
+        remaining -= width as u64;
+    }
+    Ok(())
 }
 
 fn open_checkpoint(partial: &Path, stamp: &Path, expected: &Stamp) -> io::Result<File> {

@@ -580,6 +580,7 @@ impl Tab {
                 ftp::ListFormat::Mlsd => "FTP · MLSD",
                 ftp::ListFormat::List => "FTP · LIST",
                 ftp::ListFormat::Names => tr("FTP · Namensliste"),
+                ftp::ListFormat::Sftp => "SFTP · SSH",
             }
             .into()
         } else if self.archive.is_some() {

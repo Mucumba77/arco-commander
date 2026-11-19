@@ -1,5 +1,6 @@
-use super::ftp_sync::{modified, scan};
+use super::ftp_sync::{MAX_DEPTH, MAX_ENTRIES, ftp_ignores, modified, scan};
 use super::{App, FtpEndpoint, LoadedDirectory, Navigation, Outcome, StagedPreview};
+use crate::commands::{Dialog, Pending};
 use crate::panel::{FtpLocation, FtpTab, Location};
 use crate::{display_path, preview};
 use arco_core::archive_view::MAX_PREVIEW;
@@ -19,6 +20,79 @@ pub(crate) enum FtpEdit {
     Rename(ftp::Entry),
     Delete(Vec<ftp::Entry>),
     Permissions(Vec<ftp::Entry>),
+}
+
+pub(crate) struct SearchHit {
+    folder: ftp::Url,
+    name: PathBuf,
+    directory: bool,
+}
+
+pub(super) fn search_remote(
+    location: &FtpLocation,
+    matches: impl Fn(&OsStr) -> bool,
+    ignore: Option<&arco_core::ignore::IgnoreList>,
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(&Path),
+) -> io::Result<Vec<SearchHit>> {
+    let ignored = ftp_ignores(ignore, &location.directory, location.profile.as_deref());
+    let mut directories = vec![(PathBuf::new(), 0)];
+    let mut visited = BTreeSet::new();
+    let mut scanned = 0;
+    let mut hits = Vec::new();
+    while let Some((relative, depth)) = directories.pop() {
+        files::check_cancel(cancel)?;
+        if depth >= MAX_DEPTH {
+            return Err(io::Error::other(
+                "Der Serverordnerbaum ist für die rekursive Suche zu tief.",
+            ));
+        }
+        progress(&relative);
+        let folder = location
+            .session
+            .relative_directory(&location.directory, &relative)?;
+        let listing = location.session.list(&folder, cancel)?;
+        if listing.format == ftp::ListFormat::Names {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Der FTP-Server liefert keine Ordnertypen für die rekursive Suche.",
+            ));
+        }
+        for entry in listing.entries {
+            files::check_cancel(cancel)?;
+            scanned += 1;
+            if scanned > MAX_ENTRIES {
+                return Err(io::Error::other(
+                    "Der Serverordnerbaum enthält zu viele Einträge für die Suche.",
+                ));
+            }
+            let Ok(name) = files::leaf_name(OsStr::new(&entry.name)) else {
+                continue;
+            };
+            let path = relative.join(name);
+            let directory = entry.directory == Some(true);
+            if ignored(&path, directory) {
+                continue;
+            }
+            if matches(name) {
+                hits.push(SearchHit {
+                    folder: folder.clone(),
+                    name: name.into(),
+                    directory,
+                });
+            }
+            if directory && entry.unique.is_none_or(|id| visited.insert(id)) {
+                directories.push((path, depth + 1));
+            }
+        }
+    }
+    hits.sort_by(|a, b| {
+        a.folder
+            .as_str()
+            .cmp(b.folder.as_str())
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    Ok(hits)
 }
 
 pub(super) fn read_panel(
@@ -67,6 +141,206 @@ pub(super) fn read_panel(
 }
 
 impl App {
+    pub(crate) fn search_ftp(
+        &mut self,
+        side: usize,
+        request: u64,
+        location: FtpLocation,
+        masks: &str,
+    ) -> io::Result<()> {
+        if masks.trim().is_empty() {
+            return Err(io::Error::other("Gib eine Dateimaske ein."));
+        }
+        let masks = files::compile_masks(masks)?;
+        let ignore = self.ignore_list();
+        let description = super::JobDescription::new(
+            crate::OperationKind::Search,
+            location.directory.to_string(),
+            String::new(),
+        );
+        self.start_operation_job("Server durchsuchen", false, description, move |job| {
+            let hits = search_remote(
+                &location,
+                |name| masks.is_match(name),
+                ignore.as_deref(),
+                &job.cancel,
+                |folder| {
+                    job.phase(&display_path(folder));
+                },
+            )?;
+            Ok(Outcome::FtpSearch {
+                side,
+                request,
+                location,
+                hits,
+            })
+        });
+        Ok(())
+    }
+
+    pub(super) fn show_ftp_search(
+        &mut self,
+        side: usize,
+        request: u64,
+        location: FtpLocation,
+        hits: Vec<SearchHit>,
+    ) {
+        if self.panels[side].request != request {
+            return;
+        }
+        let rows = hits
+            .iter()
+            .map(|hit| crate::ReviewRow {
+                primary: display_path(&hit.name).into(),
+                secondary: ftp::Session::directory_path(&hit.folder).into(),
+                kind: if hit.directory {
+                    "folder".into()
+                } else {
+                    "file".into()
+                },
+                ..Default::default()
+            })
+            .collect();
+        let description = format!(
+            "{} · {} {}",
+            location.directory,
+            hits.len(),
+            crate::locale::tr("Treffer")
+        );
+        self.management_review(
+            crate::OperationKind::Search,
+            rows,
+            ["Name", "Serverordner"],
+            "Zum Treffer",
+        );
+        self.ui().set_review_can_confirm(!hits.is_empty());
+        self.dialog(
+            "management-review",
+            Pending::FtpSearchHit(side, request, location, hits),
+            Dialog {
+                title: "Treffer auf dem Server",
+                description: &description,
+                ..Default::default()
+            },
+        );
+    }
+
+    pub(crate) fn open_ftp_search_hit(
+        &mut self,
+        side: usize,
+        request: u64,
+        location: FtpLocation,
+        hits: &[SearchHit],
+        index: usize,
+    ) -> io::Result<()> {
+        if self.panels[side].request != request {
+            return Err(io::Error::other(
+                "Das Dateifenster hat sich seit der Serversuche geändert.",
+            ));
+        }
+        let hit = hits
+            .get(index)
+            .ok_or_else(|| io::Error::other("Wähle einen Suchtreffer."))?;
+        self.load_location(
+            side,
+            Location::Ftp(location.at(hit.folder.clone())),
+            Navigation::Focus(hit.name.clone()),
+        );
+        Ok(())
+    }
+
+    pub(crate) fn ftp_download_list_dialog(&mut self, endpoint: FtpEndpoint) {
+        let target = if self.current().ftp.is_some() {
+            self.panels[1 - self.active].current()
+        } else {
+            self.current()
+        };
+        if !target.is_local() {
+            self.status("Wähle einen lokalen Zielordner.");
+            return;
+        }
+        self.dialog("multiline", Pending::FtpDownloadList(endpoint, target.path.clone()), Dialog {
+            title: "FTP-Downloadliste",
+            description: "Ein FTP-Pfad oder eine URL des verbundenen Servers pro Zeile. Mit @ vor einem absoluten Pfad liest Arco die Liste aus einer Textdatei.",
+            confirm_label: "Herunterladen",
+            ..Default::default()
+        });
+    }
+
+    pub(crate) fn ftp_download_list(
+        &mut self,
+        (session, directory): FtpEndpoint,
+        target: PathBuf,
+        list: &str,
+    ) -> io::Result<()> {
+        if list.trim().is_empty() {
+            return Err(io::Error::other(
+                "Gib mindestens eine Datei für den FTP-Download an.",
+            ));
+        }
+        let list = list.to_owned();
+        let description = super::JobDescription::new(
+            crate::OperationKind::Ftp,
+            directory.to_string(),
+            display_path(&target),
+        );
+        self.enqueue_virtual_operation("FTP-Downloadliste", true, description, move |job| {
+            let text = if let Some(path) = list.trim().strip_prefix('@')
+                && !path.contains(['\r', '\n'])
+                && Path::new(path.trim_matches('"')).is_absolute()
+            {
+                arco_core::profile::read_tc_text(Path::new(path.trim_matches('"')))?
+            } else {
+                list
+            };
+            let mut downloads = Vec::new();
+            let mut names = BTreeSet::new();
+            for line in text
+                .lines()
+                .filter(|line| !line.trim().is_empty() && !line.starts_with("# "))
+            {
+                files::check_cancel(&job.cancel)?;
+                if downloads.len() >= 1000 {
+                    return Err(io::Error::other(
+                        "Eine FTP-Downloadliste darf höchstens 1000 Dateien enthalten.",
+                    ));
+                }
+                let (parent, name) = session.download_location(&directory, line)?;
+                let output = target.join(files::leaf_name(OsStr::new(&name))?);
+                if !names.insert(name.to_lowercase()) || output.try_exists()? {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        format!("Doppeltes oder vorhandenes Downloadziel: {name}"),
+                    ));
+                }
+                downloads.push((parent, name, output));
+            }
+            if downloads.is_empty() {
+                return Err(io::Error::other(
+                    "Gib mindestens eine Datei für den FTP-Download an.",
+                ));
+            }
+            let mut report = TransferReport::default();
+            let total = downloads.len();
+            for (index, (parent, name, output)) in downloads.into_iter().enumerate() {
+                files::check_cancel(&job.cancel)?;
+                job.step_progress(name.clone(), index + 1, total);
+                session
+                    .download(&parent, &name, &output, &job.cancel)
+                    .map_err(|error| {
+                        io::Error::new(
+                            error.kind(),
+                            format!("{name}: {error} ({} / {total})", report.completed),
+                        )
+                    })?;
+                report.completed += 1;
+                job.entry_progress(name, report.completed, total, "FTP-Downloadliste");
+            }
+            Ok(Outcome::Report("FTP-Downloadliste".into(), report))
+        });
+        Ok(())
+    }
+
     pub(crate) fn ftp_endpoint(&self) -> Option<FtpEndpoint> {
         let browser = || {
             self.ftp
@@ -90,7 +364,10 @@ impl App {
 
     pub(super) fn navigate_ftp_text(&mut self, mut location: FtpLocation, value: &str) {
         let result = (|| -> io::Result<FtpLocation> {
-            if value.starts_with("ftp://") || value.starts_with("ftps://") {
+            if value.starts_with("ftp://")
+                || value.starts_with("ftps://")
+                || value.starts_with("sftp://")
+            {
                 let directory = location.session.directory_url(value)?;
                 return Ok(location.at(directory));
             }
@@ -226,7 +503,11 @@ impl App {
                     .unwrap_or_else(|| crate::locale::tr("Nicht verfügbar").into()),
             );
         }
-        if ftp.listing.format == ftp::ListFormat::Mlsd && !entries.is_empty() {
+        if matches!(
+            ftp.listing.format,
+            ftp::ListFormat::Mlsd | ftp::ListFormat::Sftp
+        ) && !entries.is_empty()
+        {
             sheet.field("Ausgewählte Einträge", entries.len().to_string());
             sheet.ftp = Some((ftp.location.clone(), entries));
         }

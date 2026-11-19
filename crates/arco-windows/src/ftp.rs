@@ -12,10 +12,17 @@ use zeroize::Zeroizing;
 
 #[cfg(windows)]
 mod credentials;
+mod data;
 mod fxp;
 mod listing;
+mod options;
+mod otp;
+#[cfg(all(test, windows))]
+mod reference;
 mod resume;
+mod sftp;
 mod sync;
+pub use options::{AddressFamily, ConnectionOptions, TransferMode};
 pub use sync::SyncUpload;
 
 const LIST_LIMIT: usize = 8 * 1024 * 1024;
@@ -25,6 +32,7 @@ pub enum Security {
     ExplicitTls,
     ImplicitTls,
     Plain,
+    Sftp,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -54,14 +62,16 @@ pub struct Connection {
     proxy: Option<Url>,
     active: bool,
     listing_mode: ListingMode,
+    options: options::Options,
+    ssh: Option<sftp::Options>,
 }
 
 impl Connection {
     pub fn new(address: &str, user: &str, security: Security) -> io::Result<Self> {
-        let wanted_scheme = if security == Security::ImplicitTls {
-            "ftps"
-        } else {
-            "ftp"
+        let wanted_scheme = match security {
+            Security::ImplicitTls => "ftps",
+            Security::Sftp => "sftp",
+            _ => "ftp",
         };
         let address = address.trim();
         if address.starts_with(['/', '\\']) || address.chars().any(char::is_control) {
@@ -76,8 +86,7 @@ impl Connection {
             Url::parse(&format!("{wanted_scheme}://{address}"))
         }
         .map_err(io::Error::other)?;
-        if !matches!(url.scheme(), "ftp" | "ftps")
-            || url.host_str().is_none()
+        if url.host_str().is_none()
             || !url.username().is_empty()
             || url.password().is_some()
             || url.query().is_some()
@@ -85,7 +94,7 @@ impl Connection {
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "expected an FTP URL without embedded credentials, query, or fragment",
+                "Die Serveradresse darf keine Zugangsdaten, Abfrage oder Fragment enthalten.",
             ));
         }
         if url.scheme() != wanted_scheme {
@@ -98,6 +107,9 @@ impl Connection {
             url.path_segments_mut()
                 .map_err(|_| io::Error::other("invalid FTP directory"))?
                 .push("");
+        }
+        if security == Security::Sftp && user.is_empty() {
+            return Err(invalid_input("Gib einen SFTP-Benutzernamen ein."));
         }
         let user = if user.is_empty() { "anonymous" } else { user };
         if user.contains(':') || user.chars().any(char::is_control) {
@@ -113,6 +125,8 @@ impl Connection {
             proxy: None,
             active: false,
             listing_mode: ListingMode::Automatic,
+            options: Default::default(),
+            ssh: None,
         })
     }
 
@@ -129,7 +143,7 @@ impl Connection {
         let proxy = Url::parse(address.trim()).map_err(io::Error::other)?;
         if !matches!(
             proxy.scheme(),
-            "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h"
+            "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h" | "ftp"
         ) || proxy.host_str().is_none()
             || !matches!(proxy.path(), "" | "/")
             || proxy.query().is_some()
@@ -143,6 +157,7 @@ impl Connection {
             ));
         }
         self.proxy = Some(proxy);
+        self.validate_options()?;
         Ok(self)
     }
 
@@ -154,6 +169,7 @@ impl Connection {
             ));
         }
         self.active = active;
+        self.validate_options()?;
         Ok(self)
     }
 
@@ -162,11 +178,63 @@ impl Connection {
         self
     }
 
+    pub fn with_options(mut self, options: ConnectionOptions) -> io::Result<Self> {
+        self.options = options::Options::new(options)?;
+        self.validate_options()?;
+        Ok(self)
+    }
+
+    fn validate_options(&self) -> io::Result<()> {
+        if self.security == Security::Sftp
+            && (self.proxy.is_some()
+                || self.active
+                || self.listing_mode != ListingMode::Automatic
+                || self.options.ca_bundle.is_some()
+                || self.options.client_certificate.is_some()
+                || self.options.mode_z
+                || self.options.otp
+                || self.options.list_pattern.is_some()
+                || self.options.show_hidden)
+        {
+            return Err(invalid_input(
+                "SFTP verwendet eigene SSH-Verbindungsoptionen.",
+            ));
+        }
+        if self.security == Security::Plain
+            && (self.options.ca_bundle.is_some() || self.options.client_certificate.is_some())
+        {
+            return Err(invalid_input("Zertifikate benötigen eine FTPS-Verbindung."));
+        }
+        if self.security != Security::Plain
+            && self.proxy.as_ref().is_some_and(|url| url.scheme() == "ftp")
+        {
+            return Err(invalid_input(
+                "Das FTP-Gateway mit USER Benutzer@Server benötigt Klartext-FTP.",
+            ));
+        }
+        if self.options.otp
+            && (self.security != Security::Plain || self.active || self.proxy.is_some())
+        {
+            return Err(invalid_input(
+                "OTP benötigt eine passive Klartext-Direktverbindung.",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn authenticate(self, password: &str) -> io::Result<Session> {
         check_password(password)?;
+        self.validate_options()?;
+        if self.security == Security::Sftp && self.ssh.is_none() {
+            return Err(invalid_input(
+                "Für SFTP ist ein SSH-Hostschlüssel erforderlich.",
+            ));
+        }
         Ok(Session {
             connection: self,
             password: Zeroizing::new(password.to_string()),
+            otp_lock: Default::default(),
+            ssh: Default::default(),
         })
     }
 }
@@ -184,8 +252,11 @@ fn check_password(password: &str) -> io::Result<()> {
 pub struct Session {
     connection: Connection,
     password: Zeroizing<String>,
+    otp_lock: std::sync::Mutex<()>,
+    ssh: std::sync::Mutex<Option<ssh2::Sftp>>,
 }
 
+#[derive(Debug)]
 pub struct Listing {
     pub entries: Vec<Entry>,
     pub format: ListFormat,
@@ -196,6 +267,7 @@ pub enum ListFormat {
     Mlsd,
     List,
     Names,
+    Sftp,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -208,6 +280,10 @@ pub struct Entry {
 }
 
 impl Session {
+    pub fn is_sftp(&self) -> bool {
+        self.connection.security == Security::Sftp
+    }
+
     pub fn initial_directory(&self) -> Url {
         self.connection.url.clone()
     }
@@ -247,24 +323,36 @@ impl Session {
 
     pub fn list(&self, directory: &Url, cancel: &AtomicBool) -> io::Result<Listing> {
         self.validate(directory)?;
+        if self.is_sftp() {
+            return self.list_sftp(directory, false, cancel);
+        }
         let mode = self.connection.listing_mode;
-        if mode != ListingMode::List {
+        let settings = &self.connection.options;
+        if mode != ListingMode::List
+            && settings.list_pattern.is_none()
+            && (mode != ListingMode::Automatic || !settings.show_hidden)
+        {
             match run(
                 self.command(directory)?,
                 &["--request", "MLSD"],
                 None,
                 cancel,
             ) {
-                Ok(bytes) => return parse_mlsd(&bytes),
+                Ok(bytes) => return self.parse_listing(&bytes, false),
                 Err(error)
                     if mode == ListingMode::Automatic
                         && error.kind() == io::ErrorKind::Unsupported => {}
                 Err(error) => return Err(error),
             }
         }
-        match run(self.command(directory)?, &[], None, cancel) {
+        match self.raw_listing_bytes(directory, cancel) {
             Ok(bytes) => {
-                if let Some(entries) = listing::parse_list(&bytes) {
+                let decoded = self.connection.options.decode(&bytes)?;
+                let entries = match &self.connection.options.list_pattern {
+                    Some(pattern) => Some(listing::parse_custom(&decoded, pattern)?),
+                    None => listing::parse_list(decoded.as_bytes()),
+                };
+                if let Some(entries) = entries {
                     return Ok(Listing {
                         entries,
                         format: ListFormat::List,
@@ -276,14 +364,14 @@ impl Session {
             }
             Err(error) => return Err(error),
         }
-        if mode == ListingMode::List {
+        if mode == ListingMode::List || settings.list_pattern.is_some() || settings.show_hidden {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "Unbekanntes FTP-LIST-Format.",
             ));
         }
         let bytes = run(self.command(directory)?, &["--list-only"], None, cancel)?;
-        let text = String::from_utf8(bytes).map_err(io::Error::other)?;
+        let text = self.connection.options.decode(&bytes)?;
         let entries = text
             .lines()
             .filter_map(|name| {
@@ -302,6 +390,10 @@ impl Session {
         })
     }
 
+    fn parse_listing(&self, bytes: &[u8], strict: bool) -> io::Result<Listing> {
+        parse_mlsd_with_policy(self.connection.options.decode(bytes)?.as_bytes(), strict)
+    }
+
     pub fn download(
         &self,
         directory: &Url,
@@ -309,7 +401,15 @@ impl Session {
         destination: &Path,
         cancel: &AtomicBool,
     ) -> io::Result<()> {
-        self.download_file(directory, remote, destination, None, cancel, |_| {})
+        self.download_file(
+            directory,
+            remote,
+            destination,
+            TransferMode::Binary,
+            None,
+            cancel,
+            |_| {},
+        )
     }
 
     pub fn download_bounded(
@@ -320,7 +420,15 @@ impl Session {
         limit: u64,
         cancel: &AtomicBool,
     ) -> io::Result<()> {
-        self.download_file(directory, remote, destination, Some(limit), cancel, |_| {})
+        self.download_file(
+            directory,
+            remote,
+            destination,
+            TransferMode::Binary,
+            Some(limit),
+            cancel,
+            |_| {},
+        )
     }
 
     pub fn download_bounded_with_progress(
@@ -336,6 +444,7 @@ impl Session {
             directory,
             remote,
             destination,
+            TransferMode::Binary,
             Some(limit),
             cancel,
             progress,
@@ -350,7 +459,34 @@ impl Session {
         cancel: &AtomicBool,
         progress: impl FnMut(DownloadProgress),
     ) -> io::Result<()> {
-        self.download_file(directory, remote, destination, None, cancel, progress)
+        self.download_file(
+            directory,
+            remote,
+            destination,
+            TransferMode::Binary,
+            None,
+            cancel,
+            progress,
+        )
+    }
+
+    pub fn download_text(
+        &self,
+        directory: &Url,
+        remote: &str,
+        destination: &Path,
+        cancel: &AtomicBool,
+        progress: impl FnMut(DownloadProgress),
+    ) -> io::Result<()> {
+        self.download_file(
+            directory,
+            remote,
+            destination,
+            TransferMode::Text,
+            None,
+            cancel,
+            progress,
+        )
     }
 
     fn download_file(
@@ -358,6 +494,7 @@ impl Session {
         directory: &Url,
         remote: &str,
         destination: &Path,
+        mode: TransferMode,
         limit: Option<u64>,
         cancel: &AtomicBool,
         mut progress: impl FnMut(DownloadProgress),
@@ -373,26 +510,14 @@ impl Session {
             ));
         }
         let temporary = NamedTempFile::new_in(parent)?;
-        let limit_argument = limit.map(|bytes| bytes.max(1).to_string());
-        let arguments: &[&str] = if let Some(limit) = &limit_argument {
-            &["--max-filesize", limit]
-        } else {
-            &[]
-        };
-        run_observed(
-            self.command(&url)?,
-            arguments,
-            Some(temporary.reopen()?),
-            cancel,
-            || {
-                progress(DownloadProgress {
-                    received: temporary.as_file().metadata()?.len(),
-                    total: None,
-                    phase: DownloadPhase::Receiving,
-                });
-                Ok(())
-            },
-        )?;
+        self.receive_file(&url, temporary.as_file(), mode, limit, cancel, || {
+            progress(DownloadProgress {
+                received: temporary.as_file().metadata()?.len(),
+                total: None,
+                phase: DownloadPhase::Receiving,
+            });
+            Ok(())
+        })?;
         progress(DownloadProgress {
             received: temporary.as_file().metadata()?.len(),
             total: None,
@@ -421,7 +546,32 @@ impl Session {
         replace: bool,
         cancel: &AtomicBool,
     ) -> io::Result<()> {
+        self.upload_with_mode(
+            directory,
+            source,
+            remote,
+            replace,
+            TransferMode::Binary,
+            cancel,
+        )
+    }
+
+    pub fn upload_with_mode(
+        &self,
+        directory: &Url,
+        source: &Path,
+        remote: &str,
+        replace: bool,
+        mode: TransferMode,
+        cancel: &AtomicBool,
+    ) -> io::Result<()> {
         let url = self.file(directory, remote)?;
+        if self.is_sftp() {
+            if mode == TransferMode::Text {
+                return Err(sftp::binary_only());
+            }
+            return self.publish_sftp_upload(directory, source, remote, replace, cancel);
+        }
         if !replace
             && self
                 .list(directory, cancel)?
@@ -434,16 +584,7 @@ impl Session {
                 "remote entry already exists",
             ));
         }
-        let source = source
-            .to_str()
-            .ok_or_else(|| io::Error::other("curl requires a Unicode file path"))?;
-        run(
-            self.command(&url)?,
-            &["--upload-file", source],
-            None,
-            cancel,
-        )?;
-        Ok(())
+        self.send_file(&url, source, mode, cancel)
     }
 
     fn validate(&self, url: &Url) -> io::Result<()> {
@@ -474,8 +615,14 @@ impl Session {
         Ok(url)
     }
 
-    fn command(&self, url: &Url) -> io::Result<Request> {
+    fn command(&self, url: &Url) -> io::Result<Request<'_>> {
         self.validate(url)?;
+        if self.is_sftp() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Dieser FTP-Befehl ist für SFTP nicht verfügbar.",
+            ));
+        }
         let root = std::env::var_os("SystemRoot")
             .ok_or_else(|| io::Error::other("SystemRoot is missing"))?;
         let mut command = Command::new(PathBuf::from(root).join("System32").join("curl.exe"));
@@ -496,7 +643,34 @@ impl Session {
             "1",
             "--ftp-skip-pasv-ip",
         ]);
-        if let Some(proxy) = &self.connection.proxy {
+        let settings = &self.connection.options;
+        let mut wire_url = settings.encode_path(url)?;
+        let mut user = self.connection.user.clone();
+        let mut gateway_login = false;
+        if let Some(gateway) = self
+            .connection
+            .proxy
+            .as_ref()
+            .filter(|url| url.scheme() == "ftp")
+        {
+            user.push('@');
+            user.push_str(
+                url.host_str()
+                    .ok_or_else(|| invalid_input("FTP-Server fehlt."))?,
+            );
+            if let Some(port) = url.port() {
+                use std::fmt::Write as _;
+                write!(user, ":{port}").expect("format port");
+            }
+            gateway_login = true;
+            wire_url
+                .set_host(gateway.host_str())
+                .map_err(io::Error::other)?;
+            wire_url
+                .set_port(gateway.port())
+                .map_err(|()| invalid_input("Ungültiger Gateway-Port."))?;
+            command.args(["--noproxy", "*"]);
+        } else if let Some(proxy) = &self.connection.proxy {
             command.args(["--noproxy", "", "--proxy", proxy.as_str()]);
             if matches!(proxy.scheme(), "http" | "https") {
                 command.arg("--proxytunnel");
@@ -507,6 +681,21 @@ impl Session {
         if self.connection.active {
             command.args(["--ftp-port", "-"]);
         }
+        match settings.family {
+            AddressFamily::Automatic => (),
+            AddressFamily::Ipv4 => {
+                command.arg("--ipv4");
+            }
+            AddressFamily::Ipv6 => {
+                command.arg("--ipv6");
+            }
+        }
+        if let Some(bundle) = &settings.ca_bundle {
+            command.arg("--cacert").arg(bundle);
+        }
+        if let Some(thumbprint) = &settings.client_certificate {
+            command.args(["--cert", &format!("CurrentUser\\MY\\{thumbprint}")]);
+        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -515,17 +704,31 @@ impl Session {
         if self.connection.security != Security::Plain {
             command.arg("--ssl-reqd");
         }
-        let credential = Zeroizing::new(format!(
-            "{}:{}",
-            self.connection.user,
-            self.password.as_str()
-        ));
-        let config = Zeroizing::new(format!(
-            "url = {}\nuser = {}\n",
-            config_value(url.as_str()),
-            config_value(&credential)
-        ));
-        Ok(Request { command, config })
+        let config = if gateway_login {
+            // curl's user option splits at the first colon. A gateway USER
+            // can contain a destination port, so use encoded URL userinfo
+            // only in the private curl configuration pipe.
+            use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
+            let (scheme, address) = wire_url.as_str().split_once("://").expect("FTP URL");
+            Zeroizing::new(format!(
+                "url = \"{scheme}://{}:{}@{address}\"\n",
+                percent_encode(user.as_bytes(), NON_ALPHANUMERIC),
+                percent_encode(self.password.as_bytes(), NON_ALPHANUMERIC)
+            ))
+        } else {
+            let credential = Zeroizing::new(format!("{}:{}", user, self.password.as_str()));
+            Zeroizing::new(format!(
+                "url = {}\nuser = {}\n",
+                config_value(wire_url.as_str()),
+                config_value(&credential)
+            ))
+        };
+        Ok(Request {
+            command,
+            config: Zeroizing::new(config.as_bytes().to_vec()),
+            encoding: settings.encoding,
+            otp: settings.otp.then(|| (self, url.clone())),
+        })
     }
 }
 
@@ -548,13 +751,15 @@ fn config_value(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-struct Request {
+struct Request<'a> {
     command: Command,
-    config: Zeroizing<String>,
+    config: Zeroizing<Vec<u8>>,
+    encoding: &'static encoding_rs::Encoding,
+    otp: Option<(&'a Session, Url)>,
 }
 
 fn run(
-    request: Request,
+    request: Request<'_>,
     arguments: &[&str],
     output: Option<File>,
     cancel: &AtomicBool,
@@ -563,16 +768,38 @@ fn run(
 }
 
 fn run_observed(
-    mut request: Request,
+    mut request: Request<'_>,
     arguments: &[&str],
     output: Option<File>,
     cancel: &AtomicBool,
     mut observe: impl FnMut() -> io::Result<()>,
 ) -> io::Result<Vec<u8>> {
     check_cancel(cancel)?;
+    if let Some((session, url)) = request.otp.take() {
+        return otp::execute(session, &url, arguments, output, cancel, observe);
+    }
+    let mut arguments = arguments.iter();
+    while let Some(argument) = arguments.next() {
+        if *argument == "--quote" {
+            let value = arguments
+                .next()
+                .ok_or_else(|| invalid_input("FTP-Befehl fehlt."))?;
+            let quoted = config_value(value);
+            let (encoded, _, errors) = request.encoding.encode(&quoted);
+            if errors {
+                return Err(invalid_input(
+                    "Der FTP-Befehl ist im gewählten Zeichensatz nicht darstellbar.",
+                ));
+            }
+            request.config.extend_from_slice(b"quote = ");
+            request.config.extend_from_slice(&encoded);
+            request.config.push(b'\n');
+        } else {
+            request.command.arg(argument);
+        }
+    }
     let mut child = request
         .command
-        .args(arguments)
         .stdin(Stdio::piped())
         .stdout(output.map_or_else(Stdio::piped, Stdio::from))
         .stderr(Stdio::piped())
@@ -581,7 +808,7 @@ fn run_observed(
         .stdin
         .take()
         .ok_or_else(|| io::Error::other("curl stdin missing"));
-    if let Err(error) = input.and_then(|mut stdin| stdin.write_all(request.config.as_bytes())) {
+    if let Err(error) = input.and_then(|mut stdin| stdin.write_all(&request.config)) {
         let _ = child.kill();
         let _ = child.wait();
         return Err(error);
@@ -626,6 +853,15 @@ fn run_observed(
         .transpose()?;
     let status = result?;
     if !status.success() {
+        if matches!(status.code(), Some(51 | 58 | 60 | 77 | 90 | 91)) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "FTPS-Zertifikatsprüfung fehlgeschlagen (curl {}). Prüfe Servername, Vertrauenskette und Zertifikatsdatei.",
+                    status.code().unwrap()
+                ),
+            ));
+        }
         let kind = if matches!(status.code(), Some(19 | 21)) {
             io::ErrorKind::Unsupported
         } else {
@@ -641,6 +877,10 @@ fn run_observed(
     observe()?;
     check_cancel(cancel)?;
     Ok(output.transpose()?.unwrap_or_default())
+}
+
+fn invalid_input(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
 fn read_limited(reader: impl Read, limit: usize) -> io::Result<Vec<u8>> {
@@ -662,6 +902,7 @@ fn check_cancel(cancel: &AtomicBool) -> io::Result<()> {
     }
 }
 
+#[cfg(test)]
 fn parse_mlsd(bytes: &[u8]) -> io::Result<Listing> {
     parse_mlsd_with_policy(bytes, false)
 }

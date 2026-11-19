@@ -20,8 +20,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 use tempfile::NamedTempFile;
 
-const MAX_DEPTH: usize = 64;
-const MAX_ENTRIES: usize = 200_000;
+pub(super) const MAX_DEPTH: usize = 64;
+pub(super) const MAX_ENTRIES: usize = 200_000;
 type IgnorePath<'a> = dyn Fn(&Path, bool) -> bool + 'a;
 
 pub(super) fn ftp_ignores<'a>(
@@ -803,17 +803,22 @@ pub(super) fn scan(
             }
             let name = files::leaf_name(OsStr::new(&entry.name))?;
             let path = relative.join(name);
-            let directory = entry.directory.expect("strict FTP listing");
-            if !scope.visits(&path) || ignored(&path, directory) {
+            if !scope.visits(&path) || ignored(&path, entry.directory == Some(true)) {
                 continue;
             }
+            let directory = entry.directory.ok_or_else(|| {
+                io::Error::other(format!(
+                    "Der Eintrag „{}“ kann im Serverabgleich nicht als Datei oder Ordner geprüft werden.",
+                    path.display()
+                ))
+            })?;
             if expected.len() >= MAX_ENTRIES {
                 return Err(io::Error::other(
                     "Der FTP-Ordnerbaum enthält zu viele Einträge.",
                 ));
             }
             let info = EntryInfo {
-                size: (!directory).then(|| entry.size.expect("strict FTP file size")),
+                size: entry.size.filter(|_| !directory),
                 modified: modified(&entry)?,
             };
             tree.insert_remote(path.clone(), info)?;
@@ -1223,6 +1228,28 @@ mod tests {
                 .authenticate("test-only")
                 .unwrap(),
         );
+        compare_transfer_round_trip(session);
+    }
+
+    #[test]
+    #[ignore = "requires scripts/test-sftp-reference.py"]
+    fn sftp_search_and_bidirectional_sync() {
+        let session = Arc::new(
+            ftp::Connection::new(
+                &std::env::var("ARCO_SFTP_TEST_URL").unwrap(),
+                "arco",
+                ftp::Security::Sftp,
+            )
+            .unwrap()
+            .with_ssh(&std::env::var("ARCO_SFTP_TEST_FINGERPRINT").unwrap(), None)
+            .unwrap()
+            .authenticate("fixture-only")
+            .unwrap(),
+        );
+        compare_transfer_round_trip(session);
+    }
+
+    fn compare_transfer_round_trip(session: Arc<ftp::Session>) {
         let cancel = AtomicBool::new(false);
         let fixture = tempfile::tempdir().unwrap();
         let local = fixture.path().join("local");
@@ -1253,6 +1280,20 @@ mod tests {
         session
             .upload(&remote, &seed, "both.txt", false, &cancel)
             .unwrap();
+
+        let hits = super::super::ftp_panel::search_remote(
+            &crate::panel::FtpLocation {
+                session: session.clone(),
+                directory: remote.clone(),
+                profile: None,
+            },
+            |name| name == "probe.txt",
+            None,
+            &cancel,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 1);
 
         let options = Options {
             by_content: true,

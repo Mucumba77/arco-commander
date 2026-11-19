@@ -1,7 +1,7 @@
-use super::{Security, Session, Url, check_cancel, check_segment};
+use super::{AddressFamily, Security, Session, Url, check_cancel, check_segment};
 use percent_encoding::percent_decode_str;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, TcpStream, ToSocketAddrs};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
@@ -17,7 +17,10 @@ impl Session {
         cancel: &AtomicBool,
     ) -> io::Result<u64> {
         for session in [self, other] {
-            if session.connection.security != Security::Plain || session.connection.proxy.is_some()
+            if session.connection.security != Security::Plain
+                || session.connection.proxy.is_some()
+                || session.connection.options.otp
+                || session.connection.options.family == AddressFamily::Ipv6
             {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
@@ -51,7 +54,10 @@ impl Session {
         let expected = source.size(source_file, cancel)?;
         let (_, passive) = target.command("PASV", &[227], "PASV", cancel)?;
         let port = parse_passive_port(&passive)?;
-        let [a, b, c, d] = target.peer.octets();
+        let IpAddr::V4(peer) = target.peer else {
+            return Err(io::Error::other("FXP benötigt IPv4."));
+        };
+        let [a, b, c, d] = peer.octets();
         let [hi, lo] = port.to_be_bytes();
         source.command(
             &format!("PORT {a},{b},{c},{d},{hi},{lo}"),
@@ -107,41 +113,18 @@ fn check_target(
     }
 }
 
-struct Control {
+pub(super) struct Control {
     stream: BufReader<TcpStream>,
-    peer: Ipv4Addr,
+    pub peer: IpAddr,
+    encoding: &'static encoding_rs::Encoding,
 }
 
 impl Control {
+    pub fn encoding(&self) -> &'static encoding_rs::Encoding {
+        self.encoding
+    }
     fn connect(session: &Session, directory: &Url, cancel: &AtomicBool) -> io::Result<Self> {
-        let host = directory
-            .host_str()
-            .ok_or_else(|| io::Error::other("fehlender FTP-Host"))?;
-        let port = directory.port_or_known_default().unwrap_or(21);
-        let mut stream = None;
-        for address in (host, port)
-            .to_socket_addrs()?
-            .filter(SocketAddr::is_ipv4)
-            .take(4)
-        {
-            check_cancel(cancel)?;
-            if let Ok(connection) = TcpStream::connect_timeout(&address, Duration::from_secs(10)) {
-                stream = Some(connection);
-                break;
-            }
-        }
-        let stream = stream
-            .ok_or_else(|| io::Error::other("FXP konnte keine IPv4-Verbindung herstellen"))?;
-        let SocketAddr::V4(peer) = stream.peer_addr()? else {
-            return Err(io::Error::other("FXP benötigt IPv4"));
-        };
-        stream.set_read_timeout(Some(Duration::from_millis(400)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-        let mut control = Self {
-            stream: BufReader::new(stream),
-            peer: *peer.ip(),
-        };
-        control.expect(&[220], "Anmeldung", REPLY_TIMEOUT, cancel)?;
+        let mut control = Self::connect_peer(session, directory, AddressFamily::Ipv4, cancel)?;
         let (status, _) = control.command(
             &format!("USER {}", session.connection.user),
             &[230, 331],
@@ -153,32 +136,87 @@ impl Control {
             control.command(pass.as_str(), &[230], "PASS", cancel)?;
         }
         control.command("TYPE I", &[200], "TYPE I", cancel)?;
-        if directory.path().starts_with("//") {
-            control.command("CWD /", &[250], "CWD", cancel)?;
-        }
-        for segment in directory
-            .path()
-            .split('/')
-            .filter(|segment| !segment.is_empty())
-        {
-            let path = percent_decode_str(segment)
-                .decode_utf8()
-                .map_err(io::Error::other)?;
-            control.command(&format!("CWD {path}"), &[250], "CWD", cancel)?;
-        }
+        control.change_directory(directory.path(), cancel)?;
         Ok(control)
     }
 
-    fn send(&mut self, command: &str, cancel: &AtomicBool) -> io::Result<()> {
+    pub fn connect_peer(
+        session: &Session,
+        directory: &Url,
+        family: AddressFamily,
+        cancel: &AtomicBool,
+    ) -> io::Result<Self> {
+        let host = directory
+            .host_str()
+            .map(|host| host.trim_start_matches('[').trim_end_matches(']'))
+            .ok_or_else(|| io::Error::other("fehlender FTP-Host"))?;
+        let port = directory.port_or_known_default().unwrap_or(21);
+        let mut stream = None;
+        for address in (host, port)
+            .to_socket_addrs()?
+            .filter(|address| match family {
+                AddressFamily::Automatic => true,
+                AddressFamily::Ipv4 => address.is_ipv4(),
+                AddressFamily::Ipv6 => address.is_ipv6(),
+            })
+            .take(4)
+        {
+            check_cancel(cancel)?;
+            if let Ok(connection) = TcpStream::connect_timeout(&address, Duration::from_secs(10)) {
+                stream = Some(connection);
+                break;
+            }
+        }
+        let stream = stream
+            .ok_or_else(|| io::Error::other("FTP konnte keine Steuerverbindung herstellen"))?;
+        let peer = stream.peer_addr()?.ip();
+        stream.set_read_timeout(Some(Duration::from_millis(400)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        let mut control = Self {
+            stream: BufReader::new(stream),
+            peer,
+            encoding: session.connection.options.encoding,
+        };
+        control.expect(&[220], "Anmeldung", REPLY_TIMEOUT, cancel)?;
+        Ok(control)
+    }
+
+    pub fn change_directory(&mut self, path: &str, cancel: &AtomicBool) -> io::Result<()> {
+        if path.starts_with("//") {
+            self.command("CWD /", &[250], "CWD", cancel)?;
+        }
+        for (index, segment) in path
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .enumerate()
+        {
+            let segment = percent_decode_str(segment)
+                .decode_utf8()
+                .map_err(io::Error::other)?;
+            if !(index == 0 && segment == "/" && !path.starts_with("//")) {
+                check_segment(&segment)?;
+            }
+            self.command(&format!("CWD {segment}"), &[250], "CWD", cancel)?;
+        }
+        Ok(())
+    }
+
+    pub fn send(&mut self, command: &str, cancel: &AtomicBool) -> io::Result<()> {
         check_cancel(cancel)?;
         if command.chars().any(char::is_control) {
             return Err(io::Error::other("ungültiger FTP-Befehl"));
         }
-        self.stream.get_mut().write_all(command.as_bytes())?;
+        let (bytes, _, errors) = self.encoding.encode(command);
+        if errors {
+            return Err(io::Error::other(
+                "Der FTP-Befehl ist im Serverzeichensatz nicht darstellbar.",
+            ));
+        }
+        self.stream.get_mut().write_all(&bytes)?;
         self.stream.get_mut().write_all(b"\r\n")
     }
 
-    fn command(
+    pub fn command(
         &mut self,
         command: &str,
         codes: &[u16],
@@ -189,13 +227,32 @@ impl Control {
         self.expect(codes, operation, REPLY_TIMEOUT, cancel)
     }
 
-    fn expect(
+    pub fn expect(
         &mut self,
         codes: &[u16],
         operation: &str,
         timeout: Duration,
         cancel: &AtomicBool,
     ) -> io::Result<(u16, String)> {
+        let (status, response) = self.reply(timeout, cancel)?;
+        if !codes.contains(&status) {
+            return Err(io::Error::other(format!(
+                "FTP-Server meldet Status {status} bei {operation}"
+            )));
+        }
+        Ok((
+            status,
+            response
+                .lines()
+                .last()
+                .unwrap_or_default()
+                .get(4..)
+                .unwrap_or_default()
+                .to_owned(),
+        ))
+    }
+
+    pub fn reply(&mut self, timeout: Duration, cancel: &AtomicBool) -> io::Result<(u16, String)> {
         let deadline = Instant::now() + timeout;
         let line = self.read_line(deadline, cancel)?;
         let status = line
@@ -203,28 +260,23 @@ impl Control {
             .and_then(|status| status.parse::<u16>().ok())
             .ok_or_else(|| io::Error::other("ungültiger FTP-Status"))?;
         let separator = line.as_bytes().get(3);
-        let message = if separator == Some(&b'-') {
+        let mut response = line.clone();
+        if separator == Some(&b'-') {
             let terminator = format!("{status:03} ");
-            let mut end = None;
             for _ in 0..128 {
                 let line = self.read_line(deadline, cancel)?;
-                if let Some(last) = line.strip_prefix(&terminator) {
-                    end = Some(last.to_owned());
-                    break;
+                response.push('\n');
+                response.push_str(&line);
+                if line.starts_with(&terminator) {
+                    return Ok((status, response));
                 }
             }
-            end.ok_or_else(|| io::Error::other("mehrzeilige FTP-Antwort ist zu lang"))?
-        } else if separator == Some(&b' ') {
-            line[4..].to_owned()
-        } else {
-            return Err(io::Error::other("ungültige FTP-Antwort"));
-        };
-        if !codes.contains(&status) {
-            return Err(io::Error::other(format!(
-                "FTP-Server meldet Status {status} bei {operation}"
-            )));
+            return Err(io::Error::other("mehrzeilige FTP-Antwort ist zu lang"));
         }
-        Ok((status, message))
+        if separator != Some(&b' ') {
+            return Err(io::Error::other("ungültige FTP-Antwort"));
+        }
+        Ok((status, response))
     }
 
     fn read_line(&mut self, deadline: Instant, cancel: &AtomicBool) -> io::Result<String> {
@@ -248,7 +300,10 @@ impl Control {
                     ));
                 }
                 Ok(_) if bytes.last() == Some(&b'\n') => {
-                    return Ok(String::from_utf8_lossy(&bytes)
+                    return Ok(self
+                        .encoding
+                        .decode(&bytes)
+                        .0
                         .trim_end_matches(['\r', '\n'])
                         .to_owned());
                 }
@@ -270,7 +325,7 @@ impl Control {
     }
 }
 
-fn parse_passive_port(response: &str) -> io::Result<u16> {
+pub(super) fn parse_passive_port(response: &str) -> io::Result<u16> {
     let tuple = response
         .split_once('(')
         .and_then(|(_, after)| after.split_once(')').map(|(inside, _)| inside))

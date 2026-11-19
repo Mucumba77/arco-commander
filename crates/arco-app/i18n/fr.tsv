@@ -1277,3 +1277,70 @@ Wörterbuch in KiB (0 = automatisch)	Dictionnaire en Kio (0 = automatique)
 Wortgröße (0 = automatisch)	Taille des mots (0 = automatique)
 Solid-Block in MiB (0 = automatisch)	Bloc solide en Mio (0 = automatique)
 Eigene Speicher- und Threadwerte verwenden den mitgelieferten 7-Zip-Konsolenadapter.	Les valeurs personnalisées de mémoire et de threads utilisent l’adaptateur console 7-Zip fourni.
+Nur LIST (Unix / IIS / VMS)	LIST uniquement (Unix / IIS / VMS)
+HTTP-, SOCKS- oder FTP-Proxy	Proxy HTTP, SOCKS ou FTP
+IP-Version	Version IP
+Serverzeichensatz	Encodage du serveur
+Dateitransfers mit MODE Z komprimieren	Compresser les transferts de fichiers en MODE Z
+Versteckte Dateien mit LIST -a anfordern	Demander les fichiers cachés avec LIST -a
+Eigenes LIST-Format (regulärer Ausdruck)	Format LIST personnalisé (expression régulière)
+Benannte Gruppen: name, kind und optional size. Ein eigenes Format verwendet LIST.	Groupes nommés : name, kind et size (facultatif). Les formats personnalisés utilisent LIST.
+FTPS-Zertifikate	Certificats FTPS
+CA-Datei (PEM, optional)	Fichier d’autorité (PEM, facultatif)
+Clientzertifikat (Windows-Fingerabdruck, optional)	Certificat client (empreinte Windows, facultatif)
+Einmalpasswort nach RFC 2289 (OTP)	Mot de passe à usage unique RFC 2289 (OTP)
+FTP-Downloadliste …	Liste de téléchargements FTP…
+FTP-Downloadliste	Liste de téléchargements FTP
+FTP-Serverbefehl …	Commande du serveur FTP…
+FTP-Serverbefehl	Commande du serveur FTP
+FTP-Serverantwort	Réponse du serveur FTP
+FTP-Verbindungsdetails	Détails de la connexion FTP
+FTP-Rohliste	Liste FTP brute
+Gib die OTP-Passphrase ein. Der Server erhält nur den berechneten Einmalcode.	Saisissez la phrase secrète OTP. Le serveur reçoit uniquement le code à usage unique calculé.
+Gib einen FTP-Befehl für den aktuellen Ordner ein, zum Beispiel FEAT oder PWD.	Saisissez une commande pour le dossier FTP courant, par exemple FEAT ou PWD.
+FTP-Pfad oder URL	Chemin ou URL FTP
+Lädt eine Datei über einen Pfad oder eine URL des verbundenen FTP-Servers herunter.	Télécharge un fichier par son chemin ou son URL sur le serveur FTP connecté.
+Ein FTP-Pfad oder eine URL des verbundenen Servers pro Zeile. Die Dateien werden unter ihren Namen im lokalen Zielfenster gespeichert.	Saisissez un chemin ou une URL du serveur FTP connecté par ligne. Les fichiers gardent leur nom dans le panneau de destination local.
+Binär · Ziel muss neu sein	Binaire · Nouvelle destination uniquement
+Binär · Überschreiben erlauben	Binaire · Autoriser l’écrasement
+Text (ASCII) · Ziel muss neu sein	Texte (ASCII) · Nouvelle destination uniquement
+Text (ASCII) · Überschreiben erlauben	Texte (ASCII) · Autoriser l’écrasement
+Binär · Vorhandenen Upload prüfen und fortsetzen	Binaire · Vérifier et reprendre le téléversement
+Text (ASCII) herunterladen	Télécharger en mode texte (ASCII)
+Ein FTP-Pfad oder eine URL des verbundenen Servers pro Zeile. Mit @ vor einem absoluten Pfad liest Arco die Liste aus einer Textdatei.	Saisissez un chemin ou une URL du serveur FTP connecté par ligne. Faites précéder un chemin absolu de @ pour charger un fichier texte.
+FTP- und SFTP-Verbindungen	Connexions FTP et SFTP
+FTP- und SFTP-Verbindungen …	Connexions FTP et SFTP …
+Gespeicherte Verbindungen	Connexions enregistrées
+Serveradresse und Startordner	Adresse du serveur et dossier de départ
+Protokoll	Protocole
+SFTP verwendet SSH. Der Hostschlüssel muss beim Serverbetreiber geprüft werden.	SFTP utilise SSH. Vérifiez la clé d’hôte auprès de l’administrateur du serveur.
+SSH-Server und Schlüssel	Serveur SSH et clés
+SSH-Hostschlüssel (SHA256)	Clé d’hôte SSH (SHA256)
+Private SSH-Schlüsseldatei (optional)	Fichier de clé privée SSH (facultatif)
+Schlüsselpassphrase	Phrase secrète de la clé
+SFTP-Anmeldung	Connexion SFTP
+SFTP-Verbindung herstellen	Connexion SFTP en cours
+Gib die Passphrase der SSH-Schlüsseldatei ein. Ist sie unverschlüsselt, lass das Feld leer.	Saisissez la phrase secrète de la clé SSH. Laissez le champ vide si la clé est en clair.
+Gib das Passwort für diese SFTP-Verbindung ein.	Saisissez le mot de passe de cette connexion SFTP.
+SSH-Hostschlüssel	Clé d’hôte SSH
+Gib den beim Serverbetreiber überprüften SHA256-Fingerabdruck ein.	Saisissez l’empreinte SHA256 vérifiée auprès de l’administrateur du serveur.
+Netzwerkverbindung öffnen	Ouvrir une connexion réseau
+Serveradresse oder Servername:Port	Adresse du serveur ou nom d’hôte:port
+Netzwerk-Schnellverbindung …	Connexion réseau rapide …
+FTP- und SFTP-Dateioperationen	Opérations sur les fichiers FTP et SFTP
+Verbindungsdetails	Détails de la connexion
+SFTP-Verbindungsdetails	Détails de la connexion SFTP
+Serverordner mit lokalem Ordner abgleichen	Synchroniser les dossiers serveur et local
+Netzwerkverbindung trennen	Déconnecter la connexion réseau
+Öffne zuerst eine FTP- oder SFTP-Verbindung über Netz.	Ouvrez d’abord une connexion FTP ou SFTP depuis Réseau.
+Dieser Befehl benötigt eine FTP-Verbindung.	Cette commande nécessite une connexion FTP.
+SFTP hochladen	Téléverser via SFTP
+SFTP herunterladen	Télécharger via SFTP
+Die Datei wird zunächst unter einem temporären Namen übertragen.	Le fichier est d’abord transféré sous un nom temporaire.
+Lädt eine Datei über einen Pfad oder eine URL des verbundenen Servers herunter.	Télécharge un fichier à partir d’un chemin ou d’une URL du serveur connecté.
+Serverpfad oder URL	Chemin ou URL du serveur
+Server durchsuchen	Rechercher sur le serveur
+Durchsucht das aktuelle Serververzeichnis und seine Unterordner nach Dateimasken.	Recherche dans le dossier serveur courant et ses sous-dossiers selon les masques de fichiers.
+Serverordner	Dossier serveur
+Zum Treffer	Aller au résultat
+Treffer auf dem Server	Résultats sur le serveur

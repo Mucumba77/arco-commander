@@ -1250,6 +1250,9 @@ pub struct TcFtpSite {
     pub passive: Option<bool>,
     pub tls: bool,
     pub listing: FtpListing,
+    pub charset: String,
+    pub show_hidden: bool,
+    pub mode_z: bool,
     pub unsupported: bool,
 }
 
@@ -1258,6 +1261,8 @@ pub fn read_tc_ftp_ini(path: &Path) -> io::Result<Vec<(String, TcFtpSite)>> {
     let mut connections = BTreeMap::new();
     let mut sections = BTreeMap::<String, TcFtpSite>::new();
     let mut default_passive = false;
+    let mut default_hidden = false;
+    let mut default_mode_z = false;
     let mut external_connections = false;
     for (section, key, value) in ini_entries(&text) {
         match section.as_str() {
@@ -1269,11 +1274,15 @@ pub fn read_tc_ftp_ini(path: &Path) -> io::Result<Vec<(String, TcFtpSite)>> {
                 }
             }
             "default" if key == "pasvmode" => default_passive = value == "1",
+            "general" if key == "ftpshowhidden" => default_hidden = value == "1",
+            // 1 only enables compression outside the LAN. Do not turn it
+            // into unconditional compression on a migrated connection.
+            "general" if key == "modez" => default_mode_z = value == "2",
             _ => {
                 match key.as_str() {
                     "host" | "directory" | "localdir" | "username" | "anonymous" | "pasvmode"
                     | "ssl" | "mlsd" | "firewall" | "hosttype" | "clientcert" | "initcommands"
-                    | "acct" | "redirectsection" => (),
+                    | "acct" | "redirectsection" | "encoding" => (),
                     _ => continue,
                 }
                 let site = sections.entry(section).or_default();
@@ -1296,6 +1305,16 @@ pub fn read_tc_ftp_ini(path: &Path) -> io::Result<Vec<(String, TcFtpSite)>> {
                         site.unsupported |= !matches!(value, "" | "0" | "1");
                     }
                     "firewall" => site.unsupported |= !matches!(value, "" | "0"),
+                    "encoding" => match value {
+                        "" | "-1" | "65001" => (),
+                        "1250" | "1251" | "1252" | "1253" | "1254" | "1255" | "1256" | "1257"
+                        | "1258" => site.charset = format!("windows-{value}"),
+                        "932" => site.charset = "Shift_JIS".into(),
+                        "936" => site.charset = "GBK".into(),
+                        "949" => site.charset = "EUC-KR".into(),
+                        "950" => site.charset = "Big5".into(),
+                        _ => site.unsupported = true,
+                    },
                     "hosttype" | "clientcert" | "initcommands" | "acct" | "redirectsection" => {
                         site.unsupported |= !value.is_empty();
                     }
@@ -1317,6 +1336,8 @@ pub fn read_tc_ftp_ini(path: &Path) -> io::Result<Vec<(String, TcFtpSite)>> {
                 .remove(&name.to_ascii_lowercase())
                 .unwrap_or_default();
             site.passive.get_or_insert(default_passive);
+            site.show_hidden = default_hidden;
+            site.mode_z = default_mode_z;
             (name, site)
         })
         .collect())
@@ -2612,6 +2633,7 @@ pub enum FtpSecurity {
     ExplicitTls,
     ImplicitTls,
     Plain,
+    Sftp,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -2632,10 +2654,31 @@ pub struct FtpProfile {
     pub proxy: String,
     pub active: bool,
     pub listing: FtpListing,
+    pub address_family: FtpAddressFamily,
+    pub charset: String,
+    pub list_pattern: String,
+    pub show_hidden: bool,
+    pub ca_bundle: Option<PathBuf>,
+    pub client_certificate: Option<String>,
+    pub mode_z: bool,
+    pub otp: bool,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub ssh_fingerprint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_private_key: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_directory: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credential: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FtpAddressFamily {
+    #[default]
+    Automatic,
+    Ipv4,
+    Ipv6,
 }
 
 impl Profile {

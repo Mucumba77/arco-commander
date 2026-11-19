@@ -149,12 +149,22 @@ pub enum Pending {
     ArchiveContext,
     FtpConnect(usize),
     FtpPassword(usize, ftp::Connection),
+    SftpFingerprint(usize, ftp::Connection),
     FtpProfilePassword(usize, ftp::Connection, Option<PathBuf>, String),
     FtpProfileDelete(String),
     FtpProfileImport,
     ApplyFtpImport(std::collections::BTreeMap<String, profile::FtpProfile>),
     FtpDirectory(FtpEndpoint, Option<usize>),
     FtpDownload(FtpEndpoint, PathBuf),
+    FtpDownloadList(FtpEndpoint, PathBuf),
+    FtpServerCommand(FtpEndpoint),
+    FtpSearch(usize, u64, crate::panel::FtpLocation),
+    FtpSearchHit(
+        usize,
+        u64,
+        crate::panel::FtpLocation,
+        Vec<crate::app::FtpSearchHit>,
+    ),
     FtpUpload(FtpEndpoint, PathBuf),
     FtpPanelEdit(FtpLocation, FtpEdit),
     FtpPanelContext,
@@ -367,14 +377,14 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("Dateien packen", "zip-pack"),
     ("Archiv entpacken", "zip-extract"),
     ("Archiv prüfen", "zip-test"),
-    ("FTP verbinden", "ftp-connect"),
+    ("Netzwerkverbindung öffnen", "ftp-connect"),
     ("Windows-Ordner öffnen", "known-folder"),
     ("Netzlaufwerk verbinden", "map-drive"),
     ("Netzlaufwerk trennen", "unmap-drive"),
     ("Lokale Windows-Freigaben", "shares"),
     ("Windows-Freigabe erstellen", "share-create"),
     ("Datenträgerbezeichnung ändern", "volume-label"),
-    ("FTP-Verbindungsprofile", "ftp-profiles"),
+    ("FTP- und SFTP-Verbindungen …", "ftp-profiles"),
     ("FTP-Unix-Rechte ändern", "ftp-permissions"),
     ("Offene FTP-Bearbeitungen", "ftp-edits"),
     ("Ordner-Tab verwalten", "tab-menu"),
@@ -394,6 +404,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("FTP-Verzeichnis anzeigen", "ftp-list"),
     ("FTP-Ordner wechseln", "ftp-directory"),
     ("FTP herunterladen", "ftp-download"),
+    ("FTP-Downloadliste …", "ftp-download-list"),
+    ("FTP-Serverbefehl …", "ftp-command"),
+    ("FTP-Verbindungsdetails", "ftp-details"),
+    ("FTP-Rohliste", "ftp-raw-list"),
     ("FTP hochladen", "ftp-upload"),
     ("FTP mit lokalem Ordner abgleichen", "ftp-sync"),
     ("FTP-Ordner als FXP-Quelle merken", "ftp-fxp-source"),
@@ -867,6 +881,10 @@ impl App {
                     | "ftp-list"
                     | "ftp-directory"
                     | "ftp-download"
+                    | "ftp-download-list"
+                    | "ftp-command"
+                    | "ftp-details"
+                    | "ftp-raw-list"
                     | "ftp-upload"
                     | "ftp-sync"
                     | "ftp-close"
@@ -1091,6 +1109,18 @@ impl App {
                 if let Some(plan) = self.undo.clone() { self.rename_review(plan); }
                 else { self.status("Keine Umbenennung in dieser Sitzung verfügbar."); }
             }
+            "search" if ftp => {
+                if let Some(tab) = self.current().ftp.as_ref() {
+                    self.dialog("input", Pending::FtpSearch(side, self.panels[side].request, tab.location.clone()), Dialog {
+                        title: "Server durchsuchen",
+                        description: "Durchsucht das aktuelle Serververzeichnis und seine Unterordner nach Dateimasken.",
+                        value: "*",
+                        placeholder: "Dateimaske",
+                        confirm_label: "Suchen",
+                        ..Default::default()
+                    });
+                }
+            }
             "search" if self.current().is_local() || self.current().archive.is_some() => self.open_advanced_search(),
             "search" => {
                 let archive = self.current().archive.clone();
@@ -1175,7 +1205,7 @@ impl App {
                 if let Some(archive) = &self.current().archive { self.archive_read_dialog(archive.file.clone(), true); }
             }
             "zip-extract" | "zip-test" => self.with_file(|app, path| app.archive_read_dialog(path, command == "zip-test")),
-            "ftp-connect" | "ftp-list" | "ftp-directory" | "ftp-download" | "ftp-upload" | "ftp-sync" | "ftp-close"
+            "ftp-connect" | "ftp-list" | "ftp-directory" | "ftp-download" | "ftp-download-list" | "ftp-command" | "ftp-details" | "ftp-raw-list" | "ftp-upload" | "ftp-sync" | "ftp-close"
                 | "ftp-fxp-source" | "ftp-fxp" | "ftp-fxp-clear" => self.ftp_action(command),
             "ftp-profiles" => self.open_ftp_profiles(None),
             "ftp-permissions" => self.ftp_panel_edit_dialog(command),
@@ -2309,12 +2339,23 @@ impl App {
                 );
             }
             Pending::FtpConnect(side) => {
-                let security = match option {
-                    1 => ftp::Security::ImplicitTls,
-                    2 => ftp::Security::Plain,
+                let security = match (option, value.trim().starts_with("sftp://")) {
+                    (3, _) | (_, true) => ftp::Security::Sftp,
+                    (1, _) => ftp::Security::ImplicitTls,
+                    (2, _) => ftp::Security::Plain,
                     _ => ftp::Security::ExplicitTls,
                 };
                 let connection = ftp::Connection::new(value.trim(), second, security)?;
+                if security == ftp::Security::Sftp {
+                    self.dialog("input", Pending::SftpFingerprint(side, connection), Dialog {
+                        title: "SSH-Hostschlüssel",
+                        description: "Gib den beim Serverbetreiber überprüften SHA256-Fingerabdruck ein.",
+                        placeholder: "SHA256:…",
+                        confirm_label: "Weiter",
+                        ..Default::default()
+                    });
+                    return Ok(());
+                }
                 self.dialog(
                     "input",
                     Pending::FtpPassword(side, connection),
@@ -2328,6 +2369,21 @@ impl App {
                         placeholder: "Passwort",
                         second_placeholder: "HTTP-/SOCKS-Proxy (optional)",
                         secret: true,
+                        ..Default::default()
+                    },
+                );
+            }
+            Pending::SftpFingerprint(side, connection) => {
+                let connection = connection.with_ssh(value, None)?;
+                self.dialog(
+                    "input",
+                    Pending::FtpPassword(side, connection),
+                    Dialog {
+                        title: "SFTP-Anmeldung",
+                        description: "Gib das Passwort für diese SFTP-Verbindung ein.",
+                        placeholder: "Passwort",
+                        secret: true,
+                        confirm_label: "Verbinden",
                         ..Default::default()
                     },
                 );
@@ -2364,12 +2420,12 @@ impl App {
                 }
             }
             Pending::FtpDownload((session, directory), target) => {
+                let (directory, name) = session.download_location(&directory, value)?;
                 let target = target.join(tools::output_name(if second.is_empty() {
-                    value
+                    &name
                 } else {
                     second
                 })?);
-                let name = value.to_string();
                 let source = format!("{directory}{name}");
                 let description = JobDescription::new(
                     crate::OperationKind::Ftp,
@@ -2384,6 +2440,14 @@ impl App {
                     });
                     if option == 1 {
                         session.download_resuming(&directory, &name, &target, &job.cancel)?;
+                    } else if option == 2 {
+                        session.download_text(
+                            &directory,
+                            &name,
+                            &target,
+                            &job.cancel,
+                            job.ftp_download_progress(source, None),
+                        )?;
                     } else {
                         session.download_with_progress(
                             &directory,
@@ -2402,6 +2466,33 @@ impl App {
                     ))
                 });
             }
+            Pending::FtpDownloadList(endpoint, target) => {
+                self.ftp_download_list(endpoint, target, value)?
+            }
+            Pending::FtpServerCommand((session, directory)) => {
+                let command = value.to_owned();
+                self.start_operation_job(
+                    "FTP-Serverbefehl …",
+                    false,
+                    JobDescription::new(
+                        crate::OperationKind::Ftp,
+                        directory.to_string(),
+                        String::new(),
+                    ),
+                    move |job| {
+                        Ok(Outcome::Text(
+                            "FTP-Serverantwort".into(),
+                            session.server_command(&directory, &command, &job.cancel)?,
+                        ))
+                    },
+                );
+            }
+            Pending::FtpSearch(side, request, location) => {
+                self.search_ftp(side, request, location, value)?;
+            }
+            Pending::FtpSearchHit(side, request, location, hits) => {
+                self.open_ftp_search_hit(side, request, location, &hits, option)?;
+            }
             Pending::FtpUpload((session, directory), source) => {
                 let name = value.to_string();
                 let in_panel = self.panels.iter().any(|panel| {
@@ -2417,7 +2508,23 @@ impl App {
                 );
                 self.enqueue_virtual_operation("FTP-Upload", in_panel, description, move |job| {
                     job.phase("FTP-Datei hochladen …");
-                    session.upload(&directory, &source, &name, option == 1, &job.cancel)?;
+                    if option == 4 {
+                        session.upload_resuming(&directory, &source, &name, &job.cancel)?;
+                    } else {
+                        let mode = if matches!(option, 2 | 3) {
+                            ftp::TransferMode::Text
+                        } else {
+                            ftp::TransferMode::Binary
+                        };
+                        session.upload_with_mode(
+                            &directory,
+                            &source,
+                            &name,
+                            matches!(option, 1 | 3),
+                            mode,
+                            &job.cancel,
+                        )?;
+                    }
                     if in_panel {
                         return Ok(Outcome::Report(
                             format!("FTP-Upload · {name}"),
@@ -3637,7 +3744,10 @@ impl App {
             }
             return;
         };
-        if ftp.listing.format != ftp::ListFormat::Mlsd {
+        if !matches!(
+            ftp.listing.format,
+            ftp::ListFormat::Mlsd | ftp::ListFormat::Sftp
+        ) {
             self.status("FTP-Schreiboperationen im Dateifenster benötigen MLSD.");
             return;
         }
@@ -3720,13 +3830,14 @@ impl App {
                 "input",
                 Pending::FtpConnect(self.active),
                 Dialog {
-                    title: "FTP verbinden",
-                    placeholder: "FTP-Adresse oder Servername:Port",
+                    title: "Netzwerkverbindung öffnen",
+                    placeholder: "Serveradresse oder Servername:Port",
                     second_placeholder: "Benutzername (optional)",
                     options: &[
                         crate::locale::tr("Explizites FTPS"),
                         crate::locale::tr("Implizites FTPS (ftps://)"),
                         crate::locale::tr("Klartext-FTP"),
+                        "SFTP (SSH)".into(),
                     ],
                     ..Default::default()
                 },
@@ -3734,9 +3845,19 @@ impl App {
             return;
         }
         let Some((session, directory)) = self.ftp_endpoint() else {
-            self.status("Öffne zuerst eine FTP-Verbindung über Netz.");
+            self.status("Öffne zuerst eine FTP- oder SFTP-Verbindung über Netz.");
             return;
         };
+        let sftp = session.is_sftp();
+        if sftp
+            && matches!(
+                command,
+                "ftp-raw-list" | "ftp-command" | "ftp-fxp-source" | "ftp-fxp"
+            )
+        {
+            self.status("Dieser Befehl benötigt eine FTP-Verbindung.");
+            return;
+        }
         match command {
             "ftp-sync" => self.open_ftp_sync(),
             "ftp-list" => self.load_ftp(session, directory),
@@ -3757,6 +3878,26 @@ impl App {
                 });
             }
             "ftp-download" => self.ftp_download_dialog(""),
+            "ftp-download-list" => self.ftp_download_list_dialog((session, directory)),
+            "ftp-command" => self.dialog("input", Pending::FtpServerCommand((session, directory)), Dialog {
+                title: "FTP-Serverbefehl",
+                description: "Gib einen FTP-Befehl für den aktuellen Ordner ein, zum Beispiel FEAT oder PWD.",
+                placeholder: "FEAT",
+                confirm_label: "Senden",
+                ..Default::default()
+            }),
+            "ftp-details" | "ftp-raw-list" => {
+                let raw = command == "ftp-raw-list";
+                let title = if raw { "FTP-Rohliste" } else if sftp { "SFTP-Verbindungsdetails" } else { "FTP-Verbindungsdetails" };
+                self.start_operation_job(title, false, JobDescription::new(crate::OperationKind::Ftp, directory.to_string(), String::new()), move |job| {
+                    let text = if raw {
+                        session.raw_listing(&directory, &job.cancel)?
+                    } else {
+                        session.connection_details(&directory, &job.cancel)?
+                    };
+                    Ok(Outcome::Text(title.into(), text))
+                });
+            }
             "ftp-upload" => {
                 let local = if self.current().ftp.is_some() {
                     self.panels[1 - self.active].current()
@@ -3776,10 +3917,17 @@ impl App {
                     .unwrap_or_default()
                     .to_string_lossy()
                     .into_owned();
+                let options = [
+                    crate::locale::tr("Binär · Ziel muss neu sein"),
+                    crate::locale::tr("Binär · Überschreiben erlauben"),
+                    crate::locale::tr("Text (ASCII) · Ziel muss neu sein"),
+                    crate::locale::tr("Text (ASCII) · Überschreiben erlauben"),
+                    crate::locale::tr("Binär · Vorhandenen Upload prüfen und fortsetzen"),
+                ];
                 self.dialog("input", Pending::FtpUpload((session, directory), source), Dialog {
-                    title: "FTP hochladen", value: &name, placeholder: "Entfernter Dateiname",
-                    description: "Die Datei wird direkt an den Server übertragen. Nach einem Abbruch kann dort eine Teildatei liegen.",
-                    options: &[crate::locale::tr("Vorhandene Namen im Verzeichnis erkennen"), crate::locale::tr("Überschreiben erlauben")], ..Default::default()
+                    title: if sftp { "SFTP hochladen" } else { "FTP hochladen" }, value: &name, placeholder: "Entfernter Dateiname",
+                    description: if sftp { "Die Datei wird zunächst unter einem temporären Namen übertragen." } else { "Die Datei wird direkt an den Server übertragen. Nach einem Abbruch kann dort eine Teildatei liegen." },
+                    options: &options[..if sftp { 2 } else { options.len() }], ..Default::default()
                 });
             }
             "ftp-close" if self.job.is_none() => self.disconnect_ftp(),
@@ -3827,19 +3975,22 @@ impl App {
             self.status("Wähle einen lokalen Zielordner.");
             return;
         }
+        let sftp = endpoint.0.is_sftp();
+        let options = [
+            crate::locale::tr("Neu herunterladen"),
+            crate::locale::tr("Fortsetzbaren Download verwenden"),
+            crate::locale::tr("Text (ASCII) herunterladen"),
+        ];
         self.dialog(
             "input",
             Pending::FtpDownload(endpoint, target.path.clone()),
             Dialog {
-                title: "FTP herunterladen",
-                description: "Speichert eine Datei aus dem FTP-Ordner im aktiven lokalen Fenster.",
+                title: if sftp { "SFTP herunterladen" } else { "FTP herunterladen" },
+                description: "Lädt eine Datei über einen Pfad oder eine URL des verbundenen Servers herunter.",
                 value: name,
-                placeholder: "Entfernter Dateiname",
+                placeholder: "Serverpfad oder URL",
                 second_placeholder: "Lokaler Name (optional)",
-                options: &[
-                    crate::locale::tr("Neu herunterladen"),
-                    crate::locale::tr("Fortsetzbaren Download verwenden"),
-                ],
+                options: if sftp { &[] } else { &options },
                 ..Default::default()
             },
         );

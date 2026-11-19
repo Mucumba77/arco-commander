@@ -31,6 +31,7 @@ DOCS = (
     "docs/SUCHE-UND-WERKZEUGE.md", "docs/AREA3-ABSCHLUSS.md",
     "docs/NAVIGATION-UND-DATEIEN.md", "docs/BEREICH1-2-ABSCHLUSS.md",
     "docs/ARCHIVE.md", "docs/AREA4-ABSCHLUSS.md",
+    "docs/FTP.md", "docs/SFTP.md",
     "docs/branding/arco-commander.svg",
     "docs/screenshots/hauptfenster.jpg", "docs/screenshots/kopierfortschritt.jpg",
     "docs/screenshots/lister.jpg",
@@ -97,6 +98,11 @@ def write_notices(stage, packages):
             path = (crate / package["license_file"]).resolve()
             if path.is_file() and path.is_relative_to(crate.resolve()):
                 files.add(path)
+        if name == "libssh2-sys":
+            files.add(crate / "libssh2" / "COPYING")
+            files.update((crate / "libssh2" / "LICENSES").glob("*.txt"))
+        if name == "libz-sys":
+            files.add(crate / "src" / "zlib" / "LICENSE")
         for path in sorted(files):
             destination = licenses / f"{name}-{version}" / path.relative_to(crate)
             destination.parent.mkdir(parents=True, exist_ok=True)

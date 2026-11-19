@@ -2,7 +2,7 @@ use super::{App, Navigation, Outcome, strings};
 use crate::FtpProfileData;
 use crate::commands::{Dialog, Pending};
 use crate::panel::{FtpLocation, Location};
-use arco_core::profile::{self, FtpListing, FtpProfile, FtpSecurity, TcFtpSite};
+use arco_core::profile::{self, FtpAddressFamily, FtpListing, FtpProfile, FtpSecurity, TcFtpSite};
 use arco_windows::ftp::{self, Connection, Url};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -15,16 +15,36 @@ fn connection(profile: &FtpProfile) -> io::Result<Connection> {
         FtpSecurity::ExplicitTls => ftp::Security::ExplicitTls,
         FtpSecurity::ImplicitTls => ftp::Security::ImplicitTls,
         FtpSecurity::Plain => ftp::Security::Plain,
+        FtpSecurity::Sftp => ftp::Security::Sftp,
     };
     let listing = match profile.listing {
         FtpListing::Automatic => ftp::ListingMode::Automatic,
         FtpListing::Mlsd => ftp::ListingMode::Mlsd,
         FtpListing::List => ftp::ListingMode::List,
     };
-    Connection::new(&profile.address, &profile.user, mode)?
+    let connection = Connection::new(&profile.address, &profile.user, mode)?
         .with_proxy(&profile.proxy)?
         .with_listing_mode(listing)
-        .with_active_mode(profile.active)
+        .with_active_mode(profile.active)?
+        .with_options(ftp::ConnectionOptions {
+            family: match profile.address_family {
+                FtpAddressFamily::Automatic => ftp::AddressFamily::Automatic,
+                FtpAddressFamily::Ipv4 => ftp::AddressFamily::Ipv4,
+                FtpAddressFamily::Ipv6 => ftp::AddressFamily::Ipv6,
+            },
+            charset: profile.charset.clone(),
+            list_pattern: profile.list_pattern.clone(),
+            show_hidden: profile.show_hidden,
+            ca_bundle: profile.ca_bundle.clone(),
+            client_certificate: profile.client_certificate.clone(),
+            mode_z: profile.mode_z,
+            otp: profile.otp,
+        })?;
+    if mode == ftp::Security::Sftp {
+        connection.with_ssh(&profile.ssh_fingerprint, profile.ssh_private_key.clone())
+    } else {
+        Ok(connection)
+    }
 }
 
 fn validate_name(name: &str) -> io::Result<()> {
@@ -100,6 +120,9 @@ fn profile_from_tc(site: TcFtpSite) -> io::Result<FtpProfile> {
         security,
         active: !site.passive.unwrap_or(true),
         listing: site.listing,
+        charset: site.charset,
+        show_hidden: site.show_hidden,
+        mode_z: site.mode_z,
         local_directory: site.local_directory,
         ..FtpProfile::default()
     };
@@ -153,6 +176,7 @@ impl App {
                         FtpSecurity::ExplicitTls => 0,
                         FtpSecurity::ImplicitTls => 1,
                         FtpSecurity::Plain => 2,
+                        FtpSecurity::Sftp => 3,
                     },
                     active: profile.active,
                     listing: match profile.listing {
@@ -161,6 +185,30 @@ impl App {
                         FtpListing::List => 2,
                     },
                     remember: profile.credential.is_some(),
+                    address_family: match profile.address_family {
+                        FtpAddressFamily::Automatic => 0,
+                        FtpAddressFamily::Ipv4 => 1,
+                        FtpAddressFamily::Ipv6 => 2,
+                    },
+                    charset: profile.charset.as_str().into(),
+                    list_pattern: profile.list_pattern.as_str().into(),
+                    show_hidden: profile.show_hidden,
+                    ca_bundle: profile
+                        .ca_bundle
+                        .as_ref()
+                        .map_or_else(Default::default, |path| crate::display_path(path).into()),
+                    client_certificate: profile
+                        .client_certificate
+                        .as_deref()
+                        .unwrap_or_default()
+                        .into(),
+                    mode_z: profile.mode_z,
+                    otp: profile.otp,
+                    ssh_fingerprint: profile.ssh_fingerprint.as_str().into(),
+                    ssh_private_key: profile
+                        .ssh_private_key
+                        .as_ref()
+                        .map_or_else(Default::default, |path| crate::display_path(path).into()),
                 });
         ui.set_ftp_profile_index(index);
         ui.set_ftp_profile_data(draft);
@@ -258,6 +306,7 @@ impl App {
             security: match data.security {
                 1 => FtpSecurity::ImplicitTls,
                 2 => FtpSecurity::Plain,
+                3 => FtpSecurity::Sftp,
                 _ => FtpSecurity::ExplicitTls,
             },
             active: data.active,
@@ -266,6 +315,23 @@ impl App {
                 2 => FtpListing::List,
                 _ => FtpListing::Automatic,
             },
+            address_family: match data.address_family {
+                1 => FtpAddressFamily::Ipv4,
+                2 => FtpAddressFamily::Ipv6,
+                _ => FtpAddressFamily::Automatic,
+            },
+            charset: data.charset.trim().into(),
+            list_pattern: data.list_pattern.trim().into(),
+            show_hidden: data.show_hidden,
+            ca_bundle: (!data.ca_bundle.trim().is_empty())
+                .then(|| PathBuf::from(data.ca_bundle.trim())),
+            client_certificate: (!data.client_certificate.trim().is_empty())
+                .then(|| data.client_certificate.trim().to_owned()),
+            mode_z: data.mode_z,
+            otp: data.otp,
+            ssh_fingerprint: data.ssh_fingerprint.trim().into(),
+            ssh_private_key: (!data.ssh_private_key.trim().is_empty())
+                .then(|| PathBuf::from(data.ssh_private_key.trim())),
             local_directory: (!local.is_empty()).then(|| PathBuf::from(local)),
             credential: None,
         };
@@ -356,8 +422,14 @@ impl App {
             );
         }
         self.dialog("input", Pending::FtpProfilePassword(self.active, connection, profile.local_directory, name), Dialog {
-            title: "FTP-Anmeldung",
-            description: if profile.security == FtpSecurity::Plain {
+            title: if profile.security == FtpSecurity::Sftp { "SFTP-Anmeldung" } else { "FTP-Anmeldung" },
+            description: if profile.ssh_private_key.is_some() {
+                "Gib die Passphrase der SSH-Schlüsseldatei ein. Ist sie unverschlüsselt, lass das Feld leer."
+            } else if profile.security == FtpSecurity::Sftp {
+                "Gib das Passwort für diese SFTP-Verbindung ein."
+            } else if profile.otp {
+                "Gib die OTP-Passphrase ein. Der Server erhält nur den berechneten Einmalcode."
+            } else if profile.security == FtpSecurity::Plain {
                 "Klartext-FTP überträgt Anmeldung und Dateien unverschlüsselt."
             } else if profile.credential.is_some() {
                 "Das gespeicherte Passwort ist auf diesem Windows-Konto nicht verfügbar."
@@ -400,6 +472,11 @@ impl App {
             ));
         }
         let session = Arc::new(connection.authenticate(password)?);
+        let job_title = if session.is_sftp() {
+            "SFTP-Verbindung herstellen"
+        } else {
+            "FTP-Verbindung herstellen"
+        };
         let deferred = self.panels[side].current().deferred.as_ref();
         let (directory, navigation) = match deferred {
             Some(arco_core::profile::VirtualTab::Ftp {
@@ -428,26 +505,21 @@ impl App {
             location.display(),
             String::new(),
         );
-        self.start_operation_job(
-            "FTP-Verbindung herstellen",
-            false,
-            description,
-            move |job| {
-                job.phase("Anmelden und Verzeichnis laden …");
-                let Location::Ftp(ftp) = &location else {
-                    unreachable!()
-                };
-                let directory = super::ftp_panel::read_panel(ftp, &job.cancel)?;
-                arco_core::files::check_cancel(&job.cancel)?;
-                Ok(Outcome::FtpMounted {
-                    side,
-                    request,
-                    location,
-                    navigation,
-                    directory: Box::new(directory),
-                })
-            },
-        );
+        self.start_operation_job(job_title, false, description, move |job| {
+            job.phase("Anmelden und Verzeichnis laden …");
+            let Location::Ftp(ftp) = &location else {
+                unreachable!()
+            };
+            let directory = super::ftp_panel::read_panel(ftp, &job.cancel)?;
+            arco_core::files::check_cancel(&job.cancel)?;
+            Ok(Outcome::FtpMounted {
+                side,
+                request,
+                location,
+                navigation,
+                directory: Box::new(directory),
+            })
+        });
         Ok(())
     }
 
@@ -534,6 +606,7 @@ impl App {
                         FtpSecurity::ExplicitTls => "Explizites FTPS",
                         FtpSecurity::ImplicitTls => "Implizites FTPS",
                         FtpSecurity::Plain => "Klartext-FTP",
+                        FtpSecurity::Sftp => "SFTP (SSH)",
                     };
                     let _ = writeln!(report, "Übernehmen: {name} · {mode} · {}", profile.address);
                     rows.push(crate::ReviewRow {
@@ -611,11 +684,15 @@ mod tests {
 [connections]
 1=München
 2=Andere
+[General]
+FtpShowHidden=1
+ModeZ=2
 [München]
 host=ftpis://example.invalid:992
 directory=/Fotos 2026/Äste
 pasvmode=1
 mlsd=0
+encoding=1252
 username=arco
 password=test-only-secret
 [Andere]
@@ -637,6 +714,9 @@ firewall=1
         );
         assert_eq!(profile.security, FtpSecurity::ImplicitTls);
         assert_eq!(profile.listing, FtpListing::List);
+        assert_eq!(profile.charset, "windows-1252");
+        assert!(profile.show_hidden);
+        assert!(profile.mode_z);
         assert_eq!(profile.user, "arco");
         assert!(!profile.active);
         assert!(profile.credential.is_none());
