@@ -3,6 +3,15 @@
 pub mod ftp;
 
 #[cfg(windows)]
+pub mod console_cancel;
+#[cfg(windows)]
+pub mod session_protocol;
+#[cfg(windows)]
+pub mod session_registry;
+#[cfg(windows)]
+pub mod task_schedule;
+
+#[cfg(windows)]
 mod rich_text;
 #[cfg(windows)]
 pub use rich_text::RichTextView;
@@ -210,8 +219,9 @@ pub fn total_commander_install() -> Option<PathBuf> {
 mod shell_actions;
 #[cfg(windows)]
 pub use shell_actions::{
-    ShellProgram, create_shortcut, encode_system_text, execute_verb, launch_with_window,
-    parse_windows_arguments, replace_preserving_attributes, short_path,
+    ShellProgram, create_shortcut, create_shortcut_with_arguments, encode_system_text,
+    execute_verb, launch_with_window, parse_windows_arguments, replace_preserving_attributes,
+    short_path,
 };
 
 #[cfg(not(windows))]
@@ -221,6 +231,11 @@ pub fn parse_windows_arguments(_: &str) -> io::Result<Vec<String>> {
 
 #[cfg(not(windows))]
 pub fn create_shortcut(_: &Path, _: &Path) -> io::Result<()> {
+    Err(unsupported())
+}
+
+#[cfg(not(windows))]
+pub fn create_shortcut_with_arguments(_: &Path, _: &Path, _: &str) -> io::Result<()> {
     Err(unsupported())
 }
 

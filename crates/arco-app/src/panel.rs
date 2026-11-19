@@ -484,6 +484,7 @@ fn short_label(label: &str, width: usize) -> slint::SharedString {
 }
 
 pub struct Tab {
+    pub(crate) navigation_id: u64,
     pub path: PathBuf,
     pub options: SavedTab,
     pub lock_base: Option<Location>,
@@ -581,6 +582,9 @@ impl Tab {
                 ftp::ListFormat::List => "FTP · LIST",
                 ftp::ListFormat::Names => tr("FTP · Namensliste"),
                 ftp::ListFormat::Sftp => "SFTP · SSH",
+                ftp::ListFormat::Scp => "SCP · SSH",
+                ftp::ListFormat::WebDav => "WebDAV",
+                ftp::ListFormat::S3 => "S3",
             }
             .into()
         } else if self.archive.is_some() {
@@ -595,6 +599,8 @@ impl Tab {
     }
 
     pub fn new(path: PathBuf) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let cursor = usize::from(path.parent().is_some());
         let entries = Rc::new(Vec::new());
         let selection = Rc::new(RefCell::new(BTreeSet::new()));
@@ -606,6 +612,7 @@ impl Tab {
             Rc::default(),
         ));
         Self {
+            navigation_id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             path,
             options: SavedTab::default(),
             lock_base: None,

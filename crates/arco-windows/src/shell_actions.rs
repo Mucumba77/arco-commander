@@ -188,6 +188,14 @@ pub fn parse_windows_arguments(arguments: &str) -> io::Result<Vec<String>> {
 }
 
 pub fn create_shortcut(source: &Path, target: &Path) -> io::Result<()> {
+    create_shortcut_with_arguments(source, target, "")
+}
+
+pub fn create_shortcut_with_arguments(
+    source: &Path,
+    target: &Path,
+    arguments: &str,
+) -> io::Result<()> {
     if !source.is_absolute()
         || !target.is_absolute()
         || !target
@@ -199,6 +207,12 @@ pub fn create_shortcut(source: &Path, target: &Path) -> io::Result<()> {
             "Eine Verknüpfung benötigt absolute Pfade und die Endung .lnk.",
         ));
     }
+    if arguments.chars().any(char::is_control) || arguments.encode_utf16().count() > 4096 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Ungültige Argumente für die Windows-Verknüpfung.",
+        ));
+    }
     let directory = target
         .parent()
         .ok_or_else(|| io::Error::other("Der Zielordner fehlt."))?;
@@ -207,6 +221,7 @@ pub fn create_shortcut(source: &Path, target: &Path) -> io::Result<()> {
     let source_name = wide(source)?;
     let staged_name = wide(&staged)?;
     let working = source.parent().map(wide).transpose()?;
+    let arguments = arguments.encode_utf16().chain([0]).collect::<Vec<_>>();
     let apartment = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
     if apartment.0 != RPC_E_CHANGED_MODE {
         apartment.ok().map_err(io::Error::other)?;
@@ -215,6 +230,9 @@ pub fn create_shortcut(source: &Path, target: &Path) -> io::Result<()> {
         let link: IShellLinkW =
             unsafe { CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)? };
         unsafe { link.SetPath(PCWSTR(source_name.as_ptr()))? };
+        if arguments.len() > 1 {
+            unsafe { link.SetArguments(PCWSTR(arguments.as_ptr()))? };
+        }
         if let Some(working) = working {
             unsafe { link.SetWorkingDirectory(PCWSTR(working.as_ptr()))? };
         }
@@ -297,5 +315,18 @@ mod tests {
         assert_eq!(link[..4], 76u32.to_le_bytes());
         assert!(create_shortcut(&source, &target).is_err());
         assert_eq!(fs::read(target).unwrap(), link);
+        let target = fixture.path().join("Server.lnk");
+        let arguments = r#"--session-url "arco://session/Team%20Gr%C3%BCn""#;
+        create_shortcut_with_arguments(&source, &target, arguments).unwrap();
+        let encoded = arguments
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        assert!(
+            fs::read(target)
+                .unwrap()
+                .windows(encoded.len())
+                .any(|part| part == encoded)
+        );
     }
 }

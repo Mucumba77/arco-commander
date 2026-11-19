@@ -1,10 +1,11 @@
 [workspace]
 members = ["crates/arco-app", "crates/arco-core", "crates/arco-windows", "crates/arco-plugin-host"]
 default-members = ["crates/arco-app"]
+exclude = ["vendor/russh"]
 resolver = "3"
 
 [workspace.package]
-version = "1.6.0"
+version = "1.7.0"
 edition = "2024"
 rust-version = "1.93"
 license = "MIT"
@@ -20,3 +21,6 @@ tempfile = "3"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+
+[patch.crates-io]
+russh = { path = "vendor/russh" }

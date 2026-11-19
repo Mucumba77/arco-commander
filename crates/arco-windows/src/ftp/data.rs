@@ -20,7 +20,18 @@ impl Session {
             if mode == TransferMode::Text {
                 return Err(super::sftp::binary_only());
             }
-            return self.receive_sftp_file(url, output, limit, cancel, observe);
+            return self.receive_sftp_file(url, output, 0, limit, cancel, |_| observe());
+        }
+        if !self.security().is_ftp() {
+            if mode == TransferMode::Text {
+                return Err(super::sftp::binary_only());
+            }
+            if self.security() == super::Security::Scp {
+                return self
+                    .receive_scp(url, output, limit, cancel, |_, _| observe())
+                    .map(|_| ());
+            }
+            return self.receive_http(url, output, limit, cancel, observe);
         }
         let limit_argument = limit.map(|bytes| bytes.max(1).to_string());
         let mut arguments = Vec::new();
@@ -33,7 +44,7 @@ impl Session {
                 arguments.extend(["--quote", "+TYPE A"]);
             }
             run_observed(
-                self.command(url)?,
+                self.transfer_command(url)?,
                 &arguments,
                 Some(packed.reopen()?),
                 cancel,
@@ -68,7 +79,7 @@ impl Session {
                     .to_str()
                     .ok_or_else(|| io::Error::other("curl benötigt einen Unicode-Dateipfad."))?;
                 run_observed(
-                    self.command(url)?,
+                    self.transfer_command(url)?,
                     &["--use-ascii", "--ignore-content-length", "--output", path],
                     None,
                     cancel,
@@ -94,7 +105,7 @@ impl Session {
             arguments.extend(["--max-filesize", limit]);
         }
         run_observed(
-            self.command(url)?,
+            self.transfer_command(url)?,
             &arguments,
             Some(output.try_clone()?),
             cancel,
@@ -160,7 +171,7 @@ impl Session {
             .to_str()
             .ok_or_else(|| io::Error::other("curl benötigt einen Unicode-Dateipfad."))?;
         arguments.extend(["--upload-file", source]);
-        run(self.command(url)?, &arguments, None, cancel).map(|_| ())
+        run(self.transfer_command(url)?, &arguments, None, cancel).map(|_| ())
     }
 }
 

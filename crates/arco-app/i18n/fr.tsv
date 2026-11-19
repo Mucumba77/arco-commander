@@ -1344,3 +1344,304 @@ Durchsucht das aktuelle Serververzeichnis und seine Unterordner nach Dateimasken
 Serverordner	Dossier serveur
 Zum Treffer	Aller au résultat
 Treffer auf dem Server	Résultats sur le serveur
+SSH-Anmeldemethode	Méthode d’authentification SSH
+Passwort oder Schlüsseldatei	Mot de passe ou fichier de clé
+SSH-Verbindung	Connexion SSH
+Sprungserverprofil	Profil du serveur de rebond
+SSH-Zeitlimit in Sekunden	Délai SSH en secondes
+Keepalive in Sekunden	Maintien de connexion en secondes
+Direkte SSH-Verbindung	Connexion SSH directe
+SSH-Sprungserver anmelden	Connexion au serveur de rebond SSH
+Das ausgewählte SSH-Sprungprofil fehlt.	Le profil du serveur de rebond SSH sélectionné est introuvable.
+Die SSH-Sprungserverkette enthält einen Kreis.	La chaîne de serveurs de rebond SSH contient une boucle.
+Die SSH-Sprungserverkette darf höchstens acht Server enthalten.	La chaîne SSH peut comporter jusqu’à huit serveurs de rebond.
+Trage den Proxy im Profil des ersten SSH-Sprungservers ein.	Indiquez le proxy dans le profil du premier serveur de rebond SSH.
+SFTP unterstützt HTTP-CONNECT und SOCKS5 ohne Proxy-Anmeldedaten.	SFTP prend en charge HTTP CONNECT et SOCKS5 sans identifiants de proxy.
+Datei herunterladen …	Téléchargement du fichier …
+Teildatei prüfen …	Vérification du fichier partiel …
+Wähle ein FTP- oder SFTP-Dateifenster.	Sélectionnez un panneau de fichiers FTP ou SFTP.
+Server-URLs kopieren	Copier les URL du serveur
+Verbindung erneut herstellen …	Rétablissement de la connexion …
+Download prüfen …	Vérification du téléchargement …
+Keyboard-Interactive und zweiter Faktor	Clavier interactif et second facteur
+SSH-Anmeldung	Connexion SSH
+SCP-Dateitransfer	Transfert de fichier SCP
+Überträgt eine Datei über das ausgewählte SSH-Profil.	Transfère un fichier via le profil SSH sélectionné.
+Lokaler Dateiname oder absoluter Pfad	Nom de fichier local ou chemin absolu
+Vom Server herunterladen	Télécharger depuis le serveur
+Auf den Server hochladen	Téléverser vers le serveur
+SSH-Verbindung herstellen …	Ouverture de la connexion SSH …
+Fortsetzbar · Ziel muss neu sein	Reprise possible · Destination neuve requise
+Datei hochladen …	Téléversement du fichier …
+Upload prüfen …	Vérification du téléversement …
+Server-Änderungszeit setzen	Définir la date de modification sur le serveur
+Server-Änderungszeit setzen …	Définir la date de modification sur le serveur …
+SFTP-Prüfsummen berechnen	Calculer les sommes de contrôle SFTP
+SFTP-Prüfsummen	Sommes de contrôle SFTP
+SFTP-Prüfsummen · SHA-256	Sommes de contrôle SFTP · SHA-256
+SHA-256 berechnen …	Calcul du SHA-256 …
+Netzwerkprofile	Profils réseau
+Netzwerkprofile …	Profils réseau …
+Serverdateien	Fichiers du serveur
+Gleiche den SSH-Hostschlüssel mit dem Serverbetreiber ab.	Vérifiez la clé d’hôte SSH auprès de l’administrateur du serveur.
+Verwende die HTTPS-Adresse des Endpunkts. Der Bucket ist der erste Pfadteil.	Utilisez l’adresse HTTPS du point de terminaison. Le premier segment du chemin désigne le compartiment.
+Gib die WebDAV-Adresse bis zum gewünschten Stammordner ein.	Saisissez l’adresse WebDAV du dossier racine souhaité.
+TLS-Zertifikate	Certificats TLS
+S3-Region	Région S3
+Zugriffsschlüssel-ID	ID de clé d’accès
+Leer für AWS-Umgebungsvariablen	Laissez vide pour utiliser les variables d’environnement AWS
+Geheimer Zugriffsschlüssel	Clé d’accès secrète
+Gib den geheimen S3-Zugriffsschlüssel ein.	Saisissez la clé d’accès secrète S3.
+WebDAV-Anmeldung	Connexion WebDAV
+S3-Anmeldung	Connexion S3
+Öffne zuerst eine Verbindung über die Netzwerkprofile.	Connectez-vous d’abord depuis les profils réseau.
+Wähle einen Zielnamen und die Regel für vorhandene Dateien.	Choisissez un nom de destination et l’action à effectuer si le fichier existe déjà.
+S3-Objekt-Tags bearbeiten	Modifier les tags d’objet S3
+S3-Objekt-Tags lesen	Lecture des tags d’objet S3
+S3-Objekt-Tags speichern	Enregistrement des tags d’objet S3
+Tags als JSON-Objekt aus Schlüssel und Wert	Tags sous forme d’objet JSON contenant des paires clé-valeur
+Wähle ein S3-Objekt.	Sélectionnez un objet S3.
+Die neue Änderungszeit wird auf alle ausgewählten SFTP-Einträge angewendet.	Applique la nouvelle date de modification aux éléments SFTP sélectionnés.
+JJJJ-MM-TT HH:MM:SS (UTC)	AAAA-MM-JJ HH:MM:SS (UTC)
+Gib Datum und Uhrzeit als JJJJ-MM-TT HH:MM:SS (UTC) ein.	Saisissez la date et l’heure au format AAAA-MM-JJ HH:MM:SS (UTC).
+Windows-Kerberos (GSSAPI)	Kerberos Windows (GSSAPI)
+Kerberos-Dienstprinzipal (optional)	Principal de service Kerberos (facultatif)
+AWS-Anmeldekette verwenden	Utiliser la chaîne d’identifiants AWS
+AWS-Profil (optional)	Profil AWS (facultatif)
+Leer für Standard-Anmeldekette	Laisser vide pour la chaîne d’identifiants par défaut
+WebDAV-Sperren verwalten	Gérer les verrous WebDAV
+Öffne ein WebDAV-Dateifenster.	Ouvrez un panneau de fichiers WebDAV.
+Sperrdauer in Sekunden	Durée du verrouillage en secondes
+Sperrstatus anzeigen	Afficher l’état des verrous
+Schreibsperre anlegen	Créer un verrou d’écriture
+Eigene Sperre verlängern	Renouveler son verrou
+Eigene Sperre aufheben	Libérer son verrou
+WebDAV-Sperren	Verrous WebDAV
+Eigene Sperre	Verrou de cette connexion
+Serverseitige Sperre	Verrou côté serveur
+Tiefe	Profondeur
+Restdauer	Temps restant
+Der WebDAV-Server meldet keine Sperren.	Le serveur WebDAV ne signale aucun verrou.
+WebDAV-Schreibsperre angelegt.	Verrou d’écriture WebDAV créé.
+WebDAV-Schreibsperre verlängert.	Verrou d’écriture WebDAV renouvelé.
+WebDAV-Schreibsperre aufgehoben.	Verrou d’écriture WebDAV libéré.
+Gib für die WebDAV-Sperre eine Dauer von 30 bis 3600 Sekunden ein.	Saisissez une durée de verrouillage WebDAV de 30 à 3600 secondes.
+S3-Versionshistorie	Historique des versions S3
+Öffne ein S3-Dateifenster.	Ouvrez un panneau de fichiers S3.
+Exakter Objektname	Nom exact de l’objet
+Versionen anzeigen	Afficher les versions
+S3-Versionen lesen	Lecture des versions S3
+Aktuelle Löschmarkierung	Marqueur de suppression actuel
+Löschmarkierung	Marqueur de suppression
+Aktuell	Actuelle
+Stand	Révision
+Versions-ID	ID de version
+Version herunterladen	Télécharger la version
+Keine Objektversionen gefunden.	Aucune version de l’objet trouvée.
+Öffne im anderen Dateifenster einen lokalen Zielordner zum Herunterladen.	Ouvrez un dossier de destination local dans l’autre panneau.
+Wähle eine Dateiversion zum Herunterladen.	Sélectionnez une version de fichier à télécharger.
+Wähle eine S3-Dateiversion.	Sélectionnez une version de fichier S3.
+S3-Version herunterladen	Télécharger la version S3
+S3-Version heruntergeladen	Version S3 téléchargée
+Kerberos-Tickets an diesen Server delegieren	Déléguer les tickets Kerberos à ce serveur
+WinSCP-Profile importieren	Importer des profils WinSCP
+WinSCP-Profile importieren …	Importer des profils WinSCP…
+Verbindungsprofile importieren	Importer des profils de connexion
+Verbindungsprofile importieren …	Importer des profils de connexion…
+Wähle die Quelle für Profile oder SSH-Hostschlüssel. Arco zeigt die Änderungen vor dem Speichern.	Choisissez la source des profils ou des clés d’hôte SSH. Arco affiche les modifications avant de les enregistrer.
+Importquelle	Source d’importation
+WinSCP-INI auswählen	Choisir un fichier INI WinSCP
+WinSCP aus der Windows-Registrierung	WinSCP depuis le Registre Windows
+PuTTY aus der Windows-Registrierung	PuTTY depuis le Registre Windows
+KiTTY aus der Windows-Registrierung	KiTTY depuis le Registre Windows
+FileZilla-XML auswählen	Choisir un fichier XML FileZilla
+OpenSSH config auswählen	Choisir un fichier config OpenSSH
+OpenSSH known_hosts auswählen	Choisir un fichier known_hosts OpenSSH
+Total Commander SFTP-INI auswählen	Choisir un fichier INI SFTP de Total Commander
+Pfad zur Importdatei	Chemin du fichier à importer
+Verbindungsprofile prüfen	Vérifier les profils de connexion
+SSH-Hostschlüssel prüfen	Vérifier les clés d’hôte SSH
+Kein passender Hostschlüssel	Aucune clé d’hôte correspondante
+Arco ergänzt fehlende Fingerabdrücke in gespeicherten SSH-Profilen.	Arco complète les empreintes manquantes dans les profils SSH enregistrés.
+SSH-Hostschlüssel übernommen	Clés d’hôte SSH importées
+Proxy-Anmeldung	Authentification proxy
+Proxy-Anmeldung …	Authentification proxy…
+Proxy-Benutzername	Identifiant du proxy
+Proxy-Passwort	Mot de passe du proxy
+Proxy-Anmeldung entfernen	Supprimer les identifiants du proxy
+Hinterlege die Zugangsdaten für den Proxy dieses Profils im Windows-Anmeldeinformationsspeicher.	Enregistrez les identifiants proxy de ce profil dans le Gestionnaire d’identification Windows.
+Sitzungs-URL öffnen	Ouvrir l’URL de session
+Sitzungs-URL öffnen …	Ouvrir l’URL de session…
+Sitzungs-URL	URL de session
+Sitzungs-URL prüfen	Vérifier l’URL de session
+Sitzungs-URL kopieren	Copier l’URL de session
+Arco-Profil-Link kopieren	Copier le lien du profil Arco
+Sitzungsverknüpfung speichern	Enregistrer le raccourci de session
+Sitzungsverknüpfung speichern …	Enregistrer le raccourci de session…
+Sitzungsverknüpfung gespeichert	Raccourci de session enregistré
+Füge die URL eines Serverordners oder eines gespeicherten Arco-Profils ein.	Collez l’URL d’un dossier serveur ou le lien d’un profil Arco enregistré.
+Verifizierter SHA256-Fingerabdruck	Empreinte SHA256 vérifiée
+Automatisierung	Automatisation
+Netzwerkskript auswählen	Choisir le script réseau
+Netzwerkskript planen	Planifier le script réseau
+Netzwerkskript planen …	Planifier le script réseau…
+Geplante Netzwerkskripte	Scripts réseau planifiés
+Geplante Netzwerkskripte …	Scripts réseau planifiés…
+Absoluter Pfad zum UTF-8-Skript	Chemin absolu du script UTF-8
+Täglicher Start zur lokalen Uhrzeit, während du in Windows angemeldet bist.	Exécution quotidienne à l’heure locale pendant votre session Windows.
+Aufgabenname	Nom de la tâche
+Lokale Uhrzeit (HH:MM)	Heure locale (HH:MM)
+Aufgabe anlegen	Créer la tâche
+Windows-Aufgabenplanung	Planificateur de tâches Windows
+Für Arco Commander sind keine Windows-Aufgaben vorhanden.	Aucune tâche Windows pour Arco Commander.
+Windows-Aufgabe	Tâche Windows
+Windows-Aufgabe verwalten	Gérer la tâche Windows
+Füge die URL einer Datei, eines Ordners oder eines gespeicherten Arco-Profils ein.	Collez l’URL d’un fichier, d’un dossier ou d’un profil Arco enregistré.
+Datei im Dateifenster zeigen	Afficher le fichier dans le panneau
+Datei herunterladen	Télécharger le fichier
+Datei-URL kopieren	Copier l’URL du fichier
+Arco-Datei-Link kopieren	Copier le lien de fichier Arco
+Dateiverknüpfung speichern	Enregistrer le raccourci de fichier
+Dateiverknüpfung speichern …	Enregistrer le raccourci de fichier…
+Wähle die lokale Uhrzeit und den Windows-Anmeldemodus für die tägliche Aufgabe.	Choisissez l’heure locale et le mode de connexion Windows pour la tâche quotidienne.
+Nur während der Windows-Anmeldung	Uniquement pendant la session Windows
+Auch ohne Windows-Anmeldung	Même hors session Windows
+Auch ohne Windows-Anmeldung ausführen	Exécuter hors session Windows
+Die Windows-Aufgabenplanung benötigt das Passwort deines aktuellen Windows-Kontos.	Le Planificateur de tâches Windows a besoin du mot de passe du compte Windows actuel.
+Windows-Kontopasswort	Mot de passe du compte Windows
+Arco-Links in Windows	Liens Arco dans Windows
+Arco-Links in Windows …	Liens Arco dans Windows…
+Arco-Profil-Links mit arco:// über dieses Windows-Konto öffnen.	Ouvrez les liens de profil arco:// depuis ce compte Windows.
+Registrieren	Enregistrer
+Registrierung entfernen	Supprimer l’inscription
+Arco-Link-Registrierung entfernt	Inscription des liens Arco supprimée
+Arco-Links in Windows registriert	Liens Arco inscrits dans Windows
+Jetzt ausführen	Exécuter maintenant
+Aufgabe entfernen	Supprimer la tâche
+Wartet	En attente
+WinSCP-Profilimport prüfen	Vérifier l’import des profils WinSCP
+SSH-Hostschlüssel ergänzen	Indiquer l’empreinte de la clé hôte SSH
+Lokalen Ordner überwachen	Surveiller le dossier local
+Lokalen Ordner überwachen …	Surveiller le dossier local…
+Ordnerüberwachung beenden	Arrêter la surveillance
+Neue und geänderte Dateien werden veröffentlicht. Vorhandene Zieldateien können ersetzt werden.	Les fichiers nouveaux et modifiés sont publiés. Les fichiers de destination existants peuvent être remplacés.
+Prüfintervall in Sekunden	Intervalle de vérification en secondes
+Überwachung starten	Démarrer la surveillance
+Ordnerüberwachung läuft.	La surveillance est active.
+Ordnerüberwachung beendet.	La surveillance est arrêtée.
+GSSAPI-Schlüsselaustausch verlangen	Exiger l’échange de clés GSSAPI
+Ohne SSH-Fingerabdruck ist ein ausdrücklich eingetragener Kerberos-Dienstprinzipal erforderlich.	Sans empreinte SSH, indiquez explicitement un principal de service Kerberos de confiance.
+SSH-Fingerabdruck oder Kerberos-Dienstprinzipal ergänzen	Ajouter une empreinte SSH ou un principal de service Kerberos
+Transfervorgaben	Paramètres de transfert
+Übertragungsmodus	Mode de transfert
+Text (ASCII)	Texte (ASCII)
+Durchsatzlimit (KiB/s)	Limite de débit (Kio/s)
+Unbegrenzt	Sans limite
+Änderungszeiten	Dates de modification
+Je nach Aktion	Selon l’opération
+Beibehalten	Conserver
+Nicht übernehmen	Ne pas conserver
+Dateimaske für Transfers	Masque des fichiers à transférer
+SSH-Terminal im Serverordner öffnen	Ouvrir un terminal SSH dans le dossier distant
+SSH-Terminal im Anmeldeordner öffnen	Ouvrir un terminal SSH dans le dossier de connexion
+Profilvorgabe · Ziel muss neu sein	Réglage du profil · Nouvelle destination requise
+Profilvorgabe · Überschreiben erlauben	Réglage du profil · Autoriser l’écrasement
+Mit Profilvorgabe herunterladen	Télécharger avec le réglage du profil
+Binär herunterladen	Télécharger en mode binaire
+Transfervorgaben verwalten …	Gérer les préréglages de transfert…
+Transfervorgabe	Préréglage de transfert
+Automatische Auswahl	Sélection automatique
+Einstellungen ohne passende Vorgabe	Paramètres sans préréglage correspondant
+Neue Vorgabe	Nouveau préréglage
+Gespeicherte Transfervorgaben	Préréglages de transfert enregistrés
+Arco verwendet die erste passende Auswahlregel von oben.	Arco applique la première règle correspondante de la liste.
+Priorität erhöhen	Augmenter la priorité
+Priorität senken	Réduire la priorité
+Übertragung	Transfert
+Name der Transfervorgabe	Nom du préréglage de transfert
+Auswahlregel aktivieren	Activer la règle de sélection
+Leere Felder passen auf jeden Wert. Trenne Masken mit ; und Ausschlüsse mit |. ** erfasst Unterordner.	Les champs vides correspondent à toutes les valeurs. Séparez les masques par ; et les exclusions par |. ** inclut les sous-dossiers.
+Servermaske	Masque du serveur
+Benutzermaske	Masque de l’utilisateur
+Lokale Ordnermaske	Masque du dossier local
+Server-Ordnermaske	Masque du dossier distant
+Duplizieren	Dupliquer
+Transfervorgaben gespeichert.	Préréglages de transfert enregistrés.
+Beide Seiten	Les deux côtés
+Lokal → Server	Local → serveur
+Server → lokal	Serveur → local
+Links → rechts	Gauche → droite
+Rechts → links	Droite → gauche
+Nur Änderungszeiten abgleichen	Synchroniser uniquement les dates de modification
+Arco übernimmt für übereinstimmende Dateipfade ausschließlich die Änderungszeit.	Arco met uniquement à jour les dates de modification des fichiers de même chemin.
+Nur bei gleicher Dateigröße	Uniquement si les tailles correspondent
+Änderungszeiten prüfen	Vérifier les dates de modification
+Änderungszeit nach links übernehmen	Appliquer la date de modification à gauche
+Änderungszeit nach rechts übernehmen	Appliquer la date de modification à droite
+Änderungszeiten übernehmen	Appliquer les dates de modification
+Änderungszeit weicht ab	La date de modification diffère
+Größe abweichend oder Änderungszeit fehlt	Taille différente ou date de modification absente
+Zeitstempelabgleich	Synchronisation des horodatages
+Wähle, wann Windows das Skript starten soll.	Choisissez quand Windows doit démarrer le script.
+Aufgabenauslöser	Déclencheur de tâche
+Täglich	Chaque jour
+Einmalig	Une fois
+Wöchentlich	Chaque semaine
+Monatlich	Chaque mois
+Bei Windows-Anmeldung	À l’ouverture de session Windows
+Gib die tägliche Uhrzeit ein.	Saisissez l’heure de démarrage quotidienne.
+Wähle einen einzelnen Zeitpunkt.	Choisissez une date et une heure.
+Gib Uhrzeit und gewünschte Wochentage ein.	Saisissez l’heure et les jours de la semaine.
+Gib Uhrzeit und die Monatstage als Zahlen ein.	Saisissez l’heure et les jours du mois en chiffres.
+Windows startet die Aufgabe bei deiner Anmeldung.	Windows démarre la tâche à l’ouverture de votre session.
+JJJJ-MM-TT HH:MM	AAAA-MM-JJ HH:MM
+HH:MM Mo,Fr	HH:MM Mon,Fri
+Lokale Löschungen	Suppressions locales
+Serverdateien behalten	Conserver les fichiers sur le serveur
+Löschungen auf dem Server übernehmen	Répercuter les suppressions sur le serveur
+Neue und geänderte Dateien werden veröffentlicht. Die Löschoption gilt nur für bestätigte Dateipaare.	Les fichiers nouveaux et modifiés sont publiés. La suppression se limite aux paires de fichiers vérifiées.
+Gelöschte Servereinträge in den Papierkorb verschieben	Placer les éléments serveur supprimés dans la corbeille
+Server-Papierkorb öffnen	Ouvrir la corbeille du serveur
+Servereintrag wiederherstellen	Restaurer un élément du serveur
+Servereintrag wiederherstellen …	Restaurer un élément du serveur…
+In den Server-Papierkorb verschieben	Placer dans la corbeille du serveur
+Papierkorbeintrag	Élément de la corbeille
+Öffne zuerst den Server-Papierkorb.	Ouvrez d’abord la corbeille du serveur.
+Wähle einen Eintrag im Server-Papierkorb.	Sélectionnez un élément dans la corbeille du serveur.
+Zielordner relativ zum Netzwerk-Startordner oder vollständige URL	Dossier de destination relatif au dossier réseau initial ou URL complète
+Alte Serverdateien beim Überschreiben im Papierkorb sichern	Conserver les fichiers serveur remplacés dans la corbeille
+Navigation koppeln	Lier la navigation
+Navigation koppeln oder lösen	Activer ou désactiver la navigation liée
+Navigation gekoppelt.	Navigation liée.
+Navigation entkoppelt.	Navigation dissociée.
+Öffne zwei lokale oder Netzwerkordner und warte, bis beide geladen sind.	Ouvrez deux dossiers locaux ou distants et attendez leur chargement.
+Ein fest gesperrter Tab kann der Navigation nicht folgen.	Un onglet verrouillé ne peut pas suivre la navigation.
+Der Pfad liegt außerhalb der gekoppelten Startordner.	Le chemin se trouve hors des dossiers de départ liés.
+Der Gegenordner kann auf diesem Dateisystem nicht geöffnet werden.	Le dossier correspondant ne peut pas être ouvert sur ce système de fichiers.
+Gekoppelten Ordner anlegen	Créer le dossier correspondant
+Die gekoppelten Dateifenster wurden inzwischen gewechselt.	Les panneaux de fichiers liés ont changé.
+Datei verschlüsselt hochladen	Envoyer un fichier chiffré
+Datei verschlüsselt hochladen …	Envoyer un fichier chiffré…
+Datei entschlüsselt herunterladen	Télécharger et déchiffrer un fichier
+Datei entschlüsselt herunterladen …	Télécharger et déchiffrer un fichier…
+Wähle eine einzelne lokale Datei.	Sélectionnez un seul fichier local.
+Öffne im Gegenfenster den Zielordner auf dem Server.	Ouvrez le dossier distant de destination dans le panneau opposé.
+Passphrase (mindestens zwölf Zeichen)	Phrase secrète (douze caractères minimum)
+Passphrase wiederholen	Répéter la phrase secrète
+Verschlüsseln und hochladen	Chiffrer et envoyer
+Wähle ein verschlüsseltes Dateipaket im Serverfenster.	Sélectionnez un paquet chiffré dans le panneau serveur.
+Öffne im Gegenfenster den lokalen Zielordner.	Ouvrez le dossier local de destination dans le panneau opposé.
+Passphrase	Phrase secrète
+Herunterladen und entschlüsseln	Télécharger et déchiffrer
+Die Passphrasen stimmen nicht überein.	Les phrases secrètes ne correspondent pas.
+Verwende mindestens zwölf Zeichen und keine Steuerzeichen (maximal 1024 Bytes).	Utilisez au moins douze caractères sans caractères de contrôle (1024 octets maximum).
+Gib eine gültige Passphrase ein.	Saisissez une phrase secrète valide.
+Datei lokal verschlüsseln	Chiffrer le fichier localement
+Verschlüsseltes Paket hochladen	Envoyer le paquet chiffré
+Verschlüsseltes Paket herunterladen	Télécharger le paquet chiffré
+Datei lokal entschlüsseln und prüfen	Déchiffrer et vérifier le fichier localement
+Passphrase oder verschlüsseltes Dateipaket ungültig.	Phrase secrète ou paquet chiffré invalide.
+Verschlüsselt hochgeladen	Fichier chiffré envoyé
+Entschlüsselt gespeichert	Fichier déchiffré enregistré
+Beim Systemstart	Au démarrage du système
+Der Systemstart benötigt eine Registrierung mit Administratorrechten und das Passwort des Windows-Kontos.	Une tâche au démarrage doit être enregistrée par un administrateur et nécessite le mot de passe de votre compte Windows.

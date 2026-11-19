@@ -1,4 +1,5 @@
 use super::archive_actions::check_archive;
+use super::ftp_sync::FtpPlanConflicts;
 use super::ftp_sync::{FtpPlan, FtpRelayPlan, ftp_ignores};
 use super::{App, FtpEndpoint, Outcome, strings};
 use crate::commands::{Dialog, Pending};
@@ -95,6 +96,14 @@ enum ReviewPlan {
 }
 
 impl ReviewPlan {
+    fn timestamps_only(&self) -> bool {
+        match self {
+            Self::Disk(plan) => plan.timestamps_only(),
+            Self::Ftp(plan) => plan.timestamps_only(),
+            Self::FtpRelay(_) => false,
+        }
+    }
+
     fn apply(
         self,
         rows: Vec<Row>,
@@ -407,6 +416,7 @@ impl App {
     pub(crate) fn open_ftp_copy(&mut self) {
         let other = 1 - self.active;
         let ignore = self.ignore_list();
+        let presets = self.profile.network_transfer_presets.clone();
         if let (Some(source), Some(target)) =
             (&self.current().ftp, &self.panels[other].current().ftp)
         {
@@ -424,6 +434,10 @@ impl App {
                 "Bereite Kopie zwischen FTP-Ordnern vor …",
                 false,
                 move |job| {
+                    let endpoints = [
+                        arco_app::network_transfer::endpoint(&presets, &endpoints[0], None, None)?,
+                        arco_app::network_transfer::endpoint(&presets, &endpoints[1], None, None)?,
+                    ];
                     let from =
                         ftp_ignores(ignore.as_deref(), &endpoints[0].1, profiles[0].as_deref());
                     let to =
@@ -483,6 +497,8 @@ impl App {
             return;
         }
         self.enqueue_virtual_transfer("Bereite FTP-Kopie vor …", false, move |job| {
+            let endpoint =
+                arco_app::network_transfer::endpoint(&presets, &endpoint, Some(&root), None)?;
             let remote_ignored = ftp_ignores(ignore.as_deref(), &endpoint.1, profile.as_deref());
             let ignored = |path: &Path, directory| {
                 remote_ignored(path, directory)
@@ -539,6 +555,7 @@ impl App {
         ui.set_sync_notice("".into());
         self.publish_sync_profiles();
         let mut options = self.profile.sync_options.clone();
+        options.timestamps_only &= archives.iter().all(Option::is_none);
         options.selected_only &= !setup.selected.is_empty();
         match archives {
             [Some(_), None] => set_archive_options(&mut options, 0),
@@ -594,6 +611,7 @@ impl App {
                 }
                 setup.fixed_roots = roots;
                 options.selected_only &= setup.selected_available();
+                options.timestamps_only &= setup.source.archives().iter().all(Option::is_none);
                 ui.set_sync_roots(strings(setup.displayed_roots().iter().map(String::as_str)));
                 ui.set_sync_has_selection(setup.selected_available());
                 ui.set_sync_draft(options_data(&options, setup.fixed_roots.is_some()));
@@ -621,11 +639,14 @@ impl App {
             selected_only: data.selected_only,
             by_content: data.by_content,
             ignore_date: data.ignore_date,
+            timestamps_only: data.timestamps_only,
+            timestamp_all_sizes: data.timestamps_only && data.timestamp_all_sizes,
             masks: data.masks.trim().to_owned(),
         };
         let archives = setup.source.archives();
         let has_archive = archives.iter().any(Option::is_some);
         if has_archive {
+            options.timestamps_only = false;
             options.by_content = true;
             options.ignore_date = true;
             match archives {
@@ -690,6 +711,7 @@ impl App {
             (!password.is_empty() && has_archive).then(|| Zeroizing::new(password.to_owned()))
         });
         let ignore = self.ignore_list();
+        let presets = self.profile.network_transfer_presets.clone();
         self.close_dialog();
         let description = super::JobDescription::new(
             crate::OperationKind::Sync,
@@ -717,6 +739,12 @@ impl App {
                         unreachable!()
                     };
                     let mut last = Instant::now() - Duration::from_secs(1);
+                    let endpoint = arco_app::network_transfer::endpoint(
+                        &presets,
+                        &endpoint,
+                        Some(&local),
+                        None,
+                    )?;
                     let remote_ignored =
                         ftp_ignores(ignore.as_deref(), &endpoint.1, profile.as_deref());
                     let ignored = |path: &Path, directory| {
@@ -828,6 +856,7 @@ impl App {
         let ui = self.ui();
         ui.set_sync_roots(strings(review.labels.iter().map(String::as_str)));
         ui.set_sync_copy_only(review.copy_only);
+        ui.set_sync_timestamps_only(review.plan.timestamps_only());
         ui.set_sync_comparison_only(review.archives.iter().all(Option::is_some));
         self.pending = Some(Pending::SyncReview(review));
         self.filter_sync(0);
@@ -861,7 +890,14 @@ impl App {
         let rows = review
             .visible
             .iter()
-            .map(|&index| row_data(index, &review.rows[index], review.copy_only))
+            .map(|&index| {
+                row_data(
+                    index,
+                    &review.rows[index],
+                    review.copy_only,
+                    review.plan.timestamps_only(),
+                )
+            })
             .collect::<Vec<_>>();
         let summary = summary(review);
         let ui = self.ui();
@@ -886,7 +922,12 @@ impl App {
             _ => return,
         };
         review.rows[index].toggle(action);
-        let data = row_data(index, &review.rows[index], review.copy_only);
+        let data = row_data(
+            index,
+            &review.rows[index],
+            review.copy_only,
+            review.plan.timestamps_only(),
+        );
         let summary = summary(review);
         let ui = self.ui();
         let rows = ui.get_sync_rows();
@@ -920,6 +961,12 @@ impl App {
         });
         self.close_dialog();
         let copy_only = review.copy_only;
+        let timestamps_only = review.plan.timestamps_only();
+        let label = if timestamps_only {
+            "Änderungszeiten übernehmen"
+        } else {
+            "Synchronisieren"
+        };
         let total = review.rows.len();
         let description = super::JobDescription::new(
             crate::OperationKind::Sync,
@@ -940,7 +987,11 @@ impl App {
                         display_path(path),
                         started.saturating_sub(1),
                         total,
-                        "Ausgewählte Aktionen ausführen …",
+                        if timestamps_only {
+                            "Änderungszeiten übernehmen …"
+                        } else {
+                            "Ausgewählte Aktionen ausführen …"
+                        },
                     );
                 }
             };
@@ -963,12 +1014,18 @@ impl App {
                     String::new(),
                     total,
                     total,
-                    "Synchronisierung abgeschlossen",
+                    if timestamps_only {
+                        "Zeitstempelabgleich abgeschlossen"
+                    } else {
+                        "Synchronisierung abgeschlossen"
+                    },
                 );
             }
             Ok(Outcome::Report(
                 if review.copy_only {
                     "FTP-Kopie".into()
+                } else if timestamps_only {
+                    "Zeitstempelabgleich".into()
                 } else {
                     "Synchronisierung".into()
                 },
@@ -978,7 +1035,7 @@ impl App {
         if copy_only {
             self.enqueue_virtual_operation("FTP-Kopie", true, description, work);
         } else {
-            self.start_operation_job("Synchronisieren", true, description, work);
+            self.start_operation_job(label, true, description, work);
         }
     }
 }
@@ -996,6 +1053,8 @@ fn options_data(options: &Options, remember_roots: bool) -> SyncOptionsData {
         selected_only: options.selected_only,
         by_content: options.by_content,
         ignore_date: options.ignore_date,
+        timestamps_only: options.timestamps_only,
+        timestamp_all_sizes: options.timestamp_all_sizes,
         masks: options.masks.as_str().into(),
         remember_roots,
     }
@@ -1172,21 +1231,23 @@ fn stage_archive(
     })
 }
 
-fn row_data(index: usize, row: &Row, copy_only: bool) -> SyncRowData {
+fn row_data(index: usize, row: &Row, copy_only: bool, timestamps_only: bool) -> SyncRowData {
     SyncRowData {
         index: index as i32,
         path: display_path(&row.relative).into(),
         left: describe(row.info(0)).into(),
         right: describe(row.info(1)).into(),
-        comparison: match row.comparison {
+        comparison: crate::locale::tr(match row.comparison {
             Comparison::Equal => "Gleich",
             Comparison::Different if copy_only => "Zieldatei vorhanden",
+            Comparison::Different if timestamps_only => "Änderungszeit weicht ab",
             Comparison::Different => "Abweichend",
             Comparison::OnlyLeft => "Nur links",
             Comparison::OnlyRight => "Nur rechts",
             Comparison::TypeConflict => "Datei/Ordner-Konflikt",
+            Comparison::Protected if timestamps_only => "Größe abweichend oder Änderungszeit fehlt",
             Comparison::Protected => "Quellarchiv geschützt",
-        }
+        })
         .into(),
         action: match row.action {
             Action::Skip => 0,
@@ -1229,9 +1290,12 @@ fn summary(review: &SyncReview) -> (usize, usize, usize) {
 }
 
 fn publish_summary(ui: &crate::MainWindow, (visible, copies, deletes): (usize, usize, usize)) {
-    ui.set_sync_summary(
-        format!("{visible} angezeigt · {copies} Kopien · {deletes} Löschungen rechts").into(),
-    );
+    let summary = if ui.get_sync_timestamps_only() {
+        format!("{visible} angezeigt · {copies} Zeitstempeländerungen")
+    } else {
+        format!("{visible} angezeigt · {copies} Kopien · {deletes} Löschungen rechts")
+    };
+    ui.set_sync_summary(summary.into());
     ui.set_sync_has_actions(copies + deletes > 0);
     ui.set_sync_has_deletes(deletes > 0);
 }

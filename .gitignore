@@ -1,2 +1,5 @@
 /target/
+/automation/obj/
+/scripts/automation-reference/bin/
+/scripts/automation-reference/obj/
 __pycache__/

@@ -6,27 +6,36 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+aws-config = { version = "1.8.15", default-features = false, features = ["rt-tokio", "credentials-process", "sso"] }
+aws-credential-types = "1.2.12"
+aws-smithy-http-client = { version = "1.1.13", features = ["rustls-ring"] }
 base64 = "0.22"
 blake3 = "1"
-chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 encoding_rs = "0.8"
 flate2 = "1"
 md-5 = "0.10"
 percent-encoding = "2"
 regex = "1"
+roxmltree = "0.21"
 serde.workspace = true
 serde_json.workspace = true
 sha1 = "0.10"
-ssh2 = "0.9.7"
+sha2 = "0.10"
+russh = { version = "0.65.2", default-features = false, features = ["ring", "rsa"] }
 tempfile.workspace = true
+tokio = { version = "1", features = ["net", "rt-multi-thread", "time", "io-util", "macros", "sync"] }
 url = "2.5"
 zeroize = "1"
 
 [target.'cfg(windows)'.dependencies]
 trash = "5"
-windows = { version = "0.62", features = ["Win32_Graphics_Gdi", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Ole", "Win32_System_SystemServices", "Win32_System_Variant", "Win32_UI_Controls_RichEdit", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62", features = ["Win32_Graphics_Gdi", "Win32_Media_MediaFoundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Ole", "Win32_System_SystemServices", "Win32_System_TaskScheduler", "Win32_System_Variant", "Win32_UI_Controls_RichEdit", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Shell_PropertiesSystem", "Win32_UI_WindowsAndMessaging"] }
 windows-core = "0.62"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Gdi", "Win32_NetworkManagement_NetManagement", "Win32_NetworkManagement_WNet", "Win32_Security_Authorization", "Win32_Security_Credentials", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_Storage_Xps", "Win32_System_Com", "Win32_System_Console", "Win32_System_DataExchange", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Controls_Dialogs", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Gdi", "Win32_NetworkManagement_NetManagement", "Win32_NetworkManagement_WNet", "Win32_Security_Authentication_Identity", "Win32_Security_Authorization", "Win32_Security_Credentials", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_Storage_Xps", "Win32_System_Com", "Win32_System_Console", "Win32_System_DataExchange", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Controls_Dialogs", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+futures-util = "0.3"
 
 [lints]
 workspace = true

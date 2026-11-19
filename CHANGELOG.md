@@ -1,5 +1,52 @@
 # Änderungen
 
+## 1.7.0 · 19. November 2026
+
+- SFTP-Profile können die vorherige Serverdatei beim bestätigten Überschreiben im Server-Papierkorb sichern. Die Sicherung ist getrennt vom Papierkorb für Löschvorgänge einstellbar.
+- Gekoppelte Navigation über Menü, Symbolleiste und Befehlspalette für die beiden aktiven lokalen oder Netzwerk-Tabs. Arco kann einen fehlenden Gegenordner nach Bestätigung anlegen.
+- Einzeldateien lassen sich als authentifizierte age-Pakete mit verschlüsseltem Namen und Inhalt hochladen und entschlüsselt herunterladen. `put-encrypted` und `get-encrypted` bieten dieselbe Funktion im Skript.
+- `ls` und `dir` unterstützen Serverordner und Dateimasken. Geplante Netzwerkskripte können beim Windows-Systemstart ausgeführt werden.
+
+- SFTP-Anmeldung mit Ed25519-, ECDSA- und RSA-Schlüsseldateien, Windows OpenSSH-Agent und Pageant. SSH-Sprungserver werden als eigene Profile mit separater Hostschlüsselprüfung eingebunden.
+- SFTP mit HTTP-CONNECT und SOCKS5, einstellbarem SSH-Zeitlimit und Keepalive.
+- Fortsetzbare SFTP-Downloads mit geprüftem Wiederanlauf nach Verbindungsverlust, Teildateiprüfung und Bytefortschritt. Serverpfade und URLs lassen sich aus der Dateiauswahl kopieren.
+- SSH-Serverabfragen per Keyboard-Interactive einschließlich mehrerer Eingabeschritte und zweitem Faktor nach Schlüsselanmeldung. SCP-Einzeldateitransfer aus gespeicherten SSH-Profilen.
+- Fortsetzbarer SFTP-Upload zu einem neuen Ziel mit geprüfter Teildatei und automatischem Wiederanlauf. SFTP-Änderungszeit für markierte Einträge und SHA-256-Prüfsummen für markierte Dateien.
+- Netzwerkprofile für SCP-Dateifenster, WebDAV und S3. Die Anbieter nutzen dieselben Tabs, Kopierdialoge, Konfliktregeln und den Transfermanager.
+- WebDAV über HTTP und HTTPS mit geschützten Schreiboperationen. S3-Endpunkte mit SigV4, Bucket- und Präfixnavigation, Multipart-Uploads mit Bereinigung nach Abbruch und Objekt-Tag-Bearbeitung.
+- Rekursive Serversuche und bidirektionaler Abgleich mit lokalen Ordnern für SCP, WebDAV und S3. Dateien lassen sich auch zwischen Netzwerk-Dateifenstern mit unterschiedlichen Protokollen kopieren.
+- Windows-Kerberos-Anmeldung für SFTP und SCP über GSSAPI mit SSH-Hostschlüsselprüfung.
+- WebDAV-Schreibsperren anzeigen, anlegen, verlängern und aufheben. Eigene Sperrtoken gelten für Dateioperationen in derselben Verbindung.
+- AWS-Anmeldekette für S3 mit gemeinsam genutzten AWS-Profilen und erneuerbaren temporären Zugangsdaten. Die S3-Versionshistorie zeigt Dateiversionen und Löschmarkierungen. Ältere Versionen lassen sich separat herunterladen.
+- Zuschaltbare Kerberos-Ticketdelegation pro SSH-Profil und WinSCP-INI-Import mit Vorschau.
+- Hintergrundüberwachung lokaler Ordner mit Übertragung stabiler Änderungen zum Server. `arco-net.exe` führt UTF-8-Skripte fensterlos mit gespeicherten Netzwerkprofilen aus und gibt JSON-Ereignisse aus.
+- Netzwerkautomatisierung für .NET und x64-COM mit strukturierten Ergebnissen, stdin-Skripten und den Befehlen `lpwd`, `stat`, `chmod` und `checksum`.
+- Importvorschau für WinSCP, PuTTY und KiTTY aus der Windows-Registrierungsdatenbank, FileZilla, OpenSSH und Ghisler-SFTP-Profile. `known_hosts` kann fehlende SSH-Fingerabdrücke ergänzen.
+- Getrennte Proxy-Anmeldung für HTTP Basic und SOCKS5. Proxy-Passwörter bleiben in den Windows-Anmeldeinformationen.
+- Direkte Sitzungs-URLs, Arco-Profil-Links und Windows-Verknüpfungen für Serverordner. `arco-net.exe` kann Sitzungs-URLs in Skripten öffnen.
+- Tägliche Netzwerkskripte in der Windows-Aufgabenplanung mit Verwaltung in Arco und JSONL-Protokollen je Lauf.
+- Datei-URLs öffnen den Serverordner mit Dateifokus oder laden nach Wahl eines Zielpfads herunter. Arco erstellt Datei-Links und Windows-Verknüpfungen, Skripte können `get-url` verwenden.
+- Geplante Skripte können auch bei abgemeldetem Benutzer unter dem aktuellen Windows-Konto ausgeführt werden.
+- Die Windows-Zuordnung für `arco://` lässt sich pro Benutzer in Arco aktivieren und entfernen.
+
+- Eingebauter GSSAPI-Schlüsselaustausch nach RFC 8732 für SFTP und SCP unter Windows. Profile können Kerberos beim Austausch verlangen und einen ausdrücklich vorgegebenen Dienstprinzipal zur Serverprüfung verwenden.
+- Änderung der Server-Zeitstempel auch in SCP-Fenstern. Die Netzwerkkommandozeile listet lokale Dateien per `lls` und protokolliert Meldungen per `echo`.
+
+- `arco-net synchronize` unterstützt Vorschau, beide Transferrichtungen, Spiegeln, Löschsynchronisierung, Dateimasken und Prüfsummenvergleich.
+- `arco-net` hält mehrere Netzwerksitzungen offen und wechselt gezielt mit `session` zwischen ihnen.
+- Netzwerkprofile speichern Übertragungsmodus, Durchsatzlimit, Dateimasken und Zeitstempelregeln. Die auswählbaren Vorgaben greifen im Ordnerabgleich und bei den einzelnen Netzwerktransfers.
+- Benannte Transfervorgaben lassen sich verwalten, fest einem Netzwerkprofil zuweisen oder anhand von Server, Benutzer und beteiligten Ordnern automatisch auswählen.
+- Der Ordnerabgleich übernimmt auf Wunsch nur Änderungszeiten für gemeinsam vorhandene Dateien. Der Größenfilter ist standardmäßig aktiv und lässt sich auch in Netzwerkskripten umstellen.
+- `put`, `get` und `get-url` akzeptieren Vorgabe, Durchsatzlimit, Dateimaske, Übertragungsmodus und Übernahme der Änderungszeit als Optionen pro Befehl.
+- `get` und `put` übertragen Dateilisten und Maskentreffer mit Vorabprüfung der Zielnamen. `-latest` wählt die neueste Datei aus und `option failonnomatch` steuert leere Treffer.
+- `-resume` aktiviert die geprüfte binäre Wiederaufnahme von FTP- und SFTP-Transfers auch in Skripten.
+- Windows-Aufgaben können einmalig, täglich, wöchentlich, monatlich oder bei der Anmeldung am aktuellen Windows-Konto starten.
+- Die Ordnerüberwachung kann lokale Löschungen auf bestätigte und unveränderte Serverdateien übertragen. Die Option ist anfangs ausgeschaltet.
+- `keepuptodate` bietet die Ordnerüberwachung im Skript mit Startabgleich, Masken, Laufzeitbegrenzung und Löschoption.
+- `get` und `put` übertragen ausgewählte Ordnerbäume einschließlich leerer Verzeichnisse. `-recursive` bezieht bei Platzhaltern auch Ordner ein.
+- Der Server-Papierkorb kann Löschvorgänge abfangen und Einträge in einen ausgewählten Serverordner wiederherstellen.
+- SFTP- und SCP-Dateifenster öffnen ein SSH-Terminal im aktuellen Serverordner oder Anmeldeordner. Arco verwendet dabei die SSH-Einstellungen der aktiven Verbindung.
+
 ## 1.6.0 · 19. November 2026
 
 - Eingebautes SFTP mit Hostschlüsselprüfung, Passwort- und RSA-Schlüsselanmeldung, binären Transfers und Abgleich mit einem lokalen Ordner.

@@ -1,5 +1,7 @@
 import { MessageCard, MessageData, MessageLevel, MessageStat, TextDraftCard, TextDraftData, TextDraftForm, TextDraftKind } from "auxiliary-dialogs.slint";
 import { DuplicateCard, DuplicateForm, DuplicateFolder } from "duplicate-dialog.slint";
+import { TransferPresetsCard, TransferPresetData } from "transfer-presets.slint";
+export { TransferPresetData } from "transfer-presets.slint";
 export { DuplicateForm, DuplicateFolder } from "duplicate-dialog.slint";
 export { MessageData, MessageLevel, MessageStat, TextDraftData, TextDraftForm, TextDraftKind } from "auxiliary-dialogs.slint";
 import { ConfigurationCard, ConfigurationData, ConfigurationForm, ConfigurationItem, ConfigurationKind } from "configuration-dialog.slint";
@@ -189,6 +191,8 @@ export struct SyncOptionsData {
     selected-only: bool,
     by-content: bool,
     ignore-date: bool,
+    timestamps-only: bool,
+    timestamp-all-sizes: bool,
     masks: string,
     remember-roots: bool,
 }
@@ -492,6 +496,13 @@ export struct FtpProfileData {
     user: string,
     proxy: string,
     local-directory: string,
+    transfer-mode: int,
+    transfer-speed: string,
+    transfer-time: int,
+    transfer-mask: string,
+    transfer-preset: int,
+    recycle-remote: bool,
+    recycle-overwrites: bool,
     security: int,
     active: bool,
     listing: int,
@@ -506,6 +517,17 @@ export struct FtpProfileData {
     otp: bool,
     ssh-fingerprint: string,
     ssh-private-key: string,
+    ssh-agent: int,
+    ssh-kerberos-principal: string,
+    ssh-kerberos-delegate: bool,
+    ssh-kerberos-kex: bool,
+    ssh-interactive: bool,
+    ssh-jump: int,
+    ssh-timeout: string,
+    ssh-keepalive: string,
+    s3-region: string,
+    s3-aws-enabled: bool,
+    s3-aws-profile: string,
 }
 
 export struct PluginRowData {
@@ -522,12 +544,17 @@ component FtpProfilesCard inherits Rectangle {
     in property <int> focus-cycle;
     changed focus-cycle => { if (root.focus-cycle > 0) { profile-list.focus(); } else if (connect-button.enabled) { connect-button.focus(); } else { save-button.focus(); } }
     in property <[string]> profiles;
+    in property <[string]> jump-profiles;
+    in property <[string]> transfer-names;
     in property <int> selected;
     in property <FtpProfileData> data;
     in property <int> revision;
     in property <string> notice;
     in property <bool> busy;
-    property <bool> ssh-mode: security.current-index == 3;
+    property <bool> ssh-mode: security.current-index == 3 || security.current-index == 4;
+    property <bool> ftp-mode: security.current-index < 3;
+    property <bool> s3-mode: security.current-index == 6;
+    property <bool> tls-mode: security.current-index < 2 || security.current-index >= 5;
     property <bool> dirty: name.text != root.data.name || address.text != root.data.address
         || user.text != root.data.user || proxy.text != root.data.proxy || local.text != root.data.local-directory
         || security.current-index != root.data.security || active.checked != root.data.active
@@ -536,7 +563,23 @@ component FtpProfilesCard inherits Rectangle {
         || list-pattern.text != root.data.list-pattern || show-hidden.checked != root.data.show-hidden
         || ca-bundle.text != root.data.ca-bundle || client-certificate.text != root.data.client-certificate
         || mode-z.checked != root.data.mode-z || otp.checked != root.data.otp
-        || ssh-fingerprint.text != root.data.ssh-fingerprint || ssh-private-key.text != root.data.ssh-private-key;
+        || ssh-fingerprint.text != root.data.ssh-fingerprint || ssh-private-key.text != root.data.ssh-private-key
+        || ssh-agent.current-index != root.data.ssh-agent || ssh-jump.current-index != root.data.ssh-jump
+        || ssh-interactive.checked != root.data.ssh-interactive
+        || ssh-timeout.text != root.data.ssh-timeout || ssh-keepalive.text != root.data.ssh-keepalive
+        || ssh-kerberos-principal.text != root.data.ssh-kerberos-principal
+        || ssh-kerberos-delegate.checked != root.data.ssh-kerberos-delegate
+        || ssh-kerberos-kex.checked != root.data.ssh-kerberos-kex
+        || s3-region.text != root.data.s3-region
+        || s3-aws-enabled.checked != root.data.s3-aws-enabled
+        || s3-aws-profile.text != root.data.s3-aws-profile
+        || transfer-mode.current-index != root.data.transfer-mode
+        || transfer-speed.text != root.data.transfer-speed
+        || transfer-time.current-index != root.data.transfer-time
+        || transfer-mask.text != root.data.transfer-mask
+        || transfer-preset.current-index != root.data.transfer-preset
+        || recycle-remote.checked != root.data.recycle-remote
+        || recycle-overwrites.checked != root.data.recycle-overwrites;
     callback select(int);
     callback operate(string, FtpProfileData, string);
     callback close();
@@ -546,7 +589,7 @@ component FtpProfilesCard inherits Rectangle {
     VerticalLayout {
         padding: 20px;
         spacing: 10px;
-        DialogHeading { icon: @image-url("icons/network.svg"); title: @tr("FTP- und SFTP-Verbindungen"); subtitle: @tr("Verbindung auswählen oder ein neues Profil anlegen."); }
+        DialogHeading { icon: @image-url("icons/network.svg"); title: @tr("Netzwerkprofile"); subtitle: @tr("Verbindung auswählen oder ein neues Profil anlegen."); }
         HorizontalLayout {
             spacing: 8px;
             profile-list := ComboBox {
@@ -579,7 +622,11 @@ component FtpProfilesCard inherits Rectangle {
                             horizontal-stretch: 2;
                             spacing: 4px;
                             FieldLabel { text: @tr("Serveradresse und Startordner"); }
-                            address := LineEdit { text: root.data.address; placeholder-text: root.ssh-mode ? "sftp://server:22/startordner/" : "ftp://server:port/startordner/"; accessible-label: @tr("Serveradresse und Startordner"); }
+                            address := LineEdit {
+                                text: root.data.address;
+                                placeholder-text: root.s3-mode ? "https://endpoint/bucket/präfix/" : security.current-index == 5 ? "https://server/dav/" : security.current-index == 4 ? "scp://server:22/startordner/" : root.ssh-mode ? "sftp://server:22/startordner/" : "ftp://server:port/startordner/";
+                                accessible-label: @tr("Serveradresse und Startordner");
+                            }
                         }
                     }
                     HorizontalLayout {
@@ -588,14 +635,14 @@ component FtpProfilesCard inherits Rectangle {
                             spacing: 4px;
                             FieldLabel { text: @tr("Protokoll"); }
                             security := ComboBox {
-                                model: [@tr("Explizites FTPS (FTP mit TLS)"), @tr("Implizites FTPS"), @tr("Klartext-FTP"), "SFTP (SSH)"];
+                                model: [@tr("Explizites FTPS (FTP mit TLS)"), @tr("Implizites FTPS"), @tr("Klartext-FTP"), "SFTP (SSH)", "SCP (SSH)", "WebDAV", "S3"];
                                 current-index: root.data.security;
                                 accessible-label: @tr("Protokoll");
                             }
                         }
                         VerticalLayout {
                             spacing: 4px;
-                            visible: !root.ssh-mode;
+                            visible: root.ftp-mode;
                             FieldLabel { text: @tr("Format der Verzeichnisliste"); }
                             listing := ComboBox {
                                 model: [@tr("Automatisch"), @tr("Nur MLSD"), @tr("Nur LIST (Unix / IIS / VMS)")];
@@ -605,7 +652,9 @@ component FtpProfilesCard inherits Rectangle {
                         }
                     }
                     Text {
-                        text: root.ssh-mode ? @tr("SFTP verwendet SSH. Der Hostschlüssel muss beim Serverbetreiber geprüft werden.")
+                        text: root.ssh-mode ? @tr("Gleiche den SSH-Hostschlüssel mit dem Serverbetreiber ab.")
+                            : root.s3-mode ? @tr("Verwende die HTTPS-Adresse des Endpunkts. Der Bucket ist der erste Pfadteil.")
+                            : security.current-index == 5 ? @tr("Gib die WebDAV-Adresse bis zum gewünschten Stammordner ein.")
                             : security.current-index == 2
                             ? @tr("Klartext-FTP überträgt Passwort und Dateien unverschlüsselt.")
                             : security.current-index == 1 ? @tr("Für implizites FTPS ftps:// verwenden.") : @tr("Für explizites FTPS ftp:// verwenden.");
@@ -623,12 +672,16 @@ component FtpProfilesCard inherits Rectangle {
                         }
                         VerticalLayout {
                             spacing: 4px;
-                            visible: !root.ssh-mode;
                             FieldLabel { text: @tr("Proxy"); }
-                            proxy := LineEdit { text: root.data.proxy; placeholder-text: @tr("HTTP-, SOCKS- oder FTP-Proxy"); accessible-label: @tr("Proxy"); }
+                            proxy := LineEdit { text: root.data.proxy; placeholder-text: root.ssh-mode ? "http://proxy:8080 / socks5h://proxy:1080" : @tr("HTTP-, SOCKS- oder FTP-Proxy"); accessible-label: @tr("Proxy"); }
                         }
                     }
-                    active := CheckBox { visible: !root.ssh-mode; text: @tr("Aktiver FTP-Modus (Direktverbindung)"); checked: root.data.active; }
+                    Button {
+                        text: @tr("Proxy-Anmeldung …"); icon: @image-url("icons/network.svg");
+                        enabled: root.selected > 0 && root.data.proxy != "" && !root.dirty && !root.busy;
+                        clicked => { root.operate("proxy-login", root.data, ""); }
+                    }
+                    active := CheckBox { visible: root.ftp-mode; text: @tr("Aktiver FTP-Modus (Direktverbindung)"); checked: root.data.active; }
                     HorizontalLayout {
                         spacing: 10px;
                         VerticalLayout {
@@ -636,18 +689,18 @@ component FtpProfilesCard inherits Rectangle {
                             address-family := ComboBox { model: [@tr("Automatisch"), "IPv4", "IPv6"]; current-index: root.data.address-family; accessible-label: @tr("IP-Version"); }
                         }
                         VerticalLayout {
-                            visible: !root.ssh-mode;
+                            visible: root.ftp-mode;
                             FieldLabel { text: @tr("Serverzeichensatz"); }
                             charset := LineEdit { text: root.data.charset; placeholder-text: "UTF-8 / windows-1252 / Shift_JIS"; accessible-label: @tr("Serverzeichensatz"); }
                         }
                     }
-                    mode-z := CheckBox { visible: !root.ssh-mode; text: @tr("Dateitransfers mit MODE Z komprimieren"); checked: root.data.mode-z; }
-                    show-hidden := CheckBox { visible: !root.ssh-mode; text: @tr("Versteckte Dateien mit LIST -a anfordern"); checked: root.data.show-hidden; }
-                    FieldLabel { visible: !root.ssh-mode; text: @tr("Eigenes LIST-Format (regulärer Ausdruck)"); }
-                    list-pattern := LineEdit { visible: !root.ssh-mode; text: root.data.list-pattern; accessible-label: @tr("Eigenes LIST-Format (regulärer Ausdruck)"); }
-                    Text { visible: !root.ssh-mode; text: @tr("Benannte Gruppen: name, kind und optional size. Ein eigenes Format verwendet LIST."); wrap: word-wrap; color: Colors.muted; }
+                    mode-z := CheckBox { visible: root.ftp-mode; text: @tr("Dateitransfers mit MODE Z komprimieren"); checked: root.data.mode-z; }
+                    show-hidden := CheckBox { visible: root.ftp-mode; text: @tr("Versteckte Dateien mit LIST -a anfordern"); checked: root.data.show-hidden; }
+                    FieldLabel { visible: root.ftp-mode; text: @tr("Eigenes LIST-Format (regulärer Ausdruck)"); }
+                    list-pattern := LineEdit { visible: root.ftp-mode; text: root.data.list-pattern; accessible-label: @tr("Eigenes LIST-Format (regulärer Ausdruck)"); }
+                    Text { visible: root.ftp-mode; text: @tr("Benannte Gruppen: name, kind und optional size. Ein eigenes Format verwendet LIST."); wrap: word-wrap; color: Colors.muted; }
                 }
-                FormSection { title: @tr("FTPS-Zertifikate"); visible: security.current-index < 2;
+                FormSection { title: @tr("TLS-Zertifikate"); visible: root.tls-mode;
                     FieldLabel { text: @tr("CA-Datei (PEM, optional)"); }
                     ca-bundle := LineEdit { text: root.data.ca-bundle; enabled: security.current-index != 2; accessible-label: @tr("CA-Datei (PEM, optional)"); }
                     FieldLabel { text: @tr("Clientzertifikat (Windows-Fingerabdruck, optional)"); }
@@ -656,30 +709,94 @@ component FtpProfilesCard inherits Rectangle {
                 FormSection { title: @tr("SSH-Server und Schlüssel"); visible: root.ssh-mode;
                     FieldLabel { text: @tr("SSH-Hostschlüssel (SHA256)"); }
                     ssh-fingerprint := LineEdit { text: root.data.ssh-fingerprint; placeholder-text: "SHA256:…"; accessible-label: @tr("SSH-Hostschlüssel (SHA256)"); }
-                    FieldLabel { text: @tr("Private SSH-Schlüsseldatei (optional)"); }
-                    ssh-private-key := LineEdit { text: root.data.ssh-private-key; placeholder-text: @tr("Absoluter Pfad (optional)"); accessible-label: @tr("Private SSH-Schlüsseldatei (optional)"); }
+                    FieldLabel { text: @tr("SSH-Anmeldemethode"); }
+                    ssh-agent := ComboBox { model: [@tr("Passwort oder Schlüsseldatei"), "OpenSSH-Agent", "Pageant", @tr("Windows-Kerberos (GSSAPI)")]; current-index: root.data.ssh-agent; accessible-label: @tr("SSH-Anmeldemethode"); }
+                    FieldLabel { visible: ssh-agent.current-index == 0; text: @tr("Private SSH-Schlüsseldatei (optional)"); }
+                    ssh-private-key := LineEdit { visible: ssh-agent.current-index == 0; text: root.data.ssh-private-key; placeholder-text: @tr("Absoluter Pfad (optional)"); accessible-label: @tr("Private SSH-Schlüsseldatei (optional)"); }
+                    FieldLabel { visible: ssh-agent.current-index == 3; text: @tr("Kerberos-Dienstprinzipal (optional)"); }
+                    ssh-kerberos-principal := LineEdit { visible: ssh-agent.current-index == 3; text: root.data.ssh-kerberos-principal; placeholder-text: "host/server.example@REALM"; accessible-label: @tr("Kerberos-Dienstprinzipal (optional)"); }
+                    ssh-kerberos-kex := CheckBox { visible: ssh-agent.current-index == 3; checked: root.data.ssh-kerberos-kex; text: @tr("GSSAPI-Schlüsselaustausch verlangen"); }
+                    Text { visible: ssh-agent.current-index == 3 && ssh-kerberos-kex.checked; text: @tr("Ohne SSH-Fingerabdruck ist ein ausdrücklich eingetragener Kerberos-Dienstprinzipal erforderlich."); color: Colors.muted; wrap: word-wrap; }
+                    ssh-kerberos-delegate := CheckBox { visible: ssh-agent.current-index == 3; checked: root.data.ssh-kerberos-delegate; text: @tr("Kerberos-Tickets an diesen Server delegieren"); }
+                    ssh-interactive := CheckBox { text: @tr("Keyboard-Interactive und zweiter Faktor"); checked: root.data.ssh-interactive; }
                 }
-                FormSection { title: @tr("Anmeldung");
+                FormSection { title: @tr("SSH-Verbindung"); visible: root.ssh-mode;
+                    FieldLabel { text: @tr("Sprungserverprofil"); }
+                    ssh-jump := ComboBox { model: root.jump-profiles; current-index: root.data.ssh-jump; accessible-label: @tr("Sprungserverprofil"); }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        VerticalLayout {
+                            FieldLabel { text: @tr("SSH-Zeitlimit in Sekunden"); }
+                            ssh-timeout := LineEdit { text: root.data.ssh-timeout; placeholder-text: "15"; accessible-label: @tr("SSH-Zeitlimit in Sekunden"); }
+                        }
+                        VerticalLayout {
+                            FieldLabel { text: @tr("Keepalive in Sekunden"); }
+                            ssh-keepalive := LineEdit { text: root.data.ssh-keepalive; placeholder-text: @tr("Deaktiviert"); accessible-label: @tr("Keepalive in Sekunden"); }
+                        }
+                    }
+                }
+                FormSection { title: "S3"; visible: root.s3-mode;
+                    FieldLabel { text: @tr("S3-Region"); }
+                    s3-region := LineEdit { text: root.data.s3-region; placeholder-text: "us-east-1"; accessible-label: @tr("S3-Region"); }
+                    s3-aws-enabled := CheckBox { checked: root.data.s3-aws-enabled; text: @tr("AWS-Anmeldekette verwenden"); }
+                    FieldLabel { visible: s3-aws-enabled.checked; text: @tr("AWS-Profil (optional)"); }
+                    s3-aws-profile := LineEdit { visible: s3-aws-enabled.checked; text: root.data.s3-aws-profile; placeholder-text: @tr("Leer für Standard-Anmeldekette"); accessible-label: @tr("AWS-Profil (optional)"); }
+                }
+                FormSection { title: @tr("Transfervorgaben");
+                    FieldLabel { text: @tr("Transfervorgabe"); }
+                    transfer-preset := ComboBox { model: root.transfer-names; current-index: root.data.transfer-preset; accessible-label: @tr("Transfervorgabe"); }
+                    FieldLabel { text: @tr("Einstellungen ohne passende Vorgabe"); }
+                    FieldLabel { visible: root.ftp-mode; text: @tr("Übertragungsmodus"); }
+                    transfer-mode := ComboBox { visible: root.ftp-mode; model: [@tr("Binär"), @tr("Text (ASCII)"), @tr("Automatisch nach Dateiendung")]; current-index: root.data.transfer-mode; accessible-label: @tr("Übertragungsmodus"); }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        VerticalLayout {
+                            FieldLabel { text: @tr("Durchsatzlimit (KiB/s)"); }
+                            transfer-speed := LineEdit { text: root.data.transfer-speed; placeholder-text: @tr("Unbegrenzt"); accessible-label: @tr("Durchsatzlimit (KiB/s)"); }
+                        }
+                        VerticalLayout {
+                            FieldLabel { text: @tr("Änderungszeiten"); }
+                            transfer-time := ComboBox { model: [@tr("Je nach Aktion"), @tr("Beibehalten"), @tr("Nicht übernehmen")]; current-index: root.data.transfer-time; accessible-label: @tr("Änderungszeiten"); }
+                        }
+                    }
+                    FieldLabel { text: @tr("Dateimaske für Transfers"); }
+                    transfer-mask := LineEdit { text: root.data.transfer-mask; placeholder-text: "*.txt;*.csv | *.tmp"; accessible-label: @tr("Dateimaske für Transfers"); }
+                    recycle-remote := CheckBox {
+                        visible: !root.s3-mode;
+                        text: @tr("Gelöschte Servereinträge in den Papierkorb verschieben");
+                        checked: root.data.recycle-remote;
+                    }
+                    recycle-overwrites := CheckBox {
+                        visible: security.current-index == 3;
+                        text: @tr("Alte Serverdateien beim Überschreiben im Papierkorb sichern");
+                        checked: root.data.recycle-overwrites;
+                    }
+                }
+                FormSection { title: @tr("Anmeldung"); visible: !root.s3-mode || !s3-aws-enabled.checked;
                     HorizontalLayout {
                         spacing: 10px;
                         VerticalLayout {
                             spacing: 4px;
-                            FieldLabel { text: @tr("Benutzername"); }
-                            user := LineEdit { text: root.data.user; placeholder-text: root.ssh-mode ? "" : @tr("Leer für anonyme Anmeldung"); accessible-label: @tr("Benutzername"); }
+                            FieldLabel { text: root.s3-mode ? @tr("Zugriffsschlüssel-ID") : @tr("Benutzername"); }
+                            user := LineEdit {
+                                text: root.data.user;
+                                placeholder-text: root.s3-mode ? @tr("Leer für AWS-Umgebungsvariablen") : root.ssh-mode ? "" : @tr("Leer für anonyme Anmeldung");
+                                accessible-label: root.s3-mode ? @tr("Zugriffsschlüssel-ID") : @tr("Benutzername");
+                            }
                         }
                         VerticalLayout {
                             spacing: 4px;
-                            FieldLabel { text: root.ssh-mode && ssh-private-key.text != "" ? @tr("Schlüsselpassphrase") : @tr("Passwort"); }
+                            FieldLabel { text: root.s3-mode ? @tr("Geheimer Zugriffsschlüssel") : root.ssh-mode && ssh-private-key.text != "" ? @tr("Schlüsselpassphrase") : @tr("Passwort"); }
                             password-field := LineEdit {
                                 placeholder-text: root.data.remember ? @tr("Neues Passwort (optional)") : @tr("Passwort zum Speichern");
                                 input-type: password;
-                                enabled: remember.checked;
-                                accessible-label: root.ssh-mode && ssh-private-key.text != "" ? @tr("Schlüsselpassphrase") : @tr("Passwort");
+                                enabled: remember.enabled && remember.checked;
+                                accessible-label: root.s3-mode ? @tr("Geheimer Zugriffsschlüssel") : root.ssh-mode && ssh-private-key.text != "" ? @tr("Schlüsselpassphrase") : @tr("Passwort");
                             }
                         }
                     }
-                    remember := CheckBox { text: @tr("Passwort in Windows-Anmeldeinformationen speichern"); checked: root.data.remember; }
-                    otp := CheckBox { visible: !root.ssh-mode; text: @tr("Einmalpasswort nach RFC 2289 (OTP)"); checked: root.data.otp; enabled: security.current-index == 2 && !active.checked && proxy.text == ""; }
+                    remember := CheckBox { enabled: (!root.ssh-mode || ssh-agent.current-index == 0) && (!root.s3-mode || (!s3-aws-enabled.checked && user.text != "")); text: @tr("Passwort in Windows-Anmeldeinformationen speichern"); checked: root.data.remember; }
+                    otp := CheckBox { visible: root.ftp-mode; text: @tr("Einmalpasswort nach RFC 2289 (OTP)"); checked: root.data.otp; enabled: security.current-index == 2 && !active.checked && proxy.text == ""; }
                 }
             }
         }
@@ -694,21 +811,46 @@ component FtpProfilesCard inherits Rectangle {
             }
             Text { text: root.dirty ? @tr("Ungespeicherte Änderungen") : @tr("Profil unverändert"); overflow: elide; min-width: 0px; color: root.dirty ? Colors.archive : Colors.muted; font-size: 11px; vertical-alignment: center; horizontal-stretch: 1; }
             Button { text: @tr("Schließen"); clicked => { root.close(); } }
+            Button {
+                text: "SCP…";
+                accessible-label: @tr("SCP-Dateitransfer");
+                icon: @image-url("icons/network.svg");
+                enabled: root.selected > 0 && root.ssh-mode && !root.dirty && !root.busy;
+                clicked => { root.operate("scp", root.data, ""); }
+            }
             save-button := Button {
                 text: @tr("Speichern"); enabled: root.dirty && !root.busy && name.text != "" && address.text != "";
                 clicked => {
                     root.operate("save", {
-                        name: name.text, address: address.text, user: user.text, proxy: root.ssh-mode ? "" : proxy.text,
+                        name: name.text, address: address.text, user: root.s3-mode && s3-aws-enabled.checked ? "" : user.text, proxy: proxy.text,
                         local-directory: local.text,
-                        security: security.current-index, active: !root.ssh-mode && active.checked, remember: remember.checked,
-                        listing: root.ssh-mode ? 0 : listing.current-index,
-                        address-family: address-family.current-index, charset: root.ssh-mode ? "" : charset.text,
-                        list-pattern: root.ssh-mode ? "" : list-pattern.text, show-hidden: !root.ssh-mode && show-hidden.checked, mode-z: !root.ssh-mode && mode-z.checked,
-                        ca-bundle: security.current-index >= 2 ? "" : ca-bundle.text,
-                        client-certificate: security.current-index >= 2 ? "" : client-certificate.text,
+                        security: security.current-index, active: root.ftp-mode && active.checked, remember: remember.enabled && remember.checked,
+                        listing: root.ftp-mode ? listing.current-index : 0,
+                        address-family: address-family.current-index, charset: root.ftp-mode ? charset.text : "",
+                        list-pattern: root.ftp-mode ? list-pattern.text : "", show-hidden: root.ftp-mode && show-hidden.checked, mode-z: root.ftp-mode && mode-z.checked,
+                        ca-bundle: root.tls-mode ? ca-bundle.text : "",
+                        client-certificate: root.tls-mode ? client-certificate.text : "",
                         otp: otp.enabled && otp.checked,
+                            transfer-mode: root.ftp-mode ? transfer-mode.current-index : 0,
+                            transfer-speed: transfer-speed.text,
+                            transfer-time: transfer-time.current-index,
+                            transfer-mask: transfer-mask.text,
+                            transfer-preset: transfer-preset.current-index,
+                            recycle-remote: !root.s3-mode && recycle-remote.checked,
+                            recycle-overwrites: security.current-index == 3 && recycle-overwrites.checked,
                             ssh-fingerprint: root.ssh-mode ? ssh-fingerprint.text : "",
-                            ssh-private-key: root.ssh-mode ? ssh-private-key.text : "",
+                            ssh-private-key: root.ssh-mode && ssh-agent.current-index == 0 ? ssh-private-key.text : "",
+                            ssh-agent: root.ssh-mode ? ssh-agent.current-index : 0,
+                            ssh-kerberos-principal: root.ssh-mode && ssh-agent.current-index == 3 ? ssh-kerberos-principal.text : "",
+                            ssh-kerberos-delegate: root.ssh-mode && ssh-agent.current-index == 3 && ssh-kerberos-delegate.checked,
+                            ssh-kerberos-kex: root.ssh-mode && ssh-agent.current-index == 3 && ssh-kerberos-kex.checked,
+                            ssh-interactive: root.ssh-mode && ssh-interactive.checked,
+                            ssh-jump: root.ssh-mode ? ssh-jump.current-index : 0,
+                            ssh-timeout: root.ssh-mode ? ssh-timeout.text : "",
+                            ssh-keepalive: root.ssh-mode ? ssh-keepalive.text : "",
+                            s3-region: root.s3-mode ? s3-region.text : "",
+                            s3-aws-enabled: root.s3-mode && s3-aws-enabled.checked,
+                            s3-aws-profile: root.s3-mode && s3-aws-enabled.checked ? s3-aws-profile.text : "",
                     }, password-field.text);
                 }
             }
@@ -719,16 +861,34 @@ component FtpProfilesCard inherits Rectangle {
                 clicked => {
                     if (root.dirty || root.selected == 0) {
                         root.operate("save-connect", {
-                            name: name.text, address: address.text, user: user.text, proxy: root.ssh-mode ? "" : proxy.text,
+                            name: name.text, address: address.text, user: root.s3-mode && s3-aws-enabled.checked ? "" : user.text, proxy: proxy.text,
                             local-directory: local.text, security: security.current-index,
-                            active: !root.ssh-mode && active.checked, remember: remember.checked, listing: root.ssh-mode ? 0 : listing.current-index,
-                            address-family: address-family.current-index, charset: root.ssh-mode ? "" : charset.text,
-                            list-pattern: root.ssh-mode ? "" : list-pattern.text, show-hidden: !root.ssh-mode && show-hidden.checked, mode-z: !root.ssh-mode && mode-z.checked,
-                            ca-bundle: security.current-index >= 2 ? "" : ca-bundle.text,
-                            client-certificate: security.current-index >= 2 ? "" : client-certificate.text,
+                            active: root.ftp-mode && active.checked, remember: remember.enabled && remember.checked, listing: root.ftp-mode ? listing.current-index : 0,
+                            address-family: address-family.current-index, charset: root.ftp-mode ? charset.text : "",
+                            list-pattern: root.ftp-mode ? list-pattern.text : "", show-hidden: root.ftp-mode && show-hidden.checked, mode-z: root.ftp-mode && mode-z.checked,
+                            ca-bundle: root.tls-mode ? ca-bundle.text : "",
+                            client-certificate: root.tls-mode ? client-certificate.text : "",
                             otp: otp.enabled && otp.checked,
+                            transfer-mode: root.ftp-mode ? transfer-mode.current-index : 0,
+                            transfer-speed: transfer-speed.text,
+                            transfer-time: transfer-time.current-index,
+                            transfer-mask: transfer-mask.text,
+                            transfer-preset: transfer-preset.current-index,
+                            recycle-remote: !root.s3-mode && recycle-remote.checked,
+                            recycle-overwrites: security.current-index == 3 && recycle-overwrites.checked,
                             ssh-fingerprint: root.ssh-mode ? ssh-fingerprint.text : "",
-                            ssh-private-key: root.ssh-mode ? ssh-private-key.text : "",
+                            ssh-private-key: root.ssh-mode && ssh-agent.current-index == 0 ? ssh-private-key.text : "",
+                            ssh-agent: root.ssh-mode ? ssh-agent.current-index : 0,
+                            ssh-kerberos-principal: root.ssh-mode && ssh-agent.current-index == 3 ? ssh-kerberos-principal.text : "",
+                            ssh-kerberos-delegate: root.ssh-mode && ssh-agent.current-index == 3 && ssh-kerberos-delegate.checked,
+                            ssh-kerberos-kex: root.ssh-mode && ssh-agent.current-index == 3 && ssh-kerberos-kex.checked,
+                            ssh-interactive: root.ssh-mode && ssh-interactive.checked,
+                            ssh-jump: root.ssh-mode ? ssh-jump.current-index : 0,
+                            ssh-timeout: root.ssh-mode ? ssh-timeout.text : "",
+                            ssh-keepalive: root.ssh-mode ? ssh-keepalive.text : "",
+                            s3-region: root.s3-mode ? s3-region.text : "",
+                            s3-aws-enabled: root.s3-mode && s3-aws-enabled.checked,
+                            s3-aws-profile: root.s3-mode && s3-aws-enabled.checked ? s3-aws-profile.text : "",
                         }, password-field.text);
                     } else { root.operate("connect", root.data, ""); }
                 }
@@ -743,6 +903,13 @@ component FtpProfilesCard inherits Rectangle {
         user.text = root.data.user;
         proxy.text = root.data.proxy;
         local.text = root.data.local-directory;
+        transfer-mode.current-index = root.data.transfer-mode;
+        transfer-speed.text = root.data.transfer-speed;
+        transfer-time.current-index = root.data.transfer-time;
+        transfer-mask.text = root.data.transfer-mask;
+        transfer-preset.current-index = root.data.transfer-preset;
+        recycle-remote.checked = root.data.recycle-remote;
+        recycle-overwrites.checked = root.data.recycle-overwrites;
         security.current-index = root.data.security;
         active.checked = root.data.active;
         listing.current-index = root.data.listing;
@@ -755,7 +922,14 @@ component FtpProfilesCard inherits Rectangle {
         mode-z.checked = root.data.mode-z;
         otp.checked = root.data.otp;
         ssh-fingerprint.text = root.data.ssh-fingerprint;
+        ssh-kerberos-kex.checked = root.data.ssh-kerberos-kex;
         ssh-private-key.text = root.data.ssh-private-key;
+        ssh-agent.current-index = root.data.ssh-agent;
+        ssh-interactive.checked = root.data.ssh-interactive;
+        ssh-jump.current-index = root.data.ssh-jump;
+        ssh-timeout.text = root.data.ssh-timeout;
+        ssh-keepalive.text = root.data.ssh-keepalive;
+        s3-region.text = root.data.s3-region;
         remember.checked = root.data.remember;
         password-field.text = "";
         if (root.selected == 0) { name.focus(); }
@@ -1347,16 +1521,20 @@ component SyncOptionsCard inherits Rectangle {
 
     function draft() -> SyncOptionsData {
         return {
-            mode: mode.current-index,
+            mode: timestamps.checked && mode.current-index == 2 ? 3 : mode.current-index,
             recursive: recursive.checked,
-            empty-dirs: recursive.checked && empty-dirs.checked,
-            selected-only: root.has-selection && selected-only.checked, by-content: by-content.checked,
-            ignore-date: ignore-date.checked, masks: masks.text, remember-roots: remember-roots.checked,
+            empty-dirs: recursive.checked && empty-dirs.checked && !timestamps.checked,
+            selected-only: root.has-selection && selected-only.checked, by-content: by-content.checked && !timestamps.checked,
+            ignore-date: ignore-date.checked && !timestamps.checked, masks: masks.text, remember-roots: remember-roots.checked,
+            timestamps-only: root.archive-side < 0 && timestamps.checked,
+            timestamp-all-sizes: timestamps.checked && !same-size.checked,
         };
     }
 
     function reset() {
-        mode.current-index = root.data.mode;
+        timestamps.checked = root.data.timestamps-only && root.archive-side < 0;
+        same-size.checked = !root.data.timestamp-all-sizes;
+        mode.current-index = timestamps.checked && root.data.mode == 3 ? 2 : (timestamps.checked && root.data.mode == 2 ? 1 : root.data.mode);
         recursive.checked = root.data.recursive;
         empty-dirs.checked = root.data.empty-dirs;
         selected-only.checked = root.data.selected-only;
@@ -1386,19 +1564,22 @@ component SyncOptionsCard inherits Rectangle {
                 alignment: start;
                 FormSection { title: @tr("Abgleichrichtung");
                 mode := ComboBox {
-                    model: root.ftp
+                    model: timestamps.checked
+                        ? (root.ftp ? [@tr("Beide Seiten"), @tr("Lokal → Server"), @tr("Server → lokal")]
+                            : [@tr("Beide Seiten"), @tr("Links → rechts"), @tr("Rechts → links")])
+                        : root.ftp
                         ? ["Beide Seiten abgleichen", "Lokal → FTP", "Lokal auf FTP spiegeln", "FTP → lokal"]
                         : ["Beide Seiten abgleichen", "Von links nach rechts kopieren", "Links nach rechts spiegeln", "Von rechts nach links kopieren"];
                     enabled: root.archive-side < 0 || root.archive-writable;
                     accessible-label: "Richtung der Synchronisierung";
                 }
-                if mode.current-index == 2 : Text {
+                if mode.current-index == 2 && !timestamps.checked : Text {
                     text: root.ftp ? "Beim Spiegeln werden zusätzliche FTP-Einträge zum Löschen vorgeschlagen."
                         : "Beim Spiegeln werden zusätzliche Einträge rechts zum Löschen vorgeschlagen.";
                     color: Colors.accent;
                     wrap: word-wrap;
                 }
-                if root.ftp : Text {
+                if root.ftp && !timestamps.checked : Text {
                     text: "Der Abgleich verwendet Größe und UTC-Zeit aus MLSD. Beim Inhaltsvergleich fragt Arco zuerst eine angebotene Server-Prüfsumme ab. Falls nötig, lädt Arco die Datei zum Vergleichen herunter.";
                     color: Colors.muted;
                     wrap: word-wrap;
@@ -1414,18 +1595,32 @@ component SyncOptionsCard inherits Rectangle {
                 }
                 }
                 FormSection { title: @tr("Vergleichsoptionen");
+                timestamps := CheckBox {
+                    visible: root.archive-side < 0;
+                    text: @tr("Nur Änderungszeiten abgleichen");
+                    toggled => { mode.current-index = 0; }
+                }
+                if timestamps.checked : Text {
+                    text: @tr("Arco übernimmt für übereinstimmende Dateipfade ausschließlich die Änderungszeit.");
+                    color: Colors.muted;
+                    wrap: word-wrap;
+                }
+                same-size := CheckBox {
+                    visible: timestamps.checked;
+                    text: @tr("Nur bei gleicher Dateigröße");
+                }
                 HorizontalLayout {
                     spacing: 14px;
                     VerticalLayout {
                         spacing: 4px;
                         recursive := CheckBox { text: "Unterordner"; }
-                        empty-dirs := CheckBox { text: "Leere Ordner"; enabled: recursive.checked; }
+                        empty-dirs := CheckBox { text: "Leere Ordner"; enabled: recursive.checked && !timestamps.checked; }
                         selected-only := CheckBox { text: "Nur markierte Einträge"; enabled: root.has-selection; }
                     }
                     VerticalLayout {
                         spacing: 4px;
-                        by-content := CheckBox { text: "Nach Inhalt vergleichen"; enabled: root.archive-side < 0; }
-                        ignore-date := CheckBox { text: "Datum ignorieren"; enabled: root.archive-side < 0; }
+                        by-content := CheckBox { text: "Nach Inhalt vergleichen"; enabled: root.archive-side < 0 && !timestamps.checked; }
+                        ignore-date := CheckBox { text: "Datum ignorieren"; enabled: root.archive-side < 0 && !timestamps.checked; }
                     }
                 }
                 FieldLabel { text: @tr("Dateifilter"); }
@@ -1559,6 +1754,7 @@ component SyncReviewCard inherits Rectangle {
     in property <bool> has-actions;
     in property <bool> has-deletes;
     in property <bool> copy-only;
+    in property <bool> timestamps-only;
     in property <bool> comparison-only;
     callback filter(int);
     callback choose(int, int);
@@ -1572,7 +1768,7 @@ component SyncReviewCard inherits Rectangle {
     VerticalLayout {
         padding: 20px;
         spacing: 8px;
-        DialogHeading { icon: @image-url("icons/sync.svg"); title: root.copy-only ? @tr("FTP-Kopie prüfen") : (root.comparison-only ? @tr("Archivvergleich") : @tr("Synchronisierung prüfen")); }
+        DialogHeading { icon: @image-url("icons/sync.svg"); title: root.timestamps-only ? @tr("Änderungszeiten prüfen") : (root.copy-only ? @tr("FTP-Kopie prüfen") : (root.comparison-only ? @tr("Archivvergleich") : @tr("Synchronisierung prüfen"))); }
         HorizontalLayout {
             spacing: 10px;
             for folder[index] in root.roots : FormSection {
@@ -1608,12 +1804,12 @@ component SyncReviewCard inherits Rectangle {
                     }
                     if row.can-left : Button {
                         text: @tr("Nach links"); icon: @image-url("icons/back.svg"); checkable: true; checked: row.action == 1;
-                        accessible-label: "Nach links kopieren · " + row.path;
+                        accessible-label: (root.timestamps-only ? @tr("Änderungszeit nach links übernehmen") : @tr("Nach links kopieren")) + " · " + row.path;
                         clicked => { approve.checked = false; root.choose(row.index, 1); }
                     }
                     if row.can-right : Button {
                         text: @tr("Nach rechts"); icon: @image-url("icons/forward.svg"); checkable: true; checked: row.action == 2;
-                        accessible-label: "Nach rechts kopieren · " + row.path;
+                        accessible-label: (root.timestamps-only ? @tr("Änderungszeit nach rechts übernehmen") : @tr("Nach rechts kopieren")) + " · " + row.path;
                         clicked => { approve.checked = false; root.choose(row.index, 2); }
                     }
                     if row.can-delete : Button {
@@ -1640,7 +1836,7 @@ component SyncReviewCard inherits Rectangle {
             close-sync := Button { text: @tr("Schließen"); clicked => { root.close(); } init => { self.focus(); } }
             run-sync := Button {
                 visible: !root.comparison-only;
-                text: root.copy-only ? @tr("Kopieren") : @tr("Synchronisieren"); primary: true; icon: @image-url("icons/sync.svg");
+                text: root.timestamps-only ? @tr("Änderungszeiten übernehmen") : (root.copy-only ? @tr("Kopieren") : @tr("Synchronisieren")); primary: true; icon: @image-url("icons/sync.svg");
                 enabled: root.has-actions && (!root.has-deletes || approve.checked);
                 clicked => { root.run(approve.checked); }
             }
@@ -2863,6 +3059,7 @@ export component MainWindow inherits Window {
     out property <int> right-wdx-first: right-view.first-visible-row;
     out property <int> right-wdx-count: right-view.visible-row-count;
     in property <int> active-panel;
+    in property <bool> navigation-linked;
     in property <bool> stacked;
     in property <SettingsData> settings;
     in property <bool> settings-open;
@@ -2949,8 +3146,16 @@ export component MainWindow inherits Window {
     in property <[string]> sync-roots;
     in property <[string]> sync-presets;
     in property <[string]> ftp-profile-names;
+    in property <[string]> ftp-jump-profiles;
     in property <int> ftp-profile-index;
     in property <FtpProfileData> ftp-profile-data;
+    in property <[string]> ftp-transfer-names;
+    in property <[string]> transfer-preset-names;
+    in property <int> transfer-preset-index;
+    in property <int> transfer-preset-revision;
+    in property <TransferPresetData> transfer-preset-data;
+    in property <string> transfer-preset-notice;
+    callback transfer-preset-operate(string, int, TransferPresetData);
     in property <int> ftp-profile-revision;
     in property <string> ftp-profile-notice;
     in property <[PluginRowData]> plugin-entries;
@@ -2984,6 +3189,7 @@ export component MainWindow inherits Window {
     in property <bool> sync-has-actions;
     in property <bool> sync-has-deletes;
     in property <bool> sync-copy-only;
+    in property <bool> sync-timestamps-only;
     in property <bool> sync-comparison-only;
     in property <image> viewer-image;
     in property <bool> viewer-back;
@@ -3190,6 +3396,7 @@ export component MainWindow inherits Window {
                         }
                     }
                     if root.top-buttons.length == 0 : Rectangle { horizontal-stretch: 1; }
+                    NavButton { icon: @image-url("icons/link.svg"); label: @tr("Navigation koppeln"); checkable: true; checked: root.navigation-linked; clicked => { root.action("linked-navigation"); } }
                     NavButton { icon: Colors.light ? @image-url("icons/moon.svg") : @image-url("icons/sun.svg"); label: @tr("Farbschema wechseln"); clicked => { root.action("theme"); } }
                     NavButton { icon: @image-url("icons/settings.svg"); label: @tr("Einstellungen"); clicked => { root.action("settings"); } }
                     ActionButton {
@@ -3491,6 +3698,7 @@ export component MainWindow inherits Window {
                 has-actions: root.sync-has-actions;
                 has-deletes: root.sync-has-deletes;
                 copy-only: root.sync-copy-only;
+                timestamps-only: root.sync-timestamps-only;
                 comparison-only: root.sync-comparison-only;
                 filter(value) => { root.sync-filter(value); }
                 choose(index, action) => { root.sync-choose(index, action); }
@@ -3527,12 +3735,33 @@ export component MainWindow inherits Window {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 profiles: root.ftp-profile-names;
+                jump-profiles: root.ftp-jump-profiles;
+                transfer-names: root.ftp-transfer-names;
                 selected: root.ftp-profile-index;
                 data: root.ftp-profile-data;
                 revision: root.ftp-profile-revision;
                 notice: root.ftp-profile-notice; busy: root.job-active;
                 select(index) => { root.ftp-profile-select(index); }
                 operate(operation, data, password) => { root.ftp-profile-operate(operation, data, password); }
+                close => { root.action("close-dialog"); }
+            }
+        }
+        if root.dialog-kind == "transfer-presets" : Rectangle {
+            background: #050a14a8;
+            width: 100%; height: 100%;
+            TouchArea { }
+            TransferPresetsCard {
+                focus-cycle: root.dialog-focus-cycle;
+                width: min(parent.width - 30px, 730px);
+                height: min(parent.height - 30px, 640px);
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                names: root.transfer-preset-names;
+                index: root.transfer-preset-index;
+                revision: root.transfer-preset-revision;
+                data: root.transfer-preset-data;
+                notice: root.transfer-preset-notice;
+                operate(action, index, draft) => { root.transfer-preset-operate(action, index, draft); }
                 close => { root.action("close-dialog"); }
             }
         }
@@ -3973,7 +4202,7 @@ export component MainWindow inherits Window {
                 copy-all => { root.action("copy-result"); } copy-row(text) => { root.copy-review-text(text); }
             }
         }
-        if root.dialog-kind != "duplicate-selection" && root.dialog-kind != "message" && root.dialog-kind != "text-draft" && root.dialog-kind != "configuration" && root.dialog-kind != "navigation-list" && root.dialog-kind != "navigation-editor" && root.dialog-kind != "utility" && root.dialog-kind != "metadata" && root.dialog-kind != "permissions" && root.dialog-kind != "properties" && root.dialog-kind != "ftp-edit" && root.dialog-kind != "management-review" && root.dialog-kind != "multi-rename" && root.dialog-kind != "rename-review" && root.dialog-kind != "search-results" && root.dialog-kind != "" && root.dialog-kind != "input" && root.dialog-kind != "confirm" && root.dialog-kind != "viewer" && root.dialog-kind != "image" && root.dialog-kind != "transfer" && root.dialog-kind != "transfer-manager" && root.dialog-kind != "archive-pack" && root.dialog-kind != "archive-pack-profile" && root.dialog-kind != "archive-extract" && root.dialog-kind != "palette" && root.dialog-kind != "text-comparison" && root.dialog-kind != "transfer-conflict" && root.dialog-kind != "advanced-search" && root.dialog-kind != "sync-options" && root.dialog-kind != "sync-review" && root.dialog-kind != "ftp-browser" && root.dialog-kind != "ftp-profiles" && root.dialog-kind != "plugins" : Rectangle {
+        if root.dialog-kind != "duplicate-selection" && root.dialog-kind != "message" && root.dialog-kind != "text-draft" && root.dialog-kind != "configuration" && root.dialog-kind != "navigation-list" && root.dialog-kind != "navigation-editor" && root.dialog-kind != "utility" && root.dialog-kind != "metadata" && root.dialog-kind != "permissions" && root.dialog-kind != "properties" && root.dialog-kind != "ftp-edit" && root.dialog-kind != "management-review" && root.dialog-kind != "multi-rename" && root.dialog-kind != "rename-review" && root.dialog-kind != "search-results" && root.dialog-kind != "" && root.dialog-kind != "input" && root.dialog-kind != "confirm" && root.dialog-kind != "viewer" && root.dialog-kind != "image" && root.dialog-kind != "transfer" && root.dialog-kind != "transfer-manager" && root.dialog-kind != "archive-pack" && root.dialog-kind != "archive-pack-profile" && root.dialog-kind != "archive-extract" && root.dialog-kind != "palette" && root.dialog-kind != "text-comparison" && root.dialog-kind != "transfer-conflict" && root.dialog-kind != "advanced-search" && root.dialog-kind != "sync-options" && root.dialog-kind != "sync-review" && root.dialog-kind != "ftp-browser" && root.dialog-kind != "ftp-profiles" && root.dialog-kind != "transfer-presets" && root.dialog-kind != "plugins" : Rectangle {
             background: #050a14a8;
             width: 100%; height: 100%;
             TouchArea { }

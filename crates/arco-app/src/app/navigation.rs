@@ -822,6 +822,7 @@ pub(super) fn clone_pending(pending: &Pending) -> Option<Pending> {
         Pending::TabGroupDelete(n) => Pending::TabGroupDelete(n.clone()),
         Pending::TabImport => Pending::TabImport,
         Pending::TabExport(n) => Pending::TabExport(n.clone()),
+        Pending::S3Tags(tags) => Pending::S3Tags(tags.clone()),
         _ => return super::auxiliary::clone_pending(pending),
     })
 }

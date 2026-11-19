@@ -1344,3 +1344,304 @@ Durchsucht das aktuelle Serververzeichnis und seine Unterordner nach Dateimasken
 Serverordner	Server directory
 Zum Treffer	Go to match
 Treffer auf dem Server	Server search results
+SSH-Anmeldemethode	SSH authentication method
+Passwort oder Schlüsseldatei	Password or key file
+SSH-Verbindung	SSH connection
+Sprungserverprofil	Jump host profile
+SSH-Zeitlimit in Sekunden	SSH timeout in seconds
+Keepalive in Sekunden	Keepalive in seconds
+Direkte SSH-Verbindung	Direct SSH connection
+SSH-Sprungserver anmelden	Sign in to the SSH jump host
+Das ausgewählte SSH-Sprungprofil fehlt.	The selected SSH jump host profile is missing.
+Die SSH-Sprungserverkette enthält einen Kreis.	The SSH jump host chain contains a loop.
+Die SSH-Sprungserverkette darf höchstens acht Server enthalten.	The SSH jump host chain can contain up to eight servers.
+Trage den Proxy im Profil des ersten SSH-Sprungservers ein.	Set the proxy in the first SSH jump host’s profile.
+SFTP unterstützt HTTP-CONNECT und SOCKS5 ohne Proxy-Anmeldedaten.	SFTP supports HTTP CONNECT and SOCKS5 without proxy credentials.
+Datei herunterladen …	Downloading file …
+Teildatei prüfen …	Checking partial file …
+Wähle ein FTP- oder SFTP-Dateifenster.	Select an FTP or SFTP file pane.
+Server-URLs kopieren	Copy server URLs
+Verbindung erneut herstellen …	Reconnecting …
+Download prüfen …	Verifying download …
+Keyboard-Interactive und zweiter Faktor	Keyboard-interactive and second factor
+SSH-Anmeldung	SSH sign-in
+SCP-Dateitransfer	SCP file transfer
+Überträgt eine Datei über das ausgewählte SSH-Profil.	Transfers one file using the selected SSH profile.
+Lokaler Dateiname oder absoluter Pfad	Local file name or absolute path
+Vom Server herunterladen	Download from server
+Auf den Server hochladen	Upload to server
+SSH-Verbindung herstellen …	Opening SSH connection …
+Fortsetzbar · Ziel muss neu sein	Resumable · Destination must be new
+Datei hochladen …	Uploading file …
+Upload prüfen …	Verifying upload …
+Server-Änderungszeit setzen	Set server modification time
+Server-Änderungszeit setzen …	Set server modification time …
+SFTP-Prüfsummen berechnen	Calculate SFTP checksums
+SFTP-Prüfsummen	SFTP checksums
+SFTP-Prüfsummen · SHA-256	SFTP checksums · SHA-256
+SHA-256 berechnen …	Calculating SHA-256 …
+Netzwerkprofile	Network profiles
+Netzwerkprofile …	Network profiles …
+Serverdateien	Server files
+Gleiche den SSH-Hostschlüssel mit dem Serverbetreiber ab.	Verify the SSH host key with the server administrator.
+Verwende die HTTPS-Adresse des Endpunkts. Der Bucket ist der erste Pfadteil.	Use the endpoint’s HTTPS address. The bucket is the first path segment.
+Gib die WebDAV-Adresse bis zum gewünschten Stammordner ein.	Enter the WebDAV address of the desired root directory.
+TLS-Zertifikate	TLS certificates
+S3-Region	S3 region
+Zugriffsschlüssel-ID	Access key ID
+Leer für AWS-Umgebungsvariablen	Leave blank to use AWS environment variables
+Geheimer Zugriffsschlüssel	Secret access key
+Gib den geheimen S3-Zugriffsschlüssel ein.	Enter the secret S3 access key.
+WebDAV-Anmeldung	WebDAV sign-in
+S3-Anmeldung	S3 sign-in
+Öffne zuerst eine Verbindung über die Netzwerkprofile.	First connect using Network profiles.
+Wähle einen Zielnamen und die Regel für vorhandene Dateien.	Choose a destination name and what to do if it exists.
+S3-Objekt-Tags bearbeiten	Edit S3 object tags
+S3-Objekt-Tags lesen	Reading S3 object tags
+S3-Objekt-Tags speichern	Saving S3 object tags
+Tags als JSON-Objekt aus Schlüssel und Wert	Tags as a JSON object of key and value pairs
+Wähle ein S3-Objekt.	Select an S3 object.
+Die neue Änderungszeit wird auf alle ausgewählten SFTP-Einträge angewendet.	Applies the new modification time to all selected SFTP entries.
+JJJJ-MM-TT HH:MM:SS (UTC)	YYYY-MM-DD HH:MM:SS (UTC)
+Gib Datum und Uhrzeit als JJJJ-MM-TT HH:MM:SS (UTC) ein.	Enter date and time as YYYY-MM-DD HH:MM:SS (UTC).
+Windows-Kerberos (GSSAPI)	Windows Kerberos (GSSAPI)
+Kerberos-Dienstprinzipal (optional)	Kerberos service principal (optional)
+AWS-Anmeldekette verwenden	Use AWS credential chain
+AWS-Profil (optional)	AWS profile (optional)
+Leer für Standard-Anmeldekette	Blank for the default credential chain
+WebDAV-Sperren verwalten	Manage WebDAV locks
+Öffne ein WebDAV-Dateifenster.	Open a WebDAV file panel.
+Sperrdauer in Sekunden	Lock duration in seconds
+Sperrstatus anzeigen	Show lock status
+Schreibsperre anlegen	Create write lock
+Eigene Sperre verlängern	Refresh own lock
+Eigene Sperre aufheben	Release own lock
+WebDAV-Sperren	WebDAV locks
+Eigene Sperre	Own lock
+Serverseitige Sperre	Server lock
+Tiefe	Depth
+Restdauer	Time remaining
+Der WebDAV-Server meldet keine Sperren.	The WebDAV server reports no locks.
+WebDAV-Schreibsperre angelegt.	WebDAV write lock created.
+WebDAV-Schreibsperre verlängert.	WebDAV write lock refreshed.
+WebDAV-Schreibsperre aufgehoben.	WebDAV write lock released.
+Gib für die WebDAV-Sperre eine Dauer von 30 bis 3600 Sekunden ein.	Enter a WebDAV lock duration of 30 to 3600 seconds.
+S3-Versionshistorie	S3 version history
+Öffne ein S3-Dateifenster.	Open an S3 file panel.
+Exakter Objektname	Exact object name
+Versionen anzeigen	Show versions
+S3-Versionen lesen	Reading S3 versions
+Aktuelle Löschmarkierung	Current delete marker
+Löschmarkierung	Delete marker
+Aktuell	Current
+Stand	Revision
+Versions-ID	Version ID
+Version herunterladen	Download version
+Keine Objektversionen gefunden.	No object versions found.
+Öffne im anderen Dateifenster einen lokalen Zielordner zum Herunterladen.	Open a local download folder in the other file panel.
+Wähle eine Dateiversion zum Herunterladen.	Select a file version to download.
+Wähle eine S3-Dateiversion.	Select an S3 file version.
+S3-Version herunterladen	Download S3 version
+S3-Version heruntergeladen	S3 version downloaded
+Kerberos-Tickets an diesen Server delegieren	Delegate Kerberos tickets to this server
+WinSCP-Profile importieren	Import WinSCP profiles
+WinSCP-Profile importieren …	Import WinSCP profiles…
+Verbindungsprofile importieren	Import connection profiles
+Verbindungsprofile importieren …	Import connection profiles…
+Wähle die Quelle für Profile oder SSH-Hostschlüssel. Arco zeigt die Änderungen vor dem Speichern.	Choose where to import profiles or SSH host keys. Arco previews the changes before saving.
+Importquelle	Import source
+WinSCP-INI auswählen	Choose a WinSCP INI file
+WinSCP aus der Windows-Registrierung	WinSCP from the Windows registry
+PuTTY aus der Windows-Registrierung	PuTTY from the Windows registry
+KiTTY aus der Windows-Registrierung	KiTTY from the Windows registry
+FileZilla-XML auswählen	Choose a FileZilla XML file
+OpenSSH config auswählen	Choose an OpenSSH config file
+OpenSSH known_hosts auswählen	Choose an OpenSSH known_hosts file
+Total Commander SFTP-INI auswählen	Choose a Total Commander SFTP INI file
+Pfad zur Importdatei	Path to the import file
+Verbindungsprofile prüfen	Review connection profiles
+SSH-Hostschlüssel prüfen	Review SSH host keys
+Kein passender Hostschlüssel	No matching host key
+Arco ergänzt fehlende Fingerabdrücke in gespeicherten SSH-Profilen.	Arco adds missing fingerprints to saved SSH profiles.
+SSH-Hostschlüssel übernommen	SSH host keys imported
+Proxy-Anmeldung	Proxy authentication
+Proxy-Anmeldung …	Proxy authentication…
+Proxy-Benutzername	Proxy username
+Proxy-Passwort	Proxy password
+Proxy-Anmeldung entfernen	Remove proxy credentials
+Hinterlege die Zugangsdaten für den Proxy dieses Profils im Windows-Anmeldeinformationsspeicher.	Save the proxy credentials for this profile in Windows Credential Manager.
+Sitzungs-URL öffnen	Open session URL
+Sitzungs-URL öffnen …	Open session URL…
+Sitzungs-URL	Session URL
+Sitzungs-URL prüfen	Review session URL
+Sitzungs-URL kopieren	Copy session URL
+Arco-Profil-Link kopieren	Copy Arco profile link
+Sitzungsverknüpfung speichern	Save session shortcut
+Sitzungsverknüpfung speichern …	Save session shortcut…
+Sitzungsverknüpfung gespeichert	Session shortcut saved
+Füge die URL eines Serverordners oder eines gespeicherten Arco-Profils ein.	Paste a server folder URL or a saved Arco profile link.
+Verifizierter SHA256-Fingerabdruck	Verified SHA256 fingerprint
+Automatisierung	Automation
+Netzwerkskript auswählen	Choose network script
+Netzwerkskript planen	Schedule network script
+Netzwerkskript planen …	Schedule network script…
+Geplante Netzwerkskripte	Scheduled network scripts
+Geplante Netzwerkskripte …	Scheduled network scripts…
+Absoluter Pfad zum UTF-8-Skript	Absolute path to the UTF-8 script
+Täglicher Start zur lokalen Uhrzeit, während du in Windows angemeldet bist.	Runs daily at local time while you are signed in to Windows.
+Aufgabenname	Task name
+Lokale Uhrzeit (HH:MM)	Local time (HH:MM)
+Aufgabe anlegen	Create task
+Windows-Aufgabenplanung	Windows Task Scheduler
+Für Arco Commander sind keine Windows-Aufgaben vorhanden.	There are no Windows tasks for Arco Commander.
+Windows-Aufgabe	Windows task
+Windows-Aufgabe verwalten	Manage Windows task
+Füge die URL einer Datei, eines Ordners oder eines gespeicherten Arco-Profils ein.	Paste a file URL, a folder URL or a saved Arco profile link.
+Datei im Dateifenster zeigen	Show file in the file pane
+Datei herunterladen	Download file
+Datei-URL kopieren	Copy file URL
+Arco-Datei-Link kopieren	Copy Arco file link
+Dateiverknüpfung speichern	Save file shortcut
+Dateiverknüpfung speichern …	Save file shortcut…
+Wähle die lokale Uhrzeit und den Windows-Anmeldemodus für die tägliche Aufgabe.	Choose the local time and Windows sign-in mode for the daily task.
+Nur während der Windows-Anmeldung	Only while signed in to Windows
+Auch ohne Windows-Anmeldung	Run even while signed out
+Auch ohne Windows-Anmeldung ausführen	Run while signed out of Windows
+Die Windows-Aufgabenplanung benötigt das Passwort deines aktuellen Windows-Kontos.	Windows Task Scheduler needs the password for your current Windows account.
+Windows-Kontopasswort	Windows account password
+Arco-Links in Windows	Arco links in Windows
+Arco-Links in Windows …	Arco links in Windows…
+Arco-Profil-Links mit arco:// über dieses Windows-Konto öffnen.	Open arco:// profile links with this Windows account.
+Registrieren	Register
+Registrierung entfernen	Remove registration
+Arco-Link-Registrierung entfernt	Arco link registration removed
+Arco-Links in Windows registriert	Arco links registered in Windows
+Jetzt ausführen	Run now
+Aufgabe entfernen	Remove task
+Wartet	Queued
+WinSCP-Profilimport prüfen	Review WinSCP profile import
+SSH-Hostschlüssel ergänzen	Set the SSH host key fingerprint
+Lokalen Ordner überwachen	Watch local folder
+Lokalen Ordner überwachen …	Watch local folder…
+Ordnerüberwachung beenden	Stop folder watch
+Neue und geänderte Dateien werden veröffentlicht. Vorhandene Zieldateien können ersetzt werden.	New and changed files are published. Existing destination files may be replaced.
+Prüfintervall in Sekunden	Scan interval in seconds
+Überwachung starten	Start watching
+Ordnerüberwachung läuft.	Folder watch is running.
+Ordnerüberwachung beendet.	Folder watch stopped.
+GSSAPI-Schlüsselaustausch verlangen	Require GSSAPI key exchange
+Ohne SSH-Fingerabdruck ist ein ausdrücklich eingetragener Kerberos-Dienstprinzipal erforderlich.	Without an SSH fingerprint, enter a trusted Kerberos service principal explicitly.
+SSH-Fingerabdruck oder Kerberos-Dienstprinzipal ergänzen	Add an SSH fingerprint or Kerberos service principal
+Transfervorgaben	Transfer defaults
+Übertragungsmodus	Transfer mode
+Text (ASCII)	Text (ASCII)
+Durchsatzlimit (KiB/s)	Speed limit (KiB/s)
+Unbegrenzt	Unlimited
+Änderungszeiten	Modification times
+Je nach Aktion	By operation
+Beibehalten	Preserve
+Nicht übernehmen	Do not preserve
+Dateimaske für Transfers	Transfer file mask
+SSH-Terminal im Serverordner öffnen	Open SSH terminal in the server folder
+SSH-Terminal im Anmeldeordner öffnen	Open SSH terminal in the login directory
+Profilvorgabe · Ziel muss neu sein	Profile default · New destination required
+Profilvorgabe · Überschreiben erlauben	Profile default · Allow overwrite
+Mit Profilvorgabe herunterladen	Download using the profile default
+Binär herunterladen	Download in binary mode
+Transfervorgaben verwalten …	Manage transfer presets…
+Transfervorgabe	Transfer preset
+Automatische Auswahl	Automatic selection
+Einstellungen ohne passende Vorgabe	Settings when no preset matches
+Neue Vorgabe	New preset
+Gespeicherte Transfervorgaben	Saved transfer presets
+Arco verwendet die erste passende Auswahlregel von oben.	Arco uses the first matching rule in the list.
+Priorität erhöhen	Move up in priority
+Priorität senken	Move down in priority
+Übertragung	Transfer
+Name der Transfervorgabe	Transfer preset name
+Auswahlregel aktivieren	Enable selection rule
+Leere Felder passen auf jeden Wert. Trenne Masken mit ; und Ausschlüsse mit |. ** erfasst Unterordner.	Blank fields match any value. Separate patterns with ; and exclusions with |. ** matches subfolders.
+Servermaske	Server mask
+Benutzermaske	User mask
+Lokale Ordnermaske	Local folder mask
+Server-Ordnermaske	Remote folder mask
+Duplizieren	Duplicate
+Transfervorgaben gespeichert.	Transfer presets saved.
+Beide Seiten	Both sides
+Lokal → Server	Local → server
+Server → lokal	Server → local
+Links → rechts	Left → right
+Rechts → links	Right → left
+Nur Änderungszeiten abgleichen	Synchronize modification times only
+Arco übernimmt für übereinstimmende Dateipfade ausschließlich die Änderungszeit.	Arco updates only modification times for matching paths.
+Nur bei gleicher Dateigröße	Only when file sizes match
+Änderungszeiten prüfen	Review modification times
+Änderungszeit nach links übernehmen	Apply modification time to the left
+Änderungszeit nach rechts übernehmen	Apply modification time to the right
+Änderungszeiten übernehmen	Apply modification times
+Änderungszeit weicht ab	Modification time differs
+Größe abweichend oder Änderungszeit fehlt	Size differs or modification time is missing
+Zeitstempelabgleich	Timestamp synchronization
+Wähle, wann Windows das Skript starten soll.	Choose when Windows should start the script.
+Aufgabenauslöser	Task trigger
+Täglich	Daily
+Einmalig	Once
+Wöchentlich	Weekly
+Monatlich	Monthly
+Bei Windows-Anmeldung	At Windows sign-in
+Gib die tägliche Uhrzeit ein.	Enter the daily start time.
+Wähle einen einzelnen Zeitpunkt.	Choose a single date and time.
+Gib Uhrzeit und gewünschte Wochentage ein.	Enter the start time and days of the week.
+Gib Uhrzeit und die Monatstage als Zahlen ein.	Enter the start time and the days of the month as numbers.
+Windows startet die Aufgabe bei deiner Anmeldung.	Windows starts the task when you sign in.
+JJJJ-MM-TT HH:MM	YYYY-MM-DD HH:MM
+HH:MM Mo,Fr	HH:MM Mon,Fri
+Lokale Löschungen	Local deletions
+Serverdateien behalten	Keep files on the server
+Löschungen auf dem Server übernehmen	Apply deletions on the server
+Neue und geänderte Dateien werden veröffentlicht. Die Löschoption gilt nur für bestätigte Dateipaare.	New and changed files are published. Deletion is limited to verified pairs of files.
+Gelöschte Servereinträge in den Papierkorb verschieben	Move deleted server items to the recycle bin
+Server-Papierkorb öffnen	Open server recycle bin
+Servereintrag wiederherstellen	Restore server item
+Servereintrag wiederherstellen …	Restore server item…
+In den Server-Papierkorb verschieben	Move to server recycle bin
+Papierkorbeintrag	Recycle bin item
+Öffne zuerst den Server-Papierkorb.	Open the server recycle bin first.
+Wähle einen Eintrag im Server-Papierkorb.	Select an item in the server recycle bin.
+Zielordner relativ zum Netzwerk-Startordner oder vollständige URL	Destination relative to the remote start folder or full URL
+Alte Serverdateien beim Überschreiben im Papierkorb sichern	Keep overwritten server files in the recycle bin
+Navigation koppeln	Link navigation
+Navigation koppeln oder lösen	Toggle linked navigation
+Navigation gekoppelt.	Navigation linked.
+Navigation entkoppelt.	Navigation unlinked.
+Öffne zwei lokale oder Netzwerkordner und warte, bis beide geladen sind.	Open two local or remote folders and wait for them to load.
+Ein fest gesperrter Tab kann der Navigation nicht folgen.	A fixed tab cannot follow navigation.
+Der Pfad liegt außerhalb der gekoppelten Startordner.	The path is outside the linked starting folders.
+Der Gegenordner kann auf diesem Dateisystem nicht geöffnet werden.	The matching folder cannot be opened on this file system.
+Gekoppelten Ordner anlegen	Create matching folder
+Die gekoppelten Dateifenster wurden inzwischen gewechselt.	The linked file panels have changed.
+Datei verschlüsselt hochladen	Upload encrypted file
+Datei verschlüsselt hochladen …	Upload encrypted file…
+Datei entschlüsselt herunterladen	Download and decrypt file
+Datei entschlüsselt herunterladen …	Download and decrypt file…
+Wähle eine einzelne lokale Datei.	Select one local file.
+Öffne im Gegenfenster den Zielordner auf dem Server.	Open the destination server folder in the opposite panel.
+Passphrase (mindestens zwölf Zeichen)	Passphrase (at least twelve characters)
+Passphrase wiederholen	Repeat passphrase
+Verschlüsseln und hochladen	Encrypt and upload
+Wähle ein verschlüsseltes Dateipaket im Serverfenster.	Select an encrypted package in the server panel.
+Öffne im Gegenfenster den lokalen Zielordner.	Open the local destination in the opposite panel.
+Passphrase	Passphrase
+Herunterladen und entschlüsseln	Download and decrypt
+Die Passphrasen stimmen nicht überein.	The passphrases do not match.
+Verwende mindestens zwölf Zeichen und keine Steuerzeichen (maximal 1024 Bytes).	Use at least twelve characters and no control characters (maximum 1024 bytes).
+Gib eine gültige Passphrase ein.	Enter a valid passphrase.
+Datei lokal verschlüsseln	Encrypt file locally
+Verschlüsseltes Paket hochladen	Upload encrypted package
+Verschlüsseltes Paket herunterladen	Download encrypted package
+Datei lokal entschlüsseln und prüfen	Decrypt and verify file locally
+Passphrase oder verschlüsseltes Dateipaket ungültig.	Invalid passphrase or encrypted package.
+Verschlüsselt hochgeladen	Uploaded encrypted
+Entschlüsselt gespeichert	Saved decrypted
+Beim Systemstart	At system startup
+Der Systemstart benötigt eine Registrierung mit Administratorrechten und das Passwort des Windows-Kontos.	A startup task must be registered by an administrator and requires your Windows account password.

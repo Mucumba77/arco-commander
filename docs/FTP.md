@@ -6,7 +6,7 @@ Unter **Netz → FTP-Verbindungen** speicherst du Server, Anmeldedaten und Start
 | --- | --- |
 | IP-Version | Automatisch, ausschließlich IPv4 oder ausschließlich IPv6 |
 | FTPS | Explizites TLS über `ftp://` oder implizites TLS über `ftps://`. Die Zertifikatsprüfung ist aktiv. Für eine private CA kann das Profil eine PEM-Datei verwenden. Der optionale Fingerabdruck sucht ein Clientzertifikat im persönlichen Windows-Zertifikatspeicher. |
-| Proxy | HTTP(S)-Tunnel und SOCKS4/4a/5/5h. Eine `ftp://`-Proxyadresse wählt das Klartext-Gateway mit `USER Benutzer@Server[:Port]`. |
+| Proxy | HTTP(S)-Tunnel und SOCKS4/4a/5/5h. HTTP(S) Basic und SOCKS5 verwenden die getrennte **Proxy-Anmeldung …** im Netzwerkprofil. Eine `ftp://`-Proxyadresse wählt das Klartext-Gateway mit `USER Benutzer@Server[:Port]`. |
 | Serverzeichensatz | Standard ist UTF-8. Für ältere Server kannst du beispielsweise `windows-1252` oder `Shift_JIS` angeben. Arco benutzt die Einstellung für Dateinamen, LIST/MLSD und FTP-Dateibefehle. |
 | Verzeichnisliste | Automatisch, MLSD oder LIST. LIST erkennt Unix, IIS und VMS. VMS liefert Blockzahlen. Die genaue Dateigröße bleibt dort leer. |
 | Versteckte Dateien | In der automatischen Auswahl fordert Arco mit `LIST -a` alle Einträge an. Bei ausdrücklich gewähltem MLSD entscheidet der Server, welche Dateien er darüber listet. |

@@ -144,6 +144,7 @@ fn result_waits(outcome: &super::Outcome, kind: &str) -> bool {
         | O::RenameNameList(..)
         | O::Ftp(_)
         | O::FtpEditReady(_)
+        | O::S3Tags(_)
         | O::Imported(_)
         | O::ImportedTabs(..)
         | O::ImportedFtp(_)
@@ -728,6 +729,21 @@ fn rename_text(form: &TextDraftForm) -> io::Result<String> {
 
 pub(super) fn clone_pending(p: &Pending) -> Option<Pending> {
     Some(match p {
+        Pending::EncryptedUpload(path, remote) => {
+            Pending::EncryptedUpload(path.clone(), remote.clone())
+        }
+        Pending::EncryptedDownload(remote, entry, folder) => {
+            Pending::EncryptedDownload(remote.clone(), entry.clone(), folder.clone())
+        }
+        Pending::NetworkScheduleCreate(script, kind) => {
+            Pending::NetworkScheduleCreate(script.clone(), kind)
+        }
+        Pending::NetworkScheduleBackground(script, name, trigger) => {
+            Pending::NetworkScheduleBackground(script.clone(), name.clone(), *trigger)
+        }
+        Pending::NetworkWatch(local, remote) => {
+            Pending::NetworkWatch(local.clone(), remote.clone())
+        }
         Pending::WdxChoose(p, f) => Pending::WdxChoose(p.clone(), f.clone()),
         Pending::WdxEditPlugin(p, f) => Pending::WdxEditPlugin(p.clone(), f.clone()),
         Pending::WdxEditField(t, f) => Pending::WdxEditField(t.clone(), f.clone()),

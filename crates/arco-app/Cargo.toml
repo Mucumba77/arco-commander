@@ -10,6 +10,10 @@ license.workspace = true
 name = "arco-commander"
 path = "src/main.rs"
 
+[[bin]]
+name = "arco-net"
+path = "src/bin/arco-net.rs"
+
 [dependencies]
 ammonia = "4.2"
 arco-core.workspace = true

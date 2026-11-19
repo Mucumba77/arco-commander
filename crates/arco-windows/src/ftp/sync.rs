@@ -1,8 +1,12 @@
-use super::{Entry, Listing, Session, TransferMode, Url, check_cancel, check_segment, run};
+use super::{
+    Entry, Listing, Security, Session, TransferMode, Url, check_cancel, check_segment, run,
+};
 use std::fs::File;
 use std::io;
 use std::path::{Component, Path};
 use std::sync::atomic::AtomicBool;
+
+mod trash;
 
 pub struct SyncUpload<'a> {
     pub source: &'a Path,
@@ -20,6 +24,65 @@ pub struct SyncChecksum {
 }
 
 impl Session {
+    pub fn set_sync_modified(
+        &self,
+        directory: &Url,
+        expected: &Entry,
+        timestamp: &str,
+        cancel: &AtomicBool,
+    ) -> io::Result<()> {
+        if expected.directory != Some(false)
+            || timestamp.len() != 14
+            || !timestamp.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Ungültige Datei oder UTC-Änderungszeit.",
+            ));
+        }
+        if self.security().is_ssh() {
+            return self.set_ssh_modified(directory, expected, timestamp, cancel);
+        }
+        if self.security().is_ftp() {
+            self.verify_sync_entry(directory, expected, cancel)?;
+            self.set_ftp_upload_modified(directory, &expected.name, timestamp, cancel)?;
+            let listing = self.list_sync(directory, cancel)?;
+            let actual = listing.regular_file(&expected.name)?;
+            if actual.size != expected.size || actual.unique != expected.unique {
+                return Err(io::Error::other(
+                    "Die Serverdatei hat sich beim Setzen der Änderungszeit geändert.",
+                ));
+            }
+            return Ok(());
+        }
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Dieses Protokoll unterstützt hier keine Server-Zeitstempeländerung.",
+        ))
+    }
+
+    pub(super) fn set_ftp_upload_modified(
+        &self,
+        directory: &Url,
+        name: &str,
+        stamp: &str,
+        cancel: &AtomicBool,
+    ) -> io::Result<()> {
+        check_quote_name(name)?;
+        self.quote_in_directory(directory, &[&format!("+MFMT {stamp} {name}")], cancel)?;
+        let listing = self.list_sync(directory, cancel)?;
+        let current = listing.regular_file(name)?;
+        if !current
+            .modified
+            .as_deref()
+            .is_some_and(|time| time.split('.').next() == Some(stamp))
+        {
+            return Err(io::Error::other(
+                "Der FTP-Server hat die Änderungszeit nicht bestätigt.",
+            ));
+        }
+        Ok(())
+    }
     pub fn directory_url(&self, address: &str) -> io::Result<Url> {
         let mut directory = Url::parse(address).map_err(io::Error::other)?;
         self.validate(&directory)?;
@@ -50,6 +113,9 @@ impl Session {
 
     pub fn parent_directory(&self, directory: &Url) -> io::Result<Url> {
         self.validate(directory)?;
+        if self.security() == Security::WebDav && directory == &self.connection.url {
+            return Ok(directory.clone());
+        }
         let mut parent = directory.clone();
         parent
             .path_segments_mut()
@@ -87,6 +153,9 @@ impl Session {
     pub fn list_sync(&self, directory: &Url, cancel: &AtomicBool) -> io::Result<Listing> {
         if self.is_sftp() {
             return self.list_sftp(directory, true, cancel);
+        }
+        if !self.security().is_ftp() {
+            return self.list(directory, cancel);
         }
         let result = run(
             self.command(directory)?,
@@ -174,12 +243,68 @@ impl Session {
         )
     }
 
+    pub fn verify_sync_absent(
+        &self,
+        root: &Url,
+        relative: &Path,
+        cancel: &AtomicBool,
+    ) -> io::Result<()> {
+        if self.sync_entry_at(root, relative, cancel)?.is_some() {
+            Err(io::Error::other(
+                "Der Servereintrag ist inzwischen vorhanden.",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn sync_entry_at(
+        &self,
+        root: &Url,
+        relative: &Path,
+        cancel: &AtomicBool,
+    ) -> io::Result<Option<Entry>> {
+        let mut directory = root.clone();
+        let mut parts = relative.components().peekable();
+        if parts.peek().is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Serverpfad fehlt.",
+            ));
+        }
+        while let Some(part) = parts.next() {
+            let Component::Normal(name) = part else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Ungültiger Serverpfad.",
+                ));
+            };
+            let name = name
+                .to_str()
+                .ok_or_else(|| io::Error::other("Serverpfade benötigen Unicode."))?;
+            let listing = self.list_sync(&directory, cancel)?;
+            let Some(entry) = find_entry(&listing, name)? else {
+                return Ok(None);
+            };
+            if parts.peek().is_none() {
+                return Ok(Some(entry.clone()));
+            }
+            if entry.directory != Some(true) {
+                return Err(io::Error::other(
+                    "Der Servereintrag ist inzwischen vorhanden.",
+                ));
+            }
+            directory = self.relative_directory(&directory, Path::new(&entry.name))?;
+        }
+        Ok(None)
+    }
+
     pub fn sync_checksum_method(
         &self,
         directory: &Url,
         cancel: &AtomicBool,
     ) -> io::Result<Option<SyncChecksum>> {
-        if self.is_sftp() {
+        if !self.security().is_ftp() {
             return Ok(None);
         }
         Ok(self
@@ -249,10 +374,13 @@ impl Session {
     ) -> io::Result<()> {
         check_quote_name(name)?;
         expect_entry(&self.list_sync(parent, cancel)?, name, None)?;
-        if self.is_sftp() {
-            self.sftp_create(&self.file(parent, name)?, cancel)?;
-        } else {
-            self.quote_in_directory(parent, &[&format!("+MKD {name}")], cancel)?;
+        let url = self.file(parent, name)?;
+        match self.security() {
+            Security::Sftp => self.sftp_create(&url, cancel)?,
+            Security::Scp => self.scp_mkdir(&url, cancel)?,
+            Security::WebDav => self.webdav_mkdir(&url, cancel)?,
+            Security::S3 => self.s3_mkdir(url, cancel)?,
+            _ => self.quote_in_directory(parent, &[&format!("+MKD {name}")], cancel)?,
         }
         let listing = self.list_sync(parent, cancel)?;
         if !find_entry(&listing, name)?
@@ -281,6 +409,24 @@ impl Session {
         if before.name.to_lowercase() != name.to_lowercase() {
             expect_entry(&listing, name, None)?;
         }
+        if self.security() == Security::S3 {
+            return self.s3_rename(parent, before, name, cancel);
+        }
+        if self.security() == Security::WebDav {
+            let destination = if before.directory == Some(true) {
+                self.relative_directory(parent, Path::new(name))?
+            } else {
+                self.file(parent, name)?
+            };
+            self.webdav_move(
+                &self.entry_url(parent, before)?,
+                &destination,
+                Some(before),
+                None,
+                cancel,
+            )?;
+            return Ok(());
+        }
         self.rename_in_directory(parent, &before.name, name, cancel)?;
         self.verify_published(parent, before, name, cancel)
             .map(|_| ())
@@ -295,7 +441,12 @@ impl Session {
         check_quote_name(&before.name)?;
         let listing = self.list_sync(parent, cancel)?;
         let verb = if before.directory == Some(true) {
-            let unchanged = find_entry(&listing, &before.name)?.is_some_and(|entry| {
+            let current = find_entry(&listing, &before.name)?;
+            // A prefix without a marker disappears when its last object is deleted.
+            if self.security() == Security::S3 && parent.path() != "/" && current.is_none() {
+                return Ok(());
+            }
+            let unchanged = current.is_some_and(|entry| {
                 entry.name == before.name
                     && entry.directory == Some(true)
                     && entry.unique == before.unique
@@ -311,7 +462,13 @@ impl Session {
             expect_entry(&listing, &before.name, Some(before))?;
             "DELE"
         };
-        self.remove_in_directory(parent, &before.name, verb == "RMD", cancel)
+        match self.security() {
+            Security::S3 => self.s3_remove(self.file(parent, &before.name)?, before, cancel),
+            Security::WebDav => {
+                self.webdav_delete_entry(&self.entry_url(parent, before)?, before, cancel)
+            }
+            _ => self.remove_in_directory(parent, &before.name, verb == "RMD", cancel),
+        }
     }
 
     pub fn set_unix_permissions(
@@ -337,6 +494,20 @@ impl Session {
                 cancel,
             );
         }
+        if self.security() == Security::Scp {
+            return self.scp_metadata(
+                &self.file(parent, &before.name)?,
+                Some(permissions),
+                None,
+                cancel,
+            );
+        }
+        if !self.security().is_ftp() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Der Server stellt hier keine Unix-Rechte bereit.",
+            ));
+        }
         self.quote_in_directory(
             parent,
             &[&format!("+SITE CHMOD {permissions:03o} {}", before.name)],
@@ -357,6 +528,43 @@ impl Session {
         }) {
             return Err(io::Error::other("Ungültiger UTC-Zeitstempel für FTP."));
         }
+        if matches!(self.security(), Security::WebDav | Security::S3) {
+            expect_entry(
+                &self.list_sync(parent, cancel)?,
+                upload.name,
+                upload.expected,
+            )?;
+            if self.security() == Security::WebDav {
+                self.webdav_upload(
+                    parent,
+                    upload.source,
+                    upload.name,
+                    upload.expected,
+                    verify_source,
+                    cancel,
+                )?;
+            } else {
+                self.s3_upload(
+                    &self.file(parent, upload.name)?,
+                    upload.source,
+                    upload.expected,
+                    verify_source,
+                    cancel,
+                )?;
+            }
+            return self
+                .list_sync(parent, cancel)?
+                .entries
+                .into_iter()
+                .find(|entry| {
+                    entry.name == upload.name
+                        && entry.directory == Some(false)
+                        && entry.size == Some(upload.size)
+                })
+                .ok_or_else(|| {
+                    io::Error::other("Der Server hat die veröffentlichte Datei nicht bestätigt.")
+                });
+        }
         let reservation = tempfile::Builder::new()
             .prefix("arco-upload-")
             .suffix(".part")
@@ -369,7 +577,7 @@ impl Session {
         let listing = self.list_sync(parent, cancel)?;
         expect_entry(&listing, upload.name, upload.expected)?;
         expect_entry(&listing, temporary, None)?;
-        let mut temporary_created = !self.is_sftp();
+        let mut temporary_created = self.security().is_ftp();
         let result = (|| {
             if self.is_sftp() {
                 self.send_sftp_file(
@@ -378,13 +586,32 @@ impl Session {
                     cancel,
                     &mut temporary_created,
                 )?;
+            } else if self.security() == Security::Scp {
+                // The sync plan controls the timestamp of the staged file below.
+                let mut settings = self.transfer_settings().clone();
+                settings.preserve_time = Some(false);
+                self.with_transfer_snapshot(settings).scp_upload(
+                    parent,
+                    upload.source,
+                    temporary,
+                    cancel,
+                    |_| {},
+                )?;
+                temporary_created = true;
             } else {
-                self.upload(parent, upload.source, temporary, true, cancel)?;
+                self.send_file(
+                    &self.file(parent, temporary)?,
+                    upload.source,
+                    TransferMode::Binary,
+                    cancel,
+                )?;
             }
             verify_source()?;
             if let Some(time) = upload.modified_utc {
                 let result = if self.is_sftp() {
                     self.sftp_set_metadata(&self.file(parent, temporary)?, None, Some(time), cancel)
+                } else if self.security() == Security::Scp {
+                    self.scp_metadata(&self.file(parent, temporary)?, None, Some(time), cancel)
                 } else {
                     self.quote_in_directory(parent, &[&format!("+MFMT {time} {temporary}")], cancel)
                 };
@@ -406,11 +633,18 @@ impl Session {
                         "Der Server hat die Größe der temporären Datei nicht bestätigt.",
                     )
                 })?;
+            if let Some(previous) = upload.expected
+                && self.connection.recycle_overwrites
+                && !self.in_recycle_directory(parent)
+            {
+                return self.replace_recycling_previous(parent, staged, previous, cancel);
+            }
             let publication = self.rename_in_directory(parent, temporary, upload.name, cancel);
             match (publication, upload.expected) {
                 (Err(error), Some(previous))
                     if error.kind() == io::ErrorKind::Unsupported
-                        || (self.is_sftp() && error.kind() == io::ErrorKind::AlreadyExists) =>
+                        || (self.security().is_ssh()
+                            && error.kind() == io::ErrorKind::AlreadyExists) =>
                 {
                     self.replace_with_backup(parent, staged, previous, cancel)
                 }
@@ -524,6 +758,9 @@ impl Session {
         if self.is_sftp() {
             return self.sftp_rename(&self.file(parent, from)?, &self.file(parent, to)?, cancel);
         }
+        if self.security() == Security::Scp {
+            return self.scp_rename(&self.file(parent, from)?, &self.file(parent, to)?, cancel);
+        }
         self.quote_in_directory(
             parent,
             &[&format!("+RNFR {from}"), &format!("+RNTO {to}")],
@@ -540,6 +777,9 @@ impl Session {
     ) -> io::Result<()> {
         if self.is_sftp() {
             return self.sftp_remove(&self.file(parent, name)?, directory, cancel);
+        }
+        if self.security() == Security::Scp {
+            return self.scp_remove(&self.file(parent, name)?, directory, cancel);
         }
         let verb = if directory { "RMD" } else { "DELE" };
         self.quote_in_directory(parent, &[&format!("+{verb} {name}")], cancel)

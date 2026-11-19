@@ -1,0 +1,5 @@
+# Russh für Arco Commander
+
+Dieser Quellstand basiert auf Russh 0.65.2, Commit `56a999871aa134072e4f2a7395fe2de313870e21`, mit Apache-2.0-Lizenz. Cargo bindet ihn über den Workspace-Patch ein. Beispiele, Benchmarks und eigenständige Upstream-Integrationstests sind aus dem Cargo-Paket entfernt. [Russh 0.65.2](https://crates.io/crates/russh/0.65.2) · [Apache-Lizenz](LICENSE)
+
+Arcos Änderungen implementieren clientseitig Kerberos-Schlüsselaustausch nach RFC 8732 mit Curve25519, Group 14 und Group 16. Ein optionaler Provider in der Client-Konfiguration kapselt Kerberos-Token und MIC-Prüfung. Die Aushandlung von `null` und das Weglassen eines Hostschlüssels sind an die ausdrückliche Freigabe des Aufrufers gebunden. Bei weiteren Schlüsselaustauschen wird ein eigener Kerberos-Kontext aufgebaut. Nur der verifizierte Kontext des ersten Austauschs ist für `gssapi-keyex` zulässig. Arco implementiert den Provider mit Windows SSPI. [RFC 4462](https://www.rfc-editor.org/rfc/rfc4462.html) · [RFC 8732](https://www.rfc-editor.org/rfc/rfc8732.html)
