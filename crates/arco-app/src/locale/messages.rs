@@ -216,6 +216,7 @@ fn render(language: Language, text: &str, depth: usize) -> Cow<'_, str> {
         || text.starts_with("shell:")
         || text.starts_with("ftp://")
         || text.starts_with("ftps://")
+        || text.starts_with("sftp://")
     {
         return Cow::Borrowed(text);
     }

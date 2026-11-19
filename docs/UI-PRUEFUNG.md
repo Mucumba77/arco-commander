@@ -2,6 +2,22 @@
 
 Die Fenstertests übernimmt der Projektinhaber. Diese Liste beschreibt die erwartete Bedienung der überarbeiteten Oberfläche; sie ist kein Protokoll bestandener Fenstertests.
 
+## Eingebautes SFTP und Serversuche
+
+- Über **Netz → FTP- und SFTP-Verbindungen …** ein SFTP-Profil speichern und in beiden Dateifenstern öffnen. Prüfe Maus und Tastatur, das Ein- und Ausblenden der protokollspezifischen Felder sowie die Rückkehr zum Dateifenster nach einem abweichenden Fingerabdruck.
+- Aus einem bestehenden Profil mit RSA-Schlüsseldatei verbinden. Prüfe die Benennung der Passphrase und das Speichern und erneute Öffnen eines Tabs.
+- Eine Datei und einen Ordner zwischen lokalem und SFTP-Fenster kopieren. Einen vorhandenen Upload nach Freigabe ersetzen, einen Transfer abbrechen und den Zielstand kontrollieren.
+- Mit **Alt+F7** ein Dateimuster suchen. Treffer in einem Unterordner per Maus und Tastatur wählen und mit **Zum Treffer** öffnen. Leere Trefferliste und Wechsel der Seite während eines Hintergrundauftrags prüfen.
+- Einen SFTP-Ordner mit einem lokalen Ordner abgleichen. Die Kopierrichtung in der Vorschau ändern und die Ergebnisse in beiden Fenstern kontrollieren.
+
+## FTP-Änderungen in Version 1.6.0
+
+- Ein Profil mit eigener CA-Datei und einem Serverzeichensatz speichern, neu auswählen und verbinden. Zwischen IPv4 und IPv6 umschalten. Ein falscher Zertifikatsname muss zu einer verständlichen Fehlermeldung führen. Mit einem passenden Testserver und installiertem Clientzertifikat den Windows-Zertifikatsfingerabdruck prüfen.
+- Die Rohliste per Maus und Befehlspalette öffnen, ein eigenes LIST-Format speichern und mit einem Server testen, der einen versteckten Eintrag meldet.
+- Dieselbe Textdatei einmal als Text und einmal binär hoch- und herunterladen. Beide Modi mit aktivierter MODE-Z-Option wiederholen. Eine unveränderte vorhandene Teildatei fortsetzen und eine unpassende Teildatei ablehnen lassen.
+- Eine Downloadliste mit zwei unterschiedlichen Zielen übergeben und anschließend mit einer Kollision wiederholen. Bei einer Kollision darf kein Transfer beginnen. Abbruch und Fortschritt im Transfermanager prüfen.
+- `FEAT` oder `PWD` über **FTP-Serverbefehl** senden. Dialog, Antwort und Rückkehr zum Dateifenster per Maus und Tastatur prüfen.
+
 ## Archiv-Erweiterungen nach Version 1.4.0
 
 - **Einstellungen:** „Konfigurieren → Archiveinstellungen“ mit Maus und Befehlspalette öffnen. Alle Felder ausschließlich mit Tab/Umschalt+Tab, Pfeiltasten und Leertaste bedienen. Kategorie mit Strg+Bild auf/ab wechseln; Eingaben müssen erhalten bleiben. Ungültige Rate, Wörterbuch- oder Wortgröße muss auf der Archivseite korrigierbar sein. Speichern und beim nächsten eigenen Start wieder prüfen; Deutsch/Englisch/Französisch und erhöhte DPI einbeziehen.

@@ -1277,3 +1277,70 @@ Wörterbuch in KiB (0 = automatisch)	Dictionary in KiB (0 = automatic)
 Wortgröße (0 = automatisch)	Word size (0 = automatic)
 Solid-Block in MiB (0 = automatisch)	Solid block in MiB (0 = automatic)
 Eigene Speicher- und Threadwerte verwenden den mitgelieferten 7-Zip-Konsolenadapter.	Custom memory and thread values use the bundled 7-Zip console adapter.
+Nur LIST (Unix / IIS / VMS)	LIST only (Unix / IIS / VMS)
+HTTP-, SOCKS- oder FTP-Proxy	HTTP, SOCKS or FTP proxy
+IP-Version	IP version
+Serverzeichensatz	Server character encoding
+Dateitransfers mit MODE Z komprimieren	Compress file transfers using MODE Z
+Versteckte Dateien mit LIST -a anfordern	Request hidden files with LIST -a
+Eigenes LIST-Format (regulärer Ausdruck)	Custom LIST format (regular expression)
+Benannte Gruppen: name, kind und optional size. Ein eigenes Format verwendet LIST.	Named groups: name, kind and optional size. Custom formats use LIST.
+FTPS-Zertifikate	FTPS certificates
+CA-Datei (PEM, optional)	CA file (PEM, optional)
+Clientzertifikat (Windows-Fingerabdruck, optional)	Client certificate (Windows thumbprint, optional)
+Einmalpasswort nach RFC 2289 (OTP)	RFC 2289 one-time password (OTP)
+FTP-Downloadliste …	FTP download list…
+FTP-Downloadliste	FTP download list
+FTP-Serverbefehl …	FTP server command…
+FTP-Serverbefehl	FTP server command
+FTP-Serverantwort	FTP server response
+FTP-Verbindungsdetails	FTP connection details
+FTP-Rohliste	Raw FTP listing
+Gib die OTP-Passphrase ein. Der Server erhält nur den berechneten Einmalcode.	Enter the OTP passphrase. The server only receives the computed one-time code.
+Gib einen FTP-Befehl für den aktuellen Ordner ein, zum Beispiel FEAT oder PWD.	Enter a command for the current FTP directory, such as FEAT or PWD.
+FTP-Pfad oder URL	FTP path or URL
+Lädt eine Datei über einen Pfad oder eine URL des verbundenen FTP-Servers herunter.	Download a file by path or URL from the connected FTP server.
+Ein FTP-Pfad oder eine URL des verbundenen Servers pro Zeile. Die Dateien werden unter ihren Namen im lokalen Zielfenster gespeichert.	Enter one FTP path or URL from the connected server per line. Files keep their names in the local destination pane.
+Binär · Ziel muss neu sein	Binary · Require a new destination
+Binär · Überschreiben erlauben	Binary · Allow overwrite
+Text (ASCII) · Ziel muss neu sein	Text (ASCII) · Require a new destination
+Text (ASCII) · Überschreiben erlauben	Text (ASCII) · Allow overwrite
+Binär · Vorhandenen Upload prüfen und fortsetzen	Binary · Verify and resume existing upload
+Text (ASCII) herunterladen	Download as text (ASCII)
+Ein FTP-Pfad oder eine URL des verbundenen Servers pro Zeile. Mit @ vor einem absoluten Pfad liest Arco die Liste aus einer Textdatei.	Enter one FTP path or URL from the connected server per line. Prefix an absolute path with @ to load a text file.
+FTP- und SFTP-Verbindungen	FTP and SFTP connections
+FTP- und SFTP-Verbindungen …	FTP and SFTP connections …
+Gespeicherte Verbindungen	Saved connections
+Serveradresse und Startordner	Server address and start directory
+Protokoll	Protocol
+SFTP verwendet SSH. Der Hostschlüssel muss beim Serverbetreiber geprüft werden.	SFTP uses SSH. Verify the host key with the server operator.
+SSH-Server und Schlüssel	SSH server and keys
+SSH-Hostschlüssel (SHA256)	SSH host key (SHA256)
+Private SSH-Schlüsseldatei (optional)	SSH private key file (optional)
+Schlüsselpassphrase	Key passphrase
+SFTP-Anmeldung	SFTP sign-in
+SFTP-Verbindung herstellen	Connecting via SFTP
+Gib die Passphrase der SSH-Schlüsseldatei ein. Ist sie unverschlüsselt, lass das Feld leer.	Enter the SSH key passphrase. Leave it blank if the key is unencrypted.
+Gib das Passwort für diese SFTP-Verbindung ein.	Enter the password for this SFTP connection.
+SSH-Hostschlüssel	SSH host key
+Gib den beim Serverbetreiber überprüften SHA256-Fingerabdruck ein.	Enter the SHA256 fingerprint you verified with the server operator.
+Netzwerkverbindung öffnen	Open network connection
+Serveradresse oder Servername:Port	Server address or hostname:port
+Netzwerk-Schnellverbindung …	Quick network connection …
+FTP- und SFTP-Dateioperationen	FTP and SFTP file operations
+Verbindungsdetails	Connection details
+SFTP-Verbindungsdetails	SFTP connection details
+Serverordner mit lokalem Ordner abgleichen	Synchronize server and local directories
+Netzwerkverbindung trennen	Disconnect network connection
+Öffne zuerst eine FTP- oder SFTP-Verbindung über Netz.	First open an FTP or SFTP connection from Network.
+Dieser Befehl benötigt eine FTP-Verbindung.	This command requires an FTP connection.
+SFTP hochladen	Upload via SFTP
+SFTP herunterladen	Download via SFTP
+Die Datei wird zunächst unter einem temporären Namen übertragen.	The file is transferred under a temporary name first.
+Lädt eine Datei über einen Pfad oder eine URL des verbundenen Servers herunter.	Downloads a file using a path or URL on the connected server.
+Serverpfad oder URL	Server path or URL
+Server durchsuchen	Search the server
+Durchsucht das aktuelle Serververzeichnis und seine Unterordner nach Dateimasken.	Searches the current server directory and its subdirectories by file mask.
+Serverordner	Server directory
+Zum Treffer	Go to match
+Treffer auf dem Server	Server search results

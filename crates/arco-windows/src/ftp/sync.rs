@@ -1,6 +1,4 @@
-use super::{
-    Entry, Listing, Session, Url, check_cancel, check_segment, parse_mlsd_with_policy, run,
-};
+use super::{Entry, Listing, Session, TransferMode, Url, check_cancel, check_segment, run};
 use std::fs::File;
 use std::io;
 use std::path::{Component, Path};
@@ -87,6 +85,9 @@ impl Session {
     }
 
     pub fn list_sync(&self, directory: &Url, cancel: &AtomicBool) -> io::Result<Listing> {
+        if self.is_sftp() {
+            return self.list_sftp(directory, true, cancel);
+        }
         let result = run(
             self.command(directory)?,
             &["--request", "MLSD", "--max-time", "60"],
@@ -103,7 +104,7 @@ impl Session {
                 error
             }
         })?;
-        parse_mlsd_with_policy(&bytes, true)
+        self.parse_listing(&bytes, true)
     }
 
     pub fn fetch_sync(
@@ -132,11 +133,11 @@ impl Session {
             })?;
         self.verify_sync_entry(directory, expected, cancel)?;
         let url = self.file(directory, &expected.name)?;
-        let limit = size.max(1).to_string();
-        super::run_observed(
-            self.command(&url)?,
-            &["--max-filesize", &limit],
-            Some(output.try_clone()?),
+        self.receive_file(
+            &url,
+            output,
+            TransferMode::Binary,
+            Some(size),
             cancel,
             || {
                 progress(super::DownloadProgress {
@@ -178,6 +179,9 @@ impl Session {
         directory: &Url,
         cancel: &AtomicBool,
     ) -> io::Result<Option<SyncChecksum>> {
+        if self.is_sftp() {
+            return Ok(None);
+        }
         Ok(self
             .checksum_replies(directory, &["FEAT"], cancel)?
             .as_deref()
@@ -223,7 +227,15 @@ impl Session {
             arguments.extend(["--quote", command]);
         }
         match run(self.command(directory)?, &arguments, None, cancel) {
-            Ok(output) => Ok(Some(output)),
+            Ok(output) => Ok(Some(
+                self.connection
+                    .options
+                    .encoding
+                    .decode(&output)
+                    .0
+                    .as_bytes()
+                    .to_vec(),
+            )),
             Err(error) if error.kind() != io::ErrorKind::Interrupted => Ok(None),
             Err(error) => Err(error),
         }
@@ -237,7 +249,11 @@ impl Session {
     ) -> io::Result<()> {
         check_quote_name(name)?;
         expect_entry(&self.list_sync(parent, cancel)?, name, None)?;
-        self.quote_in_directory(parent, &[&format!("+MKD {name}")], cancel)?;
+        if self.is_sftp() {
+            self.sftp_create(&self.file(parent, name)?, cancel)?;
+        } else {
+            self.quote_in_directory(parent, &[&format!("+MKD {name}")], cancel)?;
+        }
         let listing = self.list_sync(parent, cancel)?;
         if !find_entry(&listing, name)?
             .is_some_and(|entry| entry.name == name && entry.directory == Some(true))
@@ -295,7 +311,7 @@ impl Session {
             expect_entry(&listing, &before.name, Some(before))?;
             "DELE"
         };
-        self.quote_in_directory(parent, &[&format!("+{verb} {}", before.name)], cancel)
+        self.remove_in_directory(parent, &before.name, verb == "RMD", cancel)
     }
 
     pub fn set_unix_permissions(
@@ -313,6 +329,14 @@ impl Session {
         }
         check_quote_name(&before.name)?;
         self.verify_sync_entry(parent, before, cancel)?;
+        if self.is_sftp() {
+            return self.sftp_set_metadata(
+                &self.file(parent, &before.name)?,
+                Some(permissions),
+                None,
+                cancel,
+            );
+        }
         self.quote_in_directory(
             parent,
             &[&format!("+SITE CHMOD {permissions:03o} {}", before.name)],
@@ -345,15 +369,26 @@ impl Session {
         let listing = self.list_sync(parent, cancel)?;
         expect_entry(&listing, upload.name, upload.expected)?;
         expect_entry(&listing, temporary, None)?;
+        let mut temporary_created = !self.is_sftp();
         let result = (|| {
-            self.upload(parent, upload.source, temporary, true, cancel)?;
+            if self.is_sftp() {
+                self.send_sftp_file(
+                    &self.file(parent, temporary)?,
+                    upload.source,
+                    cancel,
+                    &mut temporary_created,
+                )?;
+            } else {
+                self.upload(parent, upload.source, temporary, true, cancel)?;
+            }
             verify_source()?;
             if let Some(time) = upload.modified_utc {
-                match self.quote_in_directory(
-                    parent,
-                    &[&format!("+MFMT {time} {temporary}")],
-                    cancel,
-                ) {
+                let result = if self.is_sftp() {
+                    self.sftp_set_metadata(&self.file(parent, temporary)?, None, Some(time), cancel)
+                } else {
+                    self.quote_in_directory(parent, &[&format!("+MFMT {time} {temporary}")], cancel)
+                };
+                match result {
                     Err(error) if error.kind() == io::ErrorKind::Unsupported => (),
                     result => result?,
                 }
@@ -373,7 +408,10 @@ impl Session {
                 })?;
             let publication = self.rename_in_directory(parent, temporary, upload.name, cancel);
             match (publication, upload.expected) {
-                (Err(error), Some(previous)) if error.kind() == io::ErrorKind::Unsupported => {
+                (Err(error), Some(previous))
+                    if error.kind() == io::ErrorKind::Unsupported
+                        || (self.is_sftp() && error.kind() == io::ErrorKind::AlreadyExists) =>
+                {
                     self.replace_with_backup(parent, staged, previous, cancel)
                 }
                 (Ok(()), _) => self.verify_published(parent, staged, upload.name, cancel),
@@ -381,12 +419,15 @@ impl Session {
             }
         })();
         result.map_err(|error| {
+            if !temporary_created {
+                return error;
+            }
             let cleanup = AtomicBool::new(false);
             let removed = self.list_sync(parent, &cleanup).and_then(|listing| {
                 match find_entry(&listing, temporary)? {
                     None => Ok(()),
                     Some(entry) if entry.name == temporary && entry.directory == Some(false) => {
-                        self.quote_in_directory(parent, &[&format!("+DELE {temporary}")], &cleanup)
+                        self.remove_in_directory(parent, temporary, false, &cleanup)
                     }
                     _ => Err(io::Error::other(
                         "Die temporäre Datei ist nicht mehr eindeutig.",
@@ -440,9 +481,7 @@ impl Session {
         })?;
         let removed = self
             .verify_sync_entry(parent, &backup, &cleanup)
-            .and_then(|()| {
-                self.quote_in_directory(parent, &[&format!("+DELE {}", backup.name)], &cleanup)
-            });
+            .and_then(|()| self.remove_in_directory(parent, &backup.name, false, &cleanup));
         if let Err(error) = removed {
             return Err(io::Error::other(format!(
                 "„{}“ wurde aktualisiert. Die alte Version „{}“ konnte nicht entfernt werden. {error}",
@@ -482,11 +521,28 @@ impl Session {
     ) -> io::Result<()> {
         check_quote_name(from)?;
         check_quote_name(to)?;
+        if self.is_sftp() {
+            return self.sftp_rename(&self.file(parent, from)?, &self.file(parent, to)?, cancel);
+        }
         self.quote_in_directory(
             parent,
             &[&format!("+RNFR {from}"), &format!("+RNTO {to}")],
             cancel,
         )
+    }
+
+    fn remove_in_directory(
+        &self,
+        parent: &Url,
+        name: &str,
+        directory: bool,
+        cancel: &AtomicBool,
+    ) -> io::Result<()> {
+        if self.is_sftp() {
+            return self.sftp_remove(&self.file(parent, name)?, directory, cancel);
+        }
+        let verb = if directory { "RMD" } else { "DELE" };
+        self.quote_in_directory(parent, &[&format!("+{verb} {name}")], cancel)
     }
 
     fn verify_published(

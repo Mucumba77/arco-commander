@@ -1,5 +1,5 @@
 use crate::commands::{Dialog, Pending};
-use crate::panel::{ArchiveTab, FtpTab, Location, Panel, ShellLocation, Tab};
+use crate::panel::{ArchiveTab, FtpLocation, FtpTab, Location, Panel, ShellLocation, Tab};
 use crate::preview;
 use crate::shortcuts;
 use crate::{Colors, MainWindow, SettingsData, display_path};
@@ -78,6 +78,7 @@ pub(crate) use associations::Setup as AssociationSetup;
 pub(crate) use favorites::{Setup as FavoriteSetup, label as favorite_label, tc_profile};
 pub(crate) use ftp_edit::Draft as FtpDraft;
 pub(crate) use ftp_panel::FtpEdit;
+pub(crate) use ftp_panel::SearchHit as FtpSearchHit;
 pub(crate) use ftp_sync::modified as ftp_modified;
 pub(crate) use lister::ViewerRequest;
 pub(crate) use plugin_files::PluginFileAction;
@@ -95,6 +96,7 @@ const FILE_FONT_SIZES: [u8; 4] = [12, 14, 16, 18];
 pub enum Navigation {
     Refresh,
     Jump,
+    Focus(PathBuf),
     Up,
     Back,
     Forward,
@@ -145,6 +147,12 @@ pub enum Outcome {
         skipped: usize,
     },
     Ftp(FtpView),
+    FtpSearch {
+        side: usize,
+        request: u64,
+        location: FtpLocation,
+        hits: Vec<ftp_panel::SearchHit>,
+    },
     FtpMounted {
         side: usize,
         request: u64,
@@ -2445,7 +2453,9 @@ impl App {
                 let tab = panel.current_mut();
                 let restored = matches!(navigation, Navigation::Refresh) && tab.deferred.is_some();
                 let previous = tab.location();
-                let focus = if previous == target {
+                let focus = if let Navigation::Focus(path) = &navigation {
+                    Some(path.clone())
+                } else if previous == target {
                     tab.display_row(tab.cursor).map(|entry| entry.path.clone())
                 } else {
                     let mut child = previous.clone();
@@ -2459,7 +2469,10 @@ impl App {
                 };
                 if previous != target {
                     match navigation {
-                        Navigation::Jump | Navigation::Up | Navigation::FtpProfile { .. } => {
+                        Navigation::Jump
+                        | Navigation::Focus(_)
+                        | Navigation::Up
+                        | Navigation::FtpProfile { .. } => {
                             tab.back.push(previous);
                             tab.forward.clear();
                         }
@@ -2674,6 +2687,14 @@ impl App {
                 self.show_folder_sizes(side, request, &root, sizes, skipped);
             }
             Outcome::Ftp(view) => self.show_ftp(view),
+            Outcome::FtpSearch {
+                side,
+                request,
+                location,
+                hits,
+            } => {
+                self.show_ftp_search(side, request, location, hits);
+            }
             Outcome::FtpMounted {
                 side,
                 request,

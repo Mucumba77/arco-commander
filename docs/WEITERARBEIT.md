@@ -1,8 +1,16 @@
-# Fortsetzung nach Arco Commander 1.5.0
+# Fortsetzung nach Arco Commander 1.6.0
 
-Stand: 17. November 2026. Version 1.5.0 veröffentlicht den Archivbereich. Dieses Dokument hält den nächsten Arbeitsblock über Sitzungen hinweg fest. Version 1.4.0 ergänzt den Abschluss der Bereiche 1 und 2. Version 1.3.0 enthält den Bereich-3-Abschluss mit Suche, Lister und Werkzeugen. Version 1.2.0 bündelte die Dialogüberarbeitungen einschließlich Datei-/Binärvergleich, Einfg, Dateieigenschaften, Attributen, Berechtigungen, Dateiwerkzeugen, Tabs, Favoriten, Buttonbars, Starter, Ansichtsregeln, Spaltensätzen, Dateizuordnungen sowie Nebenfenstern und allgemeinen Fehler-/Ergebnisdialogen.
+Stand 19. November 2026. Version 1.6.0 veröffentlicht SFTP, Serversuche und die FTP-Erweiterungen. Version 1.5.0 enthält den Archivbereich. Dieses Dokument hält den nächsten Arbeitsblock über Sitzungen hinweg fest. Version 1.4.0 ergänzt den Abschluss der Bereiche 1 und 2. Version 1.3.0 enthält den Bereich-3-Abschluss mit Suche, Lister und Werkzeugen. Version 1.2.0 bündelte die Dialogüberarbeitungen einschließlich Datei-/Binärvergleich, Einfg, Dateieigenschaften, Attributen, Berechtigungen, Dateiwerkzeugen, Tabs, Favoriten, Buttonbars, Starter, Ansichtsregeln, Spaltensätzen, Dateizuordnungen sowie Nebenfenstern und allgemeinen Fehler-/Ergebnisdialogen.
 
-## Aktueller Stand: Bereich 4 in Version 1.5.0
+## Eingebaute Netzwerkfunktionen
+
+Der [WinSCP-Ausbau](../FUNKTIONSMATRIX.md#eingebaute-netzwerkfunktionen-nach-winscp) ist Bestandteil der Funktionsmatrix. Der erste Stand enthält eingebautes RSA-SHA2-SFTP mit Profilen, Dateioperationen, Serversuche und Abgleich. [Bedienung und Referenztests](SFTP.md). Weitere SSH-Varianten, WebDAV, S3, Überwachung, Wiederanlauf und Skriptbetrieb sind offen. Die WFX-Schnittstelle bleibt für bestehende Plugin-Konfigurationen verfügbar.
+
+## Bereich 5 in Version 1.6.0
+
+NET-01 bis NET-04 sind um FTP-/FTPS-Profile, Serveroptionen, Downloadlisten und überprüfte Wiederaufnahme erweitert. MODE Z funktioniert im Binär- und Textmodus. Die [FTP-Anleitung](FTP.md) hält die Referenztests und offenen Gateway- und S/KEY-Varianten fest. NET-05/06 bleiben mit den fehlenden USB-/LPT-Referenzgeräten in der [Funktionsmatrix](../FUNKTIONSMATRIX.md#ftp-und-physische-direktverbindungen) offen. Die Fensterprüfung liegt beim Projektinhaber.
+
+## Ausgangspunkt: Bereich 4 in Version 1.5.0
 
 **ARC-01 bis ARC-07 sind im definierten Matrixumfang implementiert: 7/7 IDs, 100 %.** Der Quellstand ist über Tag `v1.5.0` nachvollziehbar. [Bedienung und Formatgrenzen](ARCHIVE.md), [Abschlussnachweis](AREA4-ABSCHLUSS.md) und [Fensterprüfliste](UI-PRUEFUNG.md) sind aktualisiert. Das Windows-x64-Paket enthält beide Plugin-Hosts, ZIP-SFX, 7-Zip 26.06 und die Archivdokumentation. ACE/UC2 bleiben als optionale Python-Erweiterung dokumentiert.
 

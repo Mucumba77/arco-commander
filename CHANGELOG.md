@@ -1,5 +1,14 @@
 # Änderungen
 
+## 1.6.0 · 19. November 2026
+
+- Eingebautes SFTP mit Hostschlüsselprüfung, Passwort- und RSA-Schlüsselanmeldung, binären Transfers und Abgleich mit einem lokalen Ordner.
+- Rekursive Dateimaskensuche in FTP-, FTPS- und SFTP-Fenstern mit Sprung zum Treffer. Die Funktionsmatrix führt die übrigen WinSCP-Funktionen als integrierte Erweiterungen.
+- FTP-Profile mit IP-Version, Serverzeichensatz, eigenem LIST-Format, versteckten Dateien und FTPS-Zertifikatsoptionen. Unix-/IIS-/VMS-Listings, USER-Gateway, MODE Z im Binär- und Textmodus sowie RFC-2289-OTP mit MD4, MD5 und SHA-1.
+- FTP-Serverbefehle, Verbindungsdetails und Rohliste. Download von Pfaden, URLs und Textlisten, Textmodus und geprüfte Wiederaufnahme von Uploads.
+- Loopback-Referenzen für FTPS, OTP, IPv6, MODE Z und ältere Prüfsummenbefehle. [FTP-Bedienung und verbleibende Varianten](docs/FTP.md).
+- Portables Paket für Windows 10 22H2 und Windows 11 (x64) mit [SFTP-Anleitung](docs/SFTP.md). [Release-Hinweise](docs/releases/v1.6.0.md).
+
 ## 1.5.0 · 17. November 2026
 
 - Persistente Archiveinstellungen für Kompressionsmethoden/-raten, AES/ZipCrypto, 7z-Solid/Header sowie eigene Speicher-/Threadwerte, TAR/GZIP, Prüfung, Archivdatum und Zonenübernahme.

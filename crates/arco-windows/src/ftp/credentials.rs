@@ -43,7 +43,7 @@ impl Connection {
     }
 
     fn credential_scope(&self) -> blake3::Hash {
-        let scope = format!(
+        let mut scope = format!(
             "{:?}\n{}\n{:?}\n{}\n{:?}",
             self.security,
             self.url.host_str().unwrap_or_default(),
@@ -51,6 +51,21 @@ impl Connection {
             self.user,
             self.proxy,
         );
+        // Preserve the scope of existing ordinary FTP credentials. OTP
+        // passphrases require their own reference and must never become PASS.
+        if self.options.otp {
+            scope.push_str("\notp-rfc2289");
+        }
+        if let Some(ssh) = &self.ssh {
+            use base64::Engine;
+            scope.push('\n');
+            scope.push_str(
+                &base64::engine::general_purpose::STANDARD_NO_PAD.encode(ssh.fingerprint),
+            );
+            if ssh.uses_key() {
+                scope.push_str("\nprivate-key-passphrase");
+            }
+        }
         blake3::hash(scope.as_bytes())
     }
 }

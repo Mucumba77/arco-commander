@@ -283,23 +283,27 @@ const MENU: &[Category] = &[
         title: "Netz",
         icon: "network",
         primary: &[
-            ("FTP-Verbindungen …", "ftp-profiles"),
-            ("FTP-Schnellverbindung …", "ftp-connect"),
+            ("FTP- und SFTP-Verbindungen …", "ftp-profiles"),
+            ("Netzwerk-Schnellverbindung …", "ftp-connect"),
             ("WFX-Dateisystem öffnen …", "wfx-inspect"),
         ],
         sections: &[
             (
-                "FTP-Dateioperationen",
+                "FTP- und SFTP-Dateioperationen",
                 "network",
                 &[
                     ("FTP-Verzeichnis anzeigen", "ftp-list"),
                     ("FTP-Ordner wechseln", "ftp-directory"),
                     ("FTP herunterladen", "ftp-download"),
+                    ("FTP-Downloadliste …", "ftp-download-list"),
                     ("FTP hochladen", "ftp-upload"),
+                    ("Verbindungsdetails", "ftp-details"),
+                    ("FTP-Rohliste", "ftp-raw-list"),
+                    ("FTP-Serverbefehl …", "ftp-command"),
                     ("FTP-Unix-Rechte ändern …", "ftp-permissions"),
                     ("Offene FTP-Bearbeitungen …", "ftp-edits"),
-                    ("FTP mit lokalem Ordner abgleichen", "ftp-sync"),
-                    ("FTP trennen", "ftp-close"),
+                    ("Serverordner mit lokalem Ordner abgleichen", "ftp-sync"),
+                    ("Netzwerkverbindung trennen", "ftp-close"),
                 ],
             ),
             (
