@@ -81,7 +81,8 @@ impl Transfer<'_> {
                 {
                     continue;
                 }
-                let target = destination.join(files::leaf_name(OsStr::new(&entry.name))?);
+                let target =
+                    destination.join(active.transfer_settings().names.download(&entry.name)?);
                 if transfers.len() >= MAX_ENTRIES {
                     return Err(invalid("Die Transferliste enthält zu viele Dateien."));
                 }
@@ -101,8 +102,12 @@ impl Transfer<'_> {
             transfers = vec![transfers.swap_remove(index)];
         }
         let mut names = BTreeSet::new();
-        for (_, (_, entry, target)) in &transfers {
-            reserve(&mut names, &entry.name, target.try_exists()?)?;
+        for (_, (_, _, target)) in &transfers {
+            let name = target
+                .file_name()
+                .and_then(OsStr::to_str)
+                .expect("validated target name");
+            reserve(&mut names, name, target.try_exists()?)?;
         }
         let mut downloaded = Vec::new();
         for ((parent, name), (active, entry, target)) in transfers {
@@ -236,10 +241,10 @@ fn stage_upload(
     let leaf = path
         .file_name()
         .ok_or_else(|| invalid("Quellname fehlt."))?;
-    let name = files::leaf_name(leaf)?
+    let name = leaf
         .to_str()
-        .ok_or_else(|| invalid("Dateinamen benötigen Unicode."))?
-        .to_owned();
+        .ok_or_else(|| invalid("Dateinamen benötigen Unicode."))?;
+    let name = active.transfer_settings().names.upload(name)?;
     let meta = files::regular_metadata(&path)?;
     uploads.entry(path).or_insert((meta, active.clone(), name));
     Ok(())

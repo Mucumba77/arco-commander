@@ -1,6 +1,6 @@
 import { MessageCard, MessageData, MessageLevel, MessageStat, TextDraftCard, TextDraftData, TextDraftForm, TextDraftKind } from "auxiliary-dialogs.slint";
 import { DuplicateCard, DuplicateForm, DuplicateFolder } from "duplicate-dialog.slint";
-import { TransferPresetsCard, TransferPresetData } from "transfer-presets.slint";
+import { TransferPresetsCard, TransferPresetData, TransferNameCase } from "transfer-presets.slint";
 export { TransferPresetData } from "transfer-presets.slint";
 export { DuplicateForm, DuplicateFolder } from "duplicate-dialog.slint";
 export { MessageData, MessageLevel, MessageStat, TextDraftData, TextDraftForm, TextDraftKind } from "auxiliary-dialogs.slint";
@@ -16,10 +16,13 @@ export { MetadataForm, MutationData, PropertiesData } from "metadata-dialogs.sli
 export { DiffData } from "comparison-dialog.slint";
 import { ComboBox, LineEdit, ListView, Palette, ScrollView, TextEdit } from "std-widgets.slint";
 import { Colors, Button, CheckBox, NavButton, ActionButton, DetailCell, FocusBoundary } from "dialog-theme.slint";
-import { DialogHeading, FieldLabel, FileOperationCard, ReaderPane, ImagePane, TransferManagerCard, TransferManagerData, CompactDialogCard, ProgressRail, TransferProgressCard, JobMetrics, OperationKind, FormSection, ProgressMeter, ProgressMetrics, ReviewRow, ReviewTable, ReviewCard, PackSelection } from "operation-dialogs.slint";
+import { DialogHeading, FieldLabel, FileOperationCard, ReaderPane, ImagePane, TransferManagerCard, TransferManagerData, CompactDialogCard, ProgressRail, TransferProgressCard, JobMetrics, OperationKind, FormSection, ProgressMeter, ProgressMetrics, ReviewRow, ReviewTable, ReviewCard, PackSelection, JobTransferFields, JobTransferForm } from "operation-dialogs.slint";
 export { JobMetrics, OperationKind, ReviewRow, PackSelection } from "operation-dialogs.slint";
 export { Colors } from "dialog-theme.slint";
 export { TransferManagerData } from "operation-dialogs.slint";
+import { NetworkTransferRow } from "operation-dialogs.slint";
+export { NetworkTransferRow } from "operation-dialogs.slint";
+export { WaitingTransferRow } from "operation-dialogs.slint";
 
 export struct CommandRow { key: string, label: string, menu-label: string, icon: image, shortcut: string }
 export struct MenuSection { title: string, icon: image, rows: [CommandRow] }
@@ -170,6 +173,9 @@ export struct SettingsData {
     editor: string,
     everything: string,
     transfer-rate: string,
+    parallel-network-transfers: string,
+    parallel-network-files: bool,
+    parallel-sftp-minimum: string,
     transfer-log: string,
     transfer-comments: bool,
     ntfs: NtfsDraft,
@@ -492,17 +498,25 @@ export struct FtpRowData { name: string, info: string, modified: string, directo
 
 export struct FtpProfileData {
     name: string,
+    folder: string,
     address: string,
     user: string,
     proxy: string,
+    telnet-proxy-command: string,
+    local-proxy-command: string,
+    ssh-proxy-dns-locally: bool,
+    ftp-gateway: int,
     local-directory: string,
     transfer-mode: int,
     transfer-speed: string,
     transfer-time: int,
     transfer-mask: string,
+    transfer-name-case: int,
+    transfer-windows-names: bool,
     transfer-preset: int,
     recycle-remote: bool,
     recycle-overwrites: bool,
+    synchronize-browsing: bool,
     security: int,
     active: bool,
     listing: int,
@@ -514,6 +528,7 @@ export struct FtpProfileData {
     ca-bundle: string,
     client-certificate: string,
     mode-z: bool,
+    http-forward: bool,
     otp: bool,
     ssh-fingerprint: string,
     ssh-private-key: string,
@@ -525,9 +540,18 @@ export struct FtpProfileData {
     ssh-jump: int,
     ssh-timeout: string,
     ssh-keepalive: string,
+    webdav-liberal-escaping: bool,
+    webdav-windows-auth: bool,
+    webdav-cross-domain-redirects: bool,
+    webdav-unencrypted-redirects: bool,
     s3-region: string,
     s3-aws-enabled: bool,
     s3-aws-profile: string,
+    s3-virtual-host: bool,
+    s3-requester-pays: bool,
+    s3-role-arn: string,
+    s3-temporary: bool,
+    s3-token-saved: bool,
 }
 
 export struct PluginRowData {
@@ -540,29 +564,51 @@ export struct PluginRowData {
     detection: string,
 }
 
+export struct FtpProxyOffer {
+    address: string,
+    security: int,
+    proxy: string,
+    revision: int,
+}
+
 component FtpProfilesCard inherits Rectangle {
     in property <int> focus-cycle;
     changed focus-cycle => { if (root.focus-cycle > 0) { profile-list.focus(); } else if (connect-button.enabled) { connect-button.focus(); } else { save-button.focus(); } }
     in property <[string]> profiles;
+    in property <[string]> folders;
+    in property <int> folder-index;
     in property <[string]> jump-profiles;
     in property <[string]> transfer-names;
     in property <int> selected;
     in property <FtpProfileData> data;
     in property <int> revision;
+    in property <FtpProxyOffer> proxy-offer;
     in property <string> notice;
     in property <bool> busy;
     property <bool> ssh-mode: security.current-index == 3 || security.current-index == 4;
+    property <bool> local-proxy-mode: root.ssh-mode && use-local-proxy.checked;
+    property <string> proxy-address: root.local-proxy-mode ? "local://command" : proxy.text;
+    property <bool> has-ssh-proxy: root.ssh-mode && root.proxy-address != "";
     property <bool> ftp-mode: security.current-index < 3;
+    property <bool> webdav-mode: security.current-index == 5;
+    property <bool> webdav-use-windows: root.webdav-mode && webdav-windows-auth.checked;
     property <bool> s3-mode: security.current-index == 6;
+    property <bool> s3-manual-token: root.s3-mode && !s3-aws-enabled.checked && s3-temporary.checked;
     property <bool> tls-mode: security.current-index < 2 || security.current-index >= 5;
-    property <bool> dirty: name.text != root.data.name || address.text != root.data.address
-        || user.text != root.data.user || proxy.text != root.data.proxy || local.text != root.data.local-directory
+    property <bool> tls-proxy-mode: security.current-index == 2 && http-forward.checked;
+    property <bool> dirty: name.text != root.data.name || folder.text != root.data.folder || address.text != root.data.address
+        || user.text != root.data.user || root.proxy-address != root.data.proxy || local.text != root.data.local-directory
+        || (root.local-proxy-mode ? "" : telnet-command.text) != root.data.telnet-proxy-command
+        || (root.local-proxy-mode ? local-proxy-command.text : "") != root.data.local-proxy-command
+        || (root.has-ssh-proxy && proxy-dns-locally.checked) != root.data.ssh-proxy-dns-locally
+        || ftp-gateway.current-index != root.data.ftp-gateway
         || security.current-index != root.data.security || active.checked != root.data.active
         || listing.current-index != root.data.listing || remember.checked != root.data.remember || password-field.text != ""
         || address-family.current-index != root.data.address-family || charset.text != root.data.charset
         || list-pattern.text != root.data.list-pattern || show-hidden.checked != root.data.show-hidden
         || ca-bundle.text != root.data.ca-bundle || client-certificate.text != root.data.client-certificate
         || mode-z.checked != root.data.mode-z || otp.checked != root.data.otp
+        || http-forward.checked != root.data.http-forward
         || ssh-fingerprint.text != root.data.ssh-fingerprint || ssh-private-key.text != root.data.ssh-private-key
         || ssh-agent.current-index != root.data.ssh-agent || ssh-jump.current-index != root.data.ssh-jump
         || ssh-interactive.checked != root.data.ssh-interactive
@@ -570,18 +616,32 @@ component FtpProfilesCard inherits Rectangle {
         || ssh-kerberos-principal.text != root.data.ssh-kerberos-principal
         || ssh-kerberos-delegate.checked != root.data.ssh-kerberos-delegate
         || ssh-kerberos-kex.checked != root.data.ssh-kerberos-kex
+        || (root.webdav-mode && webdav-liberal-escaping.checked) != root.data.webdav-liberal-escaping
+        || root.webdav-use-windows != root.data.webdav-windows-auth
+        || (root.webdav-mode && webdav-cross-domain-redirects.checked) != root.data.webdav-cross-domain-redirects
+        || (root.webdav-mode && webdav-unencrypted-redirects.checked) != root.data.webdav-unencrypted-redirects
         || s3-region.text != root.data.s3-region
         || s3-aws-enabled.checked != root.data.s3-aws-enabled
         || s3-aws-profile.text != root.data.s3-aws-profile
+        || s3-virtual-host.checked != root.data.s3-virtual-host
+        || s3-requester-pays.checked != root.data.s3-requester-pays
+        || s3-role-arn.text != root.data.s3-role-arn
+        || root.s3-manual-token != root.data.s3-temporary
+        || s3-token.text != ""
         || transfer-mode.current-index != root.data.transfer-mode
         || transfer-speed.text != root.data.transfer-speed
         || transfer-time.current-index != root.data.transfer-time
         || transfer-mask.text != root.data.transfer-mask
+        || transfer-name-case.current-index != root.data.transfer-name-case
+        || transfer-windows-names.checked != root.data.transfer-windows-names
         || transfer-preset.current-index != root.data.transfer-preset
         || recycle-remote.checked != root.data.recycle-remote
-        || recycle-overwrites.checked != root.data.recycle-overwrites;
+        || recycle-overwrites.checked != root.data.recycle-overwrites
+        || synchronize-browsing.checked != root.data.synchronize-browsing;
     callback select(int);
-    callback operate(string, FtpProfileData, string);
+    callback select-folder(int);
+    callback operate(string, FtpProfileData, string, string);
+    callback detect-proxy(string, int);
     callback close();
     background: Colors.panel;
     border-radius: 16px; border-width: 1px; border-color: Colors.edge;
@@ -592,15 +652,22 @@ component FtpProfilesCard inherits Rectangle {
         DialogHeading { icon: @image-url("icons/network.svg"); title: @tr("Netzwerkprofile"); subtitle: @tr("Verbindung auswählen oder ein neues Profil anlegen."); }
         HorizontalLayout {
             spacing: 8px;
+            ComboBox {
+                model: root.folders; enabled: !root.busy && !root.dirty;
+                current-index: root.folder-index;
+                accessible-label: @tr("Verbindungen nach Ordner filtern");
+                horizontal-stretch: 1;
+                selected => { root.select-folder(self.current-index); }
+            }
             profile-list := ComboBox {
                 model: root.profiles; enabled: !root.busy;
                 current-index: root.selected;
                 accessible-label: @tr("Gespeicherte Verbindungen");
-                horizontal-stretch: 1;
+                horizontal-stretch: 2;
                 selected => { root.select(self.current-index); }
             }
             Button { text: @tr("Neu"); icon: @image-url("icons/folderplus.svg"); enabled: !root.busy; clicked => { root.select(0); } }
-            Button { text: @tr("Importieren"); icon: @image-url("icons/archive-extract.svg"); enabled: !root.busy; clicked => { root.operate("import", root.data, ""); } }
+            Button { text: @tr("Importieren"); icon: @image-url("icons/archive-extract.svg"); enabled: !root.busy; clicked => { root.operate("import", root.data, "", ""); } }
         }
         Rectangle { height: 1px; background: Colors.edge; }
         ScrollView {
@@ -628,6 +695,11 @@ component FtpProfilesCard inherits Rectangle {
                                 accessible-label: @tr("Serveradresse und Startordner");
                             }
                         }
+                    }
+                    VerticalLayout {
+                        spacing: 4px;
+                        FieldLabel { text: @tr("Verbindungsordner"); }
+                        folder := LineEdit { text: root.data.folder; placeholder-text: @tr("Projekte/Atlas"); accessible-label: @tr("Verbindungsordner"); }
                     }
                     HorizontalLayout {
                         spacing: 10px;
@@ -671,15 +743,73 @@ component FtpProfilesCard inherits Rectangle {
                             local := LineEdit { text: root.data.local-directory; placeholder-text: @tr("Absoluter Pfad (optional)"); accessible-label: @tr("Lokaler Startordner"); }
                         }
                         VerticalLayout {
+                            visible: !root.local-proxy-mode;
                             spacing: 4px;
                             FieldLabel { text: @tr("Proxy"); }
-                            proxy := LineEdit { text: root.data.proxy; placeholder-text: root.ssh-mode ? "http://proxy:8080 / socks5h://proxy:1080" : @tr("HTTP-, SOCKS- oder FTP-Proxy"); accessible-label: @tr("Proxy"); }
+                            proxy := LineEdit { text: root.data.proxy == "local://command" ? "" : root.data.proxy; placeholder-text: root.ssh-mode ? "http://proxy:8080 / socks5h://proxy:1080 / telnet://proxy:23" : @tr("HTTP-, SOCKS- oder FTP-Proxy"); accessible-label: @tr("Proxy"); }
                         }
                     }
-                    Button {
-                        text: @tr("Proxy-Anmeldung …"); icon: @image-url("icons/network.svg");
-                        enabled: root.selected > 0 && root.data.proxy != "" && !root.dirty && !root.busy;
-                        clicked => { root.operate("proxy-login", root.data, ""); }
+                    use-local-proxy := CheckBox {
+                        visible: root.ssh-mode;
+                        checked: root.data.proxy == "local://command";
+                        text: @tr("Lokales Proxy-Programm verwenden");
+                    }
+                    FieldLabel { visible: root.local-proxy-mode; text: @tr("Lokales Proxy-Kommando"); }
+                    local-proxy-command := LineEdit {
+                        visible: root.local-proxy-mode;
+                        text: root.data.local-proxy-command;
+                        placeholder-text: "ssh.exe -W %host:%port jump";
+                        accessible-label: @tr("Lokales Proxy-Kommando");
+                    }
+                    FieldLabel { visible: root.ssh-mode && !root.local-proxy-mode && proxy.text != ""; text: @tr("Telnet-Proxy-Kommando (optional)"); }
+                    telnet-command := LineEdit {
+                        visible: root.ssh-mode && !root.local-proxy-mode && proxy.text != "";
+                        text: root.data.telnet-proxy-command;
+                        placeholder-text: "connect %host %port\\r\\n";
+                        accessible-label: @tr("Telnet-Proxy-Kommando (optional)");
+                    }
+                    proxy-dns-locally := CheckBox {
+                        visible: root.has-ssh-proxy;
+                        text: @tr("SSH-Zielnamen lokal auflösen");
+                        checked: root.data.ssh-proxy-dns-locally;
+                    }
+                    synchronize-browsing := CheckBox {
+                        text: @tr("Navigation nach dem Verbindungsaufbau koppeln");
+                        checked: root.data.synchronize-browsing;
+                    }
+                    http-forward := CheckBox {
+                        visible: security.current-index == 2 && (proxy.text != "" || self.checked);
+                        text: @tr("FTP über HTTP-Forward-Proxy (nur Lesen)");
+                        checked: root.data.http-forward;
+                    }
+                    VerticalLayout {
+                        visible: security.current-index == 2 && proxy.text != "";
+                        spacing: 4px;
+                        FieldLabel { text: @tr("FTP-Gateway (ftp://)"); }
+                        ftp-gateway := ComboBox {
+                            model: [
+                                @tr("USER Benutzer@Server"), @tr("SITE Server"), @tr("Proxy-Login → USER Benutzer@Server"),
+                                @tr("OPEN Server"), @tr("Proxy-Login → USER Benutzer"), @tr("USER Proxy@Server → USER Benutzer"),
+                                @tr("USER Benutzer@Server Proxy"), @tr("USER Benutzer@Proxy@Server"),
+                            ];
+                            current-index: root.data.ftp-gateway;
+                            accessible-label: @tr("FTP-Gateway (ftp://)");
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Button {
+                            visible: !root.local-proxy-mode;
+                            text: @tr("Windows-Proxy ermitteln");
+                            icon: @image-url("icons/network.svg");
+                            enabled: address.text != "" && !root.busy;
+                            clicked => { root.detect-proxy(address.text, security.current-index); }
+                        }
+                        Button {
+                            text: @tr("Proxy-Anmeldung …"); icon: @image-url("icons/network.svg");
+                            enabled: root.selected > 0 && root.data.proxy != "" && !root.dirty && !root.busy;
+                            clicked => { root.operate("proxy-login", root.data, "", ""); }
+                        }
                     }
                     active := CheckBox { visible: root.ftp-mode; text: @tr("Aktiver FTP-Modus (Direktverbindung)"); checked: root.data.active; }
                     HorizontalLayout {
@@ -700,15 +830,23 @@ component FtpProfilesCard inherits Rectangle {
                     list-pattern := LineEdit { visible: root.ftp-mode; text: root.data.list-pattern; accessible-label: @tr("Eigenes LIST-Format (regulärer Ausdruck)"); }
                     Text { visible: root.ftp-mode; text: @tr("Benannte Gruppen: name, kind und optional size. Ein eigenes Format verwendet LIST."); wrap: word-wrap; color: Colors.muted; }
                 }
-                FormSection { title: @tr("TLS-Zertifikate"); visible: root.tls-mode;
+                FormSection { title: @tr("Zielnamen");
+                    transfer-name-case := TransferNameCase { current-index: root.data.transfer-name-case; }
+                    transfer-windows-names := CheckBox {
+                        text: @tr("Windows-Dateinamen umwandeln");
+                        checked: root.data.transfer-windows-names;
+                    }
+                }
+                FormSection { title: @tr("TLS-Zertifikate"); visible: root.tls-mode || root.tls-proxy-mode;
                     FieldLabel { text: @tr("CA-Datei (PEM, optional)"); }
-                    ca-bundle := LineEdit { text: root.data.ca-bundle; enabled: security.current-index != 2; accessible-label: @tr("CA-Datei (PEM, optional)"); }
-                    FieldLabel { text: @tr("Clientzertifikat (Windows-Fingerabdruck, optional)"); }
-                    client-certificate := LineEdit { text: root.data.client-certificate; enabled: security.current-index != 2; accessible-label: @tr("Clientzertifikat (Windows-Fingerabdruck, optional)"); }
+                    ca-bundle := LineEdit { text: root.data.ca-bundle; enabled: security.current-index != 2 || http-forward.checked; accessible-label: @tr("CA-Datei (PEM, optional)"); }
+                    FieldLabel { visible: root.tls-mode; text: @tr("Clientzertifikat (Windows-Fingerabdruck, optional)"); }
+                    client-certificate := LineEdit { visible: root.tls-mode; text: root.data.client-certificate; accessible-label: @tr("Clientzertifikat (Windows-Fingerabdruck, optional)"); }
                 }
                 FormSection { title: @tr("SSH-Server und Schlüssel"); visible: root.ssh-mode;
                     FieldLabel { text: @tr("SSH-Hostschlüssel (SHA256)"); }
                     ssh-fingerprint := LineEdit { text: root.data.ssh-fingerprint; placeholder-text: "SHA256:…"; accessible-label: @tr("SSH-Hostschlüssel (SHA256)"); }
+                    Text { text: @tr("Mehrere verifizierte Fingerabdrücke durch Semikolon trennen."); color: Colors.muted; wrap: word-wrap; }
                     FieldLabel { text: @tr("SSH-Anmeldemethode"); }
                     ssh-agent := ComboBox { model: [@tr("Passwort oder Schlüsseldatei"), "OpenSSH-Agent", "Pageant", @tr("Windows-Kerberos (GSSAPI)")]; current-index: root.data.ssh-agent; accessible-label: @tr("SSH-Anmeldemethode"); }
                     FieldLabel { visible: ssh-agent.current-index == 0; text: @tr("Private SSH-Schlüsseldatei (optional)"); }
@@ -735,12 +873,43 @@ component FtpProfilesCard inherits Rectangle {
                         }
                     }
                 }
+                FormSection { title: "WebDAV"; visible: root.webdav-mode;
+                    webdav-liberal-escaping := CheckBox {
+                        checked: root.data.webdav-liberal-escaping;
+                        text: @tr("Nicht kodierte Sonderzeichen in Serverlisten zulassen");
+                    }
+                    webdav-windows-auth := CheckBox {
+                        checked: root.data.webdav-windows-auth;
+                        text: @tr("Mit dem aktuellen Windows-Konto anmelden (Negotiate)");
+                    }
+                    webdav-cross-domain-redirects := CheckBox {
+                        checked: root.data.webdav-cross-domain-redirects;
+                        text: @tr("Weiterleitungen auf andere Hosts oder Ports zulassen");
+                    }
+                    webdav-unencrypted-redirects := CheckBox {
+                        checked: root.data.webdav-unencrypted-redirects;
+                        text: @tr("Weiterleitungen von HTTPS auf HTTP zulassen");
+                    }
+                }
                 FormSection { title: "S3"; visible: root.s3-mode;
                     FieldLabel { text: @tr("S3-Region"); }
                     s3-region := LineEdit { text: root.data.s3-region; placeholder-text: "us-east-1"; accessible-label: @tr("S3-Region"); }
                     s3-aws-enabled := CheckBox { checked: root.data.s3-aws-enabled; text: @tr("AWS-Anmeldekette verwenden"); }
                     FieldLabel { visible: s3-aws-enabled.checked; text: @tr("AWS-Profil (optional)"); }
                     s3-aws-profile := LineEdit { visible: s3-aws-enabled.checked; text: root.data.s3-aws-profile; placeholder-text: @tr("Leer für Standard-Anmeldekette"); accessible-label: @tr("AWS-Profil (optional)"); }
+                    FieldLabel { text: @tr("IAM-Rollen-ARN (optional)"); }
+                    s3-role-arn := LineEdit { text: root.data.s3-role-arn; placeholder-text: "arn:aws:iam::123456789012:role/Example"; accessible-label: @tr("IAM-Rollen-ARN (optional)"); }
+                    s3-temporary := CheckBox { visible: !s3-aws-enabled.checked; checked: root.data.s3-temporary; text: @tr("Temporäre S3-Zugangsdaten"); }
+                    FieldLabel { visible: root.s3-manual-token; text: @tr("S3-Sitzungstoken"); }
+                    s3-token := LineEdit {
+                        visible: root.s3-manual-token;
+                        input-type: InputType.password;
+                        placeholder-text: root.data.s3-token-saved ? @tr("Neues Sitzungstoken (optional)") : @tr("Beim Verbinden eingeben");
+                        accessible-label: @tr("S3-Sitzungstoken");
+                    }
+                    s3-virtual-host := CheckBox { checked: root.data.s3-virtual-host; text: @tr("Bucketname als Teil des Hostnamens"); }
+                    s3-requester-pays := CheckBox { checked: root.data.s3-requester-pays; text: @tr("Requester Pays akzeptieren"); }
+                    Text { visible: s3-requester-pays.checked; text: @tr("Das verwendete AWS-Konto übernimmt die anfallenden Anfrage- und Transferkosten."); color: Colors.muted; wrap: word-wrap; }
                 }
                 FormSection { title: @tr("Transfervorgaben");
                     FieldLabel { text: @tr("Transfervorgabe"); }
@@ -780,6 +949,7 @@ component FtpProfilesCard inherits Rectangle {
                             FieldLabel { text: root.s3-mode ? @tr("Zugriffsschlüssel-ID") : @tr("Benutzername"); }
                             user := LineEdit {
                                 text: root.data.user;
+                                enabled: !root.webdav-use-windows;
                                 placeholder-text: root.s3-mode ? @tr("Leer für AWS-Umgebungsvariablen") : root.ssh-mode ? "" : @tr("Leer für anonyme Anmeldung");
                                 accessible-label: root.s3-mode ? @tr("Zugriffsschlüssel-ID") : @tr("Benutzername");
                             }
@@ -795,8 +965,8 @@ component FtpProfilesCard inherits Rectangle {
                             }
                         }
                     }
-                    remember := CheckBox { enabled: (!root.ssh-mode || ssh-agent.current-index == 0) && (!root.s3-mode || (!s3-aws-enabled.checked && user.text != "")); text: @tr("Passwort in Windows-Anmeldeinformationen speichern"); checked: root.data.remember; }
-                    otp := CheckBox { visible: root.ftp-mode; text: @tr("Einmalpasswort nach RFC 2289 (OTP)"); checked: root.data.otp; enabled: security.current-index == 2 && !active.checked && proxy.text == ""; }
+                    remember := CheckBox { enabled: !root.webdav-use-windows && (!root.ssh-mode || ssh-agent.current-index == 0) && (!root.s3-mode || (!s3-aws-enabled.checked && user.text != "")); text: root.s3-manual-token ? @tr("Schlüssel und Token in Windows-Anmeldeinformationen speichern") : @tr("Passwort in Windows-Anmeldeinformationen speichern"); checked: root.data.remember; }
+                    otp := CheckBox { visible: root.ftp-mode; text: @tr("Einmalpasswort (OTP / S/KEY)"); checked: root.data.otp; enabled: security.current-index == 2 && !active.checked && proxy.text == ""; }
                 }
             }
         }
@@ -807,7 +977,7 @@ component FtpProfilesCard inherits Rectangle {
             Button {
                 text: @tr("Löschen"); destructive: true; icon: @image-url("icons/trash.svg");
                 enabled: root.selected > 0 && !root.busy;
-                clicked => { root.operate("delete", root.data, ""); }
+                clicked => { root.operate("delete", root.data, "", ""); }
             }
             Text { text: root.dirty ? @tr("Ungespeicherte Änderungen") : @tr("Profil unverändert"); overflow: elide; min-width: 0px; color: root.dirty ? Colors.archive : Colors.muted; font-size: 11px; vertical-alignment: center; horizontal-stretch: 1; }
             Button { text: @tr("Schließen"); clicked => { root.close(); } }
@@ -816,28 +986,34 @@ component FtpProfilesCard inherits Rectangle {
                 accessible-label: @tr("SCP-Dateitransfer");
                 icon: @image-url("icons/network.svg");
                 enabled: root.selected > 0 && root.ssh-mode && !root.dirty && !root.busy;
-                clicked => { root.operate("scp", root.data, ""); }
+                clicked => { root.operate("scp", root.data, "", ""); }
             }
             save-button := Button {
                 text: @tr("Speichern"); enabled: root.dirty && !root.busy && name.text != "" && address.text != "";
                 clicked => {
                     root.operate("save", {
-                        name: name.text, address: address.text, user: root.s3-mode && s3-aws-enabled.checked ? "" : user.text, proxy: proxy.text,
-                        local-directory: local.text,
+                        name: name.text, folder: folder.text, address: address.text, user: root.s3-mode && s3-aws-enabled.checked ? "" : user.text, proxy: root.proxy-address,
+                        telnet-proxy-command: root.ssh-mode && !root.local-proxy-mode ? telnet-command.text : "",
+                        local-proxy-command: root.local-proxy-mode ? local-proxy-command.text : "",
+                        ssh-proxy-dns-locally: root.has-ssh-proxy && proxy-dns-locally.checked,
+                        local-directory: local.text, ftp-gateway: security.current-index == 2 ? ftp-gateway.current-index : 0,
                         security: security.current-index, active: root.ftp-mode && active.checked, remember: remember.enabled && remember.checked,
                         listing: root.ftp-mode ? listing.current-index : 0,
                         address-family: address-family.current-index, charset: root.ftp-mode ? charset.text : "",
                         list-pattern: root.ftp-mode ? list-pattern.text : "", show-hidden: root.ftp-mode && show-hidden.checked, mode-z: root.ftp-mode && mode-z.checked,
-                        ca-bundle: root.tls-mode ? ca-bundle.text : "",
+                        http-forward: security.current-index == 2 && http-forward.checked,
+                        ca-bundle: root.tls-mode || root.tls-proxy-mode ? ca-bundle.text : "",
                         client-certificate: root.tls-mode ? client-certificate.text : "",
                         otp: otp.enabled && otp.checked,
                             transfer-mode: root.ftp-mode ? transfer-mode.current-index : 0,
                             transfer-speed: transfer-speed.text,
                             transfer-time: transfer-time.current-index,
                             transfer-mask: transfer-mask.text,
+                            transfer-name-case: transfer-name-case.current-index, transfer-windows-names: transfer-windows-names.checked,
                             transfer-preset: transfer-preset.current-index,
                             recycle-remote: !root.s3-mode && recycle-remote.checked,
                             recycle-overwrites: security.current-index == 3 && recycle-overwrites.checked,
+                            synchronize-browsing: synchronize-browsing.checked,
                             ssh-fingerprint: root.ssh-mode ? ssh-fingerprint.text : "",
                             ssh-private-key: root.ssh-mode && ssh-agent.current-index == 0 ? ssh-private-key.text : "",
                             ssh-agent: root.ssh-mode ? ssh-agent.current-index : 0,
@@ -848,10 +1024,19 @@ component FtpProfilesCard inherits Rectangle {
                             ssh-jump: root.ssh-mode ? ssh-jump.current-index : 0,
                             ssh-timeout: root.ssh-mode ? ssh-timeout.text : "",
                             ssh-keepalive: root.ssh-mode ? ssh-keepalive.text : "",
+                            webdav-liberal-escaping: root.webdav-mode && webdav-liberal-escaping.checked,
+                            webdav-windows-auth: root.webdav-use-windows,
+                            webdav-cross-domain-redirects: root.webdav-mode && webdav-cross-domain-redirects.checked,
+                            webdav-unencrypted-redirects: root.webdav-mode && webdav-unencrypted-redirects.checked,
                             s3-region: root.s3-mode ? s3-region.text : "",
+                            s3-virtual-host: root.s3-mode && s3-virtual-host.checked,
+                            s3-requester-pays: root.s3-mode && s3-requester-pays.checked,
                             s3-aws-enabled: root.s3-mode && s3-aws-enabled.checked,
                             s3-aws-profile: root.s3-mode && s3-aws-enabled.checked ? s3-aws-profile.text : "",
-                    }, password-field.text);
+                            s3-role-arn: root.s3-mode ? s3-role-arn.text : "",
+                            s3-temporary: root.s3-manual-token,
+                            s3-token-saved: root.data.s3-token-saved,
+                    }, root.webdav-use-windows ? "" : password-field.text, root.s3-manual-token ? s3-token.text : "");
                 }
             }
             connect-button := Button {
@@ -861,21 +1046,28 @@ component FtpProfilesCard inherits Rectangle {
                 clicked => {
                     if (root.dirty || root.selected == 0) {
                         root.operate("save-connect", {
-                            name: name.text, address: address.text, user: root.s3-mode && s3-aws-enabled.checked ? "" : user.text, proxy: proxy.text,
+                            name: name.text, folder: folder.text, address: address.text, user: root.s3-mode && s3-aws-enabled.checked ? "" : user.text, proxy: root.proxy-address,
+                            telnet-proxy-command: root.ssh-mode && !root.local-proxy-mode ? telnet-command.text : "",
+                            local-proxy-command: root.local-proxy-mode ? local-proxy-command.text : "",
+                            ssh-proxy-dns-locally: root.has-ssh-proxy && proxy-dns-locally.checked,
                             local-directory: local.text, security: security.current-index,
+                            ftp-gateway: security.current-index == 2 ? ftp-gateway.current-index : 0,
                             active: root.ftp-mode && active.checked, remember: remember.enabled && remember.checked, listing: root.ftp-mode ? listing.current-index : 0,
                             address-family: address-family.current-index, charset: root.ftp-mode ? charset.text : "",
                             list-pattern: root.ftp-mode ? list-pattern.text : "", show-hidden: root.ftp-mode && show-hidden.checked, mode-z: root.ftp-mode && mode-z.checked,
-                            ca-bundle: root.tls-mode ? ca-bundle.text : "",
+                            http-forward: security.current-index == 2 && http-forward.checked,
+                            ca-bundle: root.tls-mode || root.tls-proxy-mode ? ca-bundle.text : "",
                             client-certificate: root.tls-mode ? client-certificate.text : "",
                             otp: otp.enabled && otp.checked,
                             transfer-mode: root.ftp-mode ? transfer-mode.current-index : 0,
                             transfer-speed: transfer-speed.text,
                             transfer-time: transfer-time.current-index,
                             transfer-mask: transfer-mask.text,
+                            transfer-name-case: transfer-name-case.current-index, transfer-windows-names: transfer-windows-names.checked,
                             transfer-preset: transfer-preset.current-index,
                             recycle-remote: !root.s3-mode && recycle-remote.checked,
                             recycle-overwrites: security.current-index == 3 && recycle-overwrites.checked,
+                            synchronize-browsing: synchronize-browsing.checked,
                             ssh-fingerprint: root.ssh-mode ? ssh-fingerprint.text : "",
                             ssh-private-key: root.ssh-mode && ssh-agent.current-index == 0 ? ssh-private-key.text : "",
                             ssh-agent: root.ssh-mode ? ssh-agent.current-index : 0,
@@ -886,30 +1078,56 @@ component FtpProfilesCard inherits Rectangle {
                             ssh-jump: root.ssh-mode ? ssh-jump.current-index : 0,
                             ssh-timeout: root.ssh-mode ? ssh-timeout.text : "",
                             ssh-keepalive: root.ssh-mode ? ssh-keepalive.text : "",
+                            webdav-liberal-escaping: root.webdav-mode && webdav-liberal-escaping.checked,
+                            webdav-windows-auth: root.webdav-use-windows,
+                            webdav-cross-domain-redirects: root.webdav-mode && webdav-cross-domain-redirects.checked,
+                            webdav-unencrypted-redirects: root.webdav-mode && webdav-unencrypted-redirects.checked,
                             s3-region: root.s3-mode ? s3-region.text : "",
+                            s3-virtual-host: root.s3-mode && s3-virtual-host.checked,
+                            s3-requester-pays: root.s3-mode && s3-requester-pays.checked,
                             s3-aws-enabled: root.s3-mode && s3-aws-enabled.checked,
                             s3-aws-profile: root.s3-mode && s3-aws-enabled.checked ? s3-aws-profile.text : "",
-                        }, password-field.text);
-                    } else { root.operate("connect", root.data, ""); }
+                            s3-role-arn: root.s3-mode ? s3-role-arn.text : "",
+                            s3-temporary: root.s3-manual-token,
+                            s3-token-saved: root.data.s3-token-saved,
+                        }, root.webdav-use-windows ? "" : password-field.text, root.s3-manual-token ? s3-token.text : "");
+                    } else { root.operate("connect", root.data, "", ""); }
                 }
             }
+        }
+    }
+
+    changed proxy-offer => {
+        if (root.proxy-offer.proxy != "" && address.text == root.proxy-offer.address
+            && security.current-index == root.proxy-offer.security && !root.local-proxy-mode) {
+            proxy.text = root.proxy-offer.proxy;
+            telnet-command.text = "";
+            active.checked = false;
         }
     }
 
     changed revision => {
         profile-list.current-index = root.selected;
         name.text = root.data.name;
+        folder.text = root.data.folder;
         address.text = root.data.address;
         user.text = root.data.user;
-        proxy.text = root.data.proxy;
+        proxy.text = root.data.proxy == "local://command" ? "" : root.data.proxy;
+        telnet-command.text = root.data.telnet-proxy-command;
+        use-local-proxy.checked = root.data.proxy == "local://command";
+        local-proxy-command.text = root.data.local-proxy-command;
+        proxy-dns-locally.checked = root.data.ssh-proxy-dns-locally;
         local.text = root.data.local-directory;
         transfer-mode.current-index = root.data.transfer-mode;
         transfer-speed.text = root.data.transfer-speed;
         transfer-time.current-index = root.data.transfer-time;
         transfer-mask.text = root.data.transfer-mask;
+        transfer-name-case.current-index = root.data.transfer-name-case;
+        transfer-windows-names.checked = root.data.transfer-windows-names;
         transfer-preset.current-index = root.data.transfer-preset;
         recycle-remote.checked = root.data.recycle-remote;
         recycle-overwrites.checked = root.data.recycle-overwrites;
+        synchronize-browsing.checked = root.data.synchronize-browsing;
         security.current-index = root.data.security;
         active.checked = root.data.active;
         listing.current-index = root.data.listing;
@@ -920,6 +1138,7 @@ component FtpProfilesCard inherits Rectangle {
         ca-bundle.text = root.data.ca-bundle;
         client-certificate.text = root.data.client-certificate;
         mode-z.checked = root.data.mode-z;
+        http-forward.checked = root.data.http-forward;
         otp.checked = root.data.otp;
         ssh-fingerprint.text = root.data.ssh-fingerprint;
         ssh-kerberos-kex.checked = root.data.ssh-kerberos-kex;
@@ -929,9 +1148,16 @@ component FtpProfilesCard inherits Rectangle {
         ssh-jump.current-index = root.data.ssh-jump;
         ssh-timeout.text = root.data.ssh-timeout;
         ssh-keepalive.text = root.data.ssh-keepalive;
+        webdav-liberal-escaping.checked = root.data.webdav-liberal-escaping;
+        webdav-windows-auth.checked = root.data.webdav-windows-auth;
+        webdav-cross-domain-redirects.checked = root.data.webdav-cross-domain-redirects;
+        webdav-unencrypted-redirects.checked = root.data.webdav-unencrypted-redirects;
         s3-region.text = root.data.s3-region;
         remember.checked = root.data.remember;
         password-field.text = "";
+        s3-role-arn.text = root.data.s3-role-arn;
+        s3-temporary.checked = root.data.s3-temporary;
+        s3-token.text = "";
         if (root.selected == 0) { name.focus(); }
     }
     init => { name.focus(); }
@@ -1291,25 +1517,40 @@ component FtpEditCard inherits Rectangle {
     in property <string> local-path;
     in property <string> remote-path;
     in property <bool> pending;
+    in property <bool> automatic;
+    in property <bool> auto-paused;
     callback perform(int);
     callback close();
     background: Colors.panel; border-radius: 16px; border-width: 1px; border-color: Colors.edge;
     VerticalLayout {
         padding: 20px; spacing: 12px;
-        DialogHeading { icon: @image-url("icons/edit.svg"); title: @tr("FTP-Datei bearbeiten"); subtitle: root.name; }
+        DialogHeading { icon: @image-url("icons/edit.svg"); title: @tr("Serverdatei bearbeiten"); subtitle: root.name; }
         ScrollView {
             vertical-stretch: 1; viewport-width: self.visible-width;
             VerticalLayout {
                 spacing: 10px; alignment: start;
                 FormSection { title: @tr("Serverdatei"); Text { text: root.remote-path; color: Colors.text; wrap: char-wrap; } }
                 FormSection {
-                    title: @tr("Lokale Arbeitskopie"); description: @tr("Im Editor speichern und danach die Änderungen hochladen.");
+                    title: @tr("Lokale Arbeitskopie");
                     Text { text: root.local-path; color: Colors.muted; wrap: char-wrap; }
-                    edit-copy := Button { text: @tr("Im Editor öffnen"); icon: @image-url("icons/edit.svg"); clicked => { root.perform(1); } }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        edit-copy := Button { text: @tr("Im externen Editor öffnen"); icon: @image-url("icons/edit.svg"); clicked => { root.perform(1); } }
+                        Button { text: @tr("Im Texteditor öffnen"); clicked => { root.perform(5); } }
+                    }
                     HorizontalLayout {
                         spacing: 8px;
                         Button { text: @tr("Kopie behalten und beenden"); enabled: !root.pending; clicked => { root.perform(2); } }
                         Button { text: @tr("Kopie löschen …"); icon: @image-url("icons/trash.svg"); destructive: true; enabled: !root.pending; clicked => { root.perform(3); } }
+                    }
+                }
+                FormSection {
+                    title: @tr("Rückübertragung");
+                    description: root.auto-paused ? @tr("Die automatische Rückübertragung wurde nach einem Fehler oder Abbruch angehalten.") : root.automatic ? @tr("Gespeicherte Änderungen werden nach der Prüfung automatisch hochgeladen.") : @tr("Speichere im Editor und lade die Änderungen über diesen Dialog hoch.");
+                    Button {
+                        text: root.automatic ? @tr("Automatik ausschalten") : root.auto-paused ? @tr("Automatik fortsetzen") : @tr("Automatisch hochladen");
+                        enabled: !root.pending;
+                        clicked => { root.perform(4); }
                     }
                 }
                 if root.pending : Text { text: @tr("Rückübertragung im Transfermanager vorgemerkt."); color: Colors.accent; wrap: word-wrap; }
@@ -1511,6 +1752,8 @@ component SyncOptionsCard inherits Rectangle {
     in property <bool> archive-left-secret;
     in property <bool> archive-right-secret;
     in property <bool> ftp;
+    in property <[string]> transfer-presets;
+    in-out property <JobTransferForm> transfer-form;
     in property <string> notice;
     callback configure(SyncOptionsData, string, int, string, string);
     callback close();
@@ -1628,6 +1871,10 @@ component SyncOptionsCard inherits Rectangle {
                     placeholder-text: "Dateimasken, z. B. *.txt;*.md | geheim*";
                     accessible-label: "Dateimasken mit optionalen Ausschlüssen";
                 }
+                }
+                if root.ftp : FormSection {
+                    title: @tr("Übertragungsoptionen");
+                    JobTransferFields { presets: root.transfer-presets; form <=> root.transfer-form; }
                 }
                 if root.archive-left-secret : FieldLabel { text: @tr("Passwort für das linke Archiv"); }
                 left-password := LineEdit {
@@ -2388,6 +2635,9 @@ component SettingsCard inherits Rectangle {
     property <string> editor: root.current.editor;
     property <string> everything: root.current.everything;
     property <string> transfer-rate: root.current.transfer-rate;
+    property <string> parallel-network-transfers: root.current.parallel-network-transfers;
+    property <bool> parallel-network-files: root.current.parallel-network-files;
+    property <string> parallel-sftp-minimum: root.current.parallel-sftp-minimum;
     property <string> transfer-log: root.current.transfer-log;
     property <bool> transfer-comments: root.current.transfer-comments;
     property <ArchiveDefaults> archives: root.current.archives;
@@ -2427,6 +2677,9 @@ component SettingsCard inherits Rectangle {
         root.editor = root.current.editor;
         root.everything = root.current.everything;
         root.transfer-rate = root.current.transfer-rate;
+        root.parallel-network-transfers = root.current.parallel-network-transfers;
+        root.parallel-network-files = root.current.parallel-network-files;
+        root.parallel-sftp-minimum = root.current.parallel-sftp-minimum;
         root.transfer-log = root.current.transfer-log;
         root.transfer-comments = root.current.transfer-comments;
         root.archives = root.current.archives;
@@ -2451,7 +2704,10 @@ component SettingsCard inherits Rectangle {
         system-theme: root.system-theme,
         show-hidden: root.show-hidden, list-font: root.list-font, list-font-size: root.list-font-size,
         language: root.language, editor: root.editor, everything: root.everything,
-        transfer-rate: root.transfer-rate, transfer-log: root.transfer-log, transfer-comments: root.transfer-comments,
+        transfer-rate: root.transfer-rate, parallel-network-transfers: root.parallel-network-transfers,
+        parallel-network-files: root.parallel-network-files,
+        parallel-sftp-minimum: root.parallel-sftp-minimum,
+        transfer-log: root.transfer-log, transfer-comments: root.transfer-comments,
         ntfs: {
             streams: root.ntfs-streams, permissions: root.ntfs-permissions, owner: root.ntfs-owner,
             audit: root.ntfs-audit, hardlinks: root.ntfs-hardlinks, sparse: root.ntfs-sparse,
@@ -2658,6 +2914,12 @@ component SettingsCard inherits Rectangle {
                                 Text { text: @tr("Übertragungsrate (KiB/s)"); color: Colors.muted; }
                                 LineEdit { text <=> root.transfer-rate; accessible-label: @tr("Übertragungsrate (KiB/s)"); }
                                 DetailCell { text: @tr("0 bedeutet unbegrenzt."); }
+                                FieldLabel { text: @tr("Parallele Netzwerktransfers"); }
+                                LineEdit { text <=> root.parallel-network-transfers; placeholder-text: "1–8"; accessible-label: @tr("Parallele Netzwerktransfers"); }
+                                CheckBox { text: @tr("Dateien innerhalb eines Netzwerkauftrags parallel übertragen"); checked <=> root.parallel-network-files; }
+                                FieldLabel { text: @tr("Parallele SFTP-Downloads ab (KiB)"); }
+                                LineEdit { text <=> root.parallel-sftp-minimum; placeholder-text: "0"; accessible-label: @tr("Parallele SFTP-Downloads ab (KiB)"); }
+                                DetailCell { text: @tr("0 lädt jede SFTP-Datei über eine Verbindung."); }
                                 Text { text: @tr("Protokolldatei"); color: Colors.muted; }
                                 LineEdit { text <=> root.transfer-log; placeholder-text: @tr("Absoluter Pfad (optional)"); accessible-label: @tr("Protokolldatei"); }
                                 CheckBox { text: @tr("Dateikommentare mitführen"); checked <=> root.transfer-comments; }
@@ -3042,6 +3304,8 @@ export component MainWindow inherits Window {
     in property <MetadataForm> metadata-initial;
     in property <int> metadata-revision;
     in property <string> metadata-selection;
+    in property <bool> permissions-ownership;
+    in property <bool> permissions-recursive;
     in property <MutationData> mutation-data;
     in property <int> separate-tree-mode;
     in property <TreeData> left-tree;
@@ -3130,6 +3394,8 @@ export component MainWindow inherits Window {
     in property <bool> dialog-secret;
     in property <bool> dialog-second-secret;
     in property <[string]> dialog-options;
+    in property <[string]> job-transfer-presets;
+    in-out property <JobTransferForm> job-transfer-form;
     in property <string> dialog-options-label;
     in property <string> dialog-confirm-label;
     in property <[string]> dialog-transfer-filters;
@@ -3139,6 +3405,8 @@ export component MainWindow inherits Window {
     in property <bool> dialog-operation-multiple;
     in property <bool> dialog-operation-move;
     in property <TransferManagerData> transfer-manager-data;
+    in property <[NetworkTransferRow]> network-transfers;
+    in property <int> network-transfer-count;
     in-out property <int> dialog-transfer-filter;
     in-out property <PackSelection> dialog-pack-selection;
     in property <SyncOptionsData> sync-draft;
@@ -3146,9 +3414,12 @@ export component MainWindow inherits Window {
     in property <[string]> sync-roots;
     in property <[string]> sync-presets;
     in property <[string]> ftp-profile-names;
+    in property <[string]> ftp-folder-names;
+    in property <int> ftp-folder-index;
     in property <[string]> ftp-jump-profiles;
     in property <int> ftp-profile-index;
     in property <FtpProfileData> ftp-profile-data;
+    in property <FtpProxyOffer> ftp-proxy-offer;
     in property <[string]> ftp-transfer-names;
     in property <[string]> transfer-preset-names;
     in property <int> transfer-preset-index;
@@ -3253,7 +3524,7 @@ export component MainWindow inherits Window {
     callback properties-action(int);
     callback copy-property(string);
     callback metadata-apply(MetadataForm);
-    callback permissions-apply(string);
+    callback permissions-apply(string, string, string, bool);
     pure callback permission-parse(string) -> int;
     pure callback permission-format(int) -> string;
     callback diff-options(bool, bool, bool);
@@ -3266,8 +3537,12 @@ export component MainWindow inherits Window {
     callback sync-run(bool);
     callback ftp-browse(string, int);
     in property <bool> ftp-edit-pending;
+    in property <bool> ftp-edit-automatic;
+    in property <bool> ftp-edit-auto-paused;
     callback ftp-profile-select(int);
-    callback ftp-profile-operate(string, FtpProfileData, string);
+    callback ftp-folder-select(int);
+    callback ftp-profile-operate(string, FtpProfileData, string, string);
+    callback ftp-profile-detect-proxy(string, int);
     callback plugin-operate(string, int);
     callback plugin-filter(string);
     in property <string> plugin-query;
@@ -3585,6 +3860,10 @@ export component MainWindow inherits Window {
                     text: root.button-label(@tr("Fortschritt"), root.shortcut-labels.job-details);
                     clicked => { root.job-expanded = true; }
                 }
+                if root.network-transfer-count > 0 : Button {
+                    text: @tr("Netzwerktransfers") + " (" + root.network-transfer-count + ")";
+                    clicked => { root.action("transfer-manager"); }
+                }
                 if root.message-waiting + root.pending-result-count > 0 || root.has-last-result : Button { text: root.message-waiting + root.pending-result-count > 0 ? @tr("Meldungen") + " (" + (root.message-waiting + root.pending-result-count) + ")" : @tr("Letztes Ergebnis"); icon: @image-url("icons/info.svg"); clicked => { root.action("show-messages"); } }
             }
         }
@@ -3682,6 +3961,8 @@ export component MainWindow inherits Window {
                 archive-left-secret: root.sync-archive-left-secret;
                 archive-right-secret: root.sync-archive-right-secret;
                 ftp: root.sync-ftp;
+                transfer-presets: root.job-transfer-presets;
+                transfer-form <=> root.job-transfer-form;
                 notice: root.sync-notice;
                 configure(data, preset, operation, left, right) => {
                     root.sync-configure(data, preset, operation, left, right);
@@ -3735,14 +4016,19 @@ export component MainWindow inherits Window {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 profiles: root.ftp-profile-names;
+                folders: root.ftp-folder-names;
+                folder-index: root.ftp-folder-index;
                 jump-profiles: root.ftp-jump-profiles;
                 transfer-names: root.ftp-transfer-names;
                 selected: root.ftp-profile-index;
                 data: root.ftp-profile-data;
+                proxy-offer: root.ftp-proxy-offer;
                 revision: root.ftp-profile-revision;
                 notice: root.ftp-profile-notice; busy: root.job-active;
                 select(index) => { root.ftp-profile-select(index); }
-                operate(operation, data, password) => { root.ftp-profile-operate(operation, data, password); }
+                select-folder(index) => { root.ftp-folder-select(index); }
+                operate(operation, data, password, token) => { root.ftp-profile-operate(operation, data, password, token); }
+                detect-proxy(address, security) => { root.ftp-profile-detect-proxy(address, security); }
                 close => { root.action("close-dialog"); }
             }
         }
@@ -3842,6 +4128,9 @@ export component MainWindow inherits Window {
                 width: min(parent.width - 32px, 920px); height: min(parent.height - 32px, 820px);
                 x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
                 data: root.text-draft-data; notice: root.dialog-notice;
+                transfer-presets: root.job-transfer-presets;
+                transfer-form <=> root.job-transfer-form;
+                transfer-label: root.dialog-confirm-label;
                 revision: root.dialog-revision; focus-cycle: root.dialog-focus-cycle;
                 apply(form) => { root.text-draft-apply(form); }
                 file(saving, initial) => { return root.navigation-file(saving, initial); }
@@ -3937,11 +4226,12 @@ export component MainWindow inherits Window {
                 width: min(parent.width - 32px, 860px); height: min(parent.height - 32px, 800px);
                 x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
                 selection: root.metadata-selection; state: root.mutation-data;
+                ownership: root.permissions-ownership; recursive-options: root.permissions-recursive;
                 busy: root.job-active; cancelling: root.job-cancelling; progress: root.job-progress;
                 metrics: root.job-metrics; focus-cycle: root.dialog-focus-cycle;
                 parse-mode(value) => { return root.permission-parse(value); }
                 format-mode(value) => { return root.permission-format(value); }
-                apply(value) => { root.permissions-apply(value); }
+                apply(mode, owner, group, recursive) => { root.permissions-apply(mode, owner, group, recursive); }
                 copy(value) => { root.copy-property(value); }
                 cancel => { root.action("cancel-job"); }
                 close => { root.action("close-dialog"); }
@@ -3998,6 +4288,7 @@ export component MainWindow inherits Window {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 data: root.transfer-manager-data;
+                network: root.network-transfers;
                 cancelling: root.job-cancelling;
                 choose(action) => { root.submit("", "", action); }
                 dismiss => { root.action("close-dialog"); }
@@ -4133,6 +4424,8 @@ export component MainWindow inherits Window {
                 label: root.dialog-placeholder == "" ? root.dialog-title : root.dialog-placeholder;
                 secondary-label: root.dialog-second-placeholder;
                 options: root.dialog-options;
+                transfer-presets: root.job-transfer-presets;
+                transfer-form <=> root.job-transfer-form;
                 options-label: root.dialog-options-label;
                 confirm-label: root.dialog-confirm-label;
                 secret: root.dialog-secret;
@@ -4149,6 +4442,8 @@ export component MainWindow inherits Window {
                 focus-cycle: root.dialog-focus-cycle;
                 name: root.dialog-title; local-path: root.dialog-value; remote-path: root.dialog-second;
                 pending: root.ftp-edit-pending;
+                automatic: root.ftp-edit-automatic;
+                auto-paused: root.ftp-edit-auto-paused;
                 perform(option) => { root.submit("", "", option); } close => { root.action("close-dialog"); }
             }
         }

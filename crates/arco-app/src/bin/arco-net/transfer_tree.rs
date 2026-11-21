@@ -8,7 +8,7 @@ use arco_core::{
 };
 use arco_windows::ftp::{PreferredTransferMode, Session, Url};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
@@ -46,7 +46,7 @@ impl<'a> Transfer<'a> {
             let (select, wildcard) = pattern_match(&pattern)?;
             let mut matches = 0;
             for entry in &listing.entries {
-                if select(&entry.name) {
+                if select(&entry.name) && !entry.symlink {
                     if entry.directory.is_none() {
                         return Err(invalid(
                             "Der Server konnte den Typ einer Quelle nicht eindeutig bestimmen.",
@@ -238,6 +238,21 @@ fn run_plans(plans: Vec<FtpPlan>, upload: bool, cancel: &AtomicBool) -> io::Resu
     } else {
         Action::CopyLeft
     };
+    let target = usize::from(upload);
+    let mut reserved = BTreeSet::new();
+    for row in plans
+        .iter()
+        .flat_map(|plan| &plan.rows)
+        .filter(|row| row.action == action)
+    {
+        let key = row.path(target).to_string_lossy().to_lowercase();
+        if !reserved.insert(key) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("Doppeltes Transferziel „{}“.", row.path(target).display()),
+            ));
+        }
+    }
     for plan in plans {
         let report = plan.apply(cancel, |_| {});
         completed += report.completed;
@@ -249,18 +264,13 @@ fn run_plans(plans: Vec<FtpPlan>, upload: bool, cancel: &AtomicBool) -> io::Resu
                 "Ordnertransfer nach {completed} abgeschlossenen Einträgen: {error}"
             )));
         }
-        paths.extend(
-            plan.rows
-                .iter()
-                .filter(|row| row.action == action)
-                .map(|row| {
-                    if upload {
-                        row.path(1).to_owned()
-                    } else {
-                        plan.local.path().join(row.path(0))
-                    }
-                }),
-        );
+        for row in plan.rows.iter().filter(|row| row.action == action) {
+            paths.push(if upload {
+                plan.reported_remote_copy_path(row.path(1))?
+            } else {
+                plan.local.path().join(row.path(0))
+            });
+        }
     }
     Ok(if upload {
         json!({"uploaded": paths, "completed": completed})
@@ -283,7 +293,7 @@ impl<T> Default for Sources<T> {
 
 impl<T: Ord + Clone> Sources<T> {
     fn add(&mut self, parent: T, name: &str) -> io::Result<()> {
-        files::leaf_name(OsStr::new(name))?;
+        arco_core::transfer_names::remote_leaf(name)?;
         let key = name.to_lowercase();
         if let Some((previous, spelling)) = self.selected.get(&key) {
             if previous != &parent || spelling != name {

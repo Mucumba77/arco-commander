@@ -172,6 +172,8 @@ export component PropertiesCard inherits Rectangle {
 
 export component PermissionsCard inherits Rectangle {
     in property <string> selection;
+    in property <bool> ownership;
+    in property <bool> recursive-options;
     in property <MutationData> state;
     in property <bool> busy;
     in property <bool> cancelling;
@@ -181,7 +183,7 @@ export component PermissionsCard inherits Rectangle {
     property <bool> valid;
     pure callback parse-mode(string) -> int;
     pure callback format-mode(int) -> string;
-    callback apply(string);
+    callback apply(string, string, string, bool);
     callback close();
     callback cancel();
     callback copy(string);
@@ -212,7 +214,7 @@ export component PermissionsCard inherits Rectangle {
         }
         VerticalLayout {
             padding: 20px; spacing: 12px;
-            DialogHeading { icon: @image-url("icons/settings.svg"); title: @tr("FTP-Unix-Rechte ändern"); subtitle: root.selection; }
+            DialogHeading { icon: @image-url("icons/settings.svg"); title: root.ownership ? @tr("Server-Rechte und Besitzer ändern") : @tr("Server-Rechte ändern"); subtitle: root.selection; }
             if root.state.notice != "" : Text { text: root.state.notice; color: Colors.archive; wrap: word-wrap; }
             ScrollView {
                 vertical-stretch: 1;
@@ -220,7 +222,8 @@ export component PermissionsCard inherits Rectangle {
                     padding: 0px; spacing: 12px;
                     MutationFeedback { data: root.state; busy: root.busy; cancelling: root.cancelling; progress: root.progress; metrics: root.metrics; focus-cycle: root.focus-cycle; cancel => { root.cancel(); } copy(value) => { root.copy(value); } }
                     FormSection {
-                        title: @tr("Neuer Zugriffsmodus"); description: @tr("Alle ausgewählten Einträge erhalten diese Rechte. Der Server muss SITE CHMOD unterstützen; vorhandene Rechte werden nicht automatisch abgeleitet.");
+                        title: @tr("Neuer Zugriffsmodus");
+                        description: root.ownership ? @tr("Lasse das Modusfeld für reine Besitzer- oder Gruppenänderungen leer.") : @tr("Der Server muss SITE CHMOD unterstützen.");
                         HorizontalLayout {
                             spacing: 12px;
                             mode := LineEdit { placeholder-text: @tr("Oktal, z. B. 644 oder 755"); accessible-label: @tr("Unix-Rechte als Oktalwert"); enabled: !root.busy; edited => { presets.current-index = 0; root.read-mode(); } }
@@ -241,16 +244,30 @@ export component PermissionsCard inherits Rectangle {
                     FormSection {
                         title: @tr("Spezielle Modusbits");
                         HorizontalLayout { spacing: 12px; suid := CheckBox { text: "SetUID"; enabled: !root.busy; toggled => { root.update-mode(); } } sgid := CheckBox { text: "SetGID"; enabled: !root.busy; toggled => { root.update-mode(); } } sticky := CheckBox { text: "Sticky"; enabled: !root.busy; toggled => { root.update-mode(); } } }
-                        Text { text: @tr("Bei Abbruch bleiben bereits gesetzte Rechte bestehen. Ordnerinhalte werden nicht rekursiv geändert."); color: Colors.muted; wrap: word-wrap; font-size: 12px; }
                     }
+                    FormSection {
+                        visible: root.ownership;
+                        title: @tr("Besitzer und Gruppe");
+                        description: @tr("Leere Felder behalten die aktuelle UID oder GID bei.");
+                        HorizontalLayout {
+                            spacing: 12px;
+                            uid := LineEdit { placeholder-text: @tr("Besitzer-ID (UID)"); accessible-label: @tr("Besitzer-ID (UID)"); enabled: !root.busy; }
+                            gid := LineEdit { placeholder-text: @tr("Gruppen-ID (GID)"); accessible-label: @tr("Gruppen-ID (GID)"); enabled: !root.busy; }
+                        }
+                    }
+                    recursive := CheckBox { text: @tr("Dateien und Unterordner einbeziehen"); visible: root.recursive-options; enabled: !root.busy; }
+                    Text { text: @tr("Bei Abbruch bleiben bereits angewendete Änderungen bestehen."); color: Colors.muted; wrap: word-wrap; font-size: 12px; }
                 }
             }
             Rectangle { height: 1px; background: Colors.edge; }
             HorizontalLayout {
                 spacing: 8px;
-                Text { text: root.valid ? @tr("Der neue Modus gilt für die gesamte Auswahl.") : @tr("Oktalwert eingeben oder Rechte auswählen."); color: Colors.muted; wrap: word-wrap; horizontal-stretch: 1; }
                 close-button := Button { text: @tr("Schließen"); enabled: !root.busy; clicked => { root.close(); } }
-                apply-button := Button { text: @tr("Rechte übernehmen"); primary: true; enabled: root.valid && !root.busy; clicked => { root.apply(mode.text); } }
+                apply-button := Button {
+                    text: @tr("Anwenden"); primary: true;
+                    enabled: !root.busy && (root.valid || (root.ownership && mode.text == "" && (uid.text != "" || gid.text != "")));
+                    clicked => { root.apply(mode.text, uid.text, gid.text, root.recursive-options && recursive.checked); }
+                }
             }
         }
     }

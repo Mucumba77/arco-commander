@@ -217,6 +217,29 @@ pub(crate) fn query_file_info<T: Default>(
     }
 }
 
+pub fn open_edit_copy(path: &Path) -> io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+pub fn edit_file_revision(file: &std::fs::File) -> io::Result<crate::EditFileRevision> {
+    let metadata = file.metadata()?;
+    let change_time = query_file_info::<FILE_BASIC_INFO>(file, FileBasicInfo)
+        .ok()
+        .map(|info| info.ChangeTime);
+    let identity = query_file_info::<FILE_ID_INFO>(file, FileIdInfo)
+        .ok()
+        .map(|info| (info.VolumeSerialNumber, info.FileId.Identifier));
+    Ok(crate::EditFileRevision {
+        size: metadata.len(),
+        modified: metadata.modified()?,
+        change_time,
+        identity,
+    })
+}
+
 pub fn edit_metadata(path: &Path, edit: MetadataEdit) -> io::Result<()> {
     let file = std::fs::OpenOptions::new()
         .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)

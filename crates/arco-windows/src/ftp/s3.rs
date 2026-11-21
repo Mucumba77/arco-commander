@@ -10,8 +10,9 @@ use std::sync::atomic::AtomicBool;
 use tempfile::NamedTempFile;
 use zeroize::Zeroizing;
 
+mod multipart;
 mod versions;
-pub use versions::S3Version;
+pub use versions::{S3Mfa, S3Version, S3Versioning, S3VersioningConfig};
 
 const PART: u64 = 16 * 1024 * 1024;
 const MAX_OBJECT: u64 = 5 * 1024 * 1024 * 1024 * 1024;
@@ -23,6 +24,61 @@ pub struct S3Tags {
 }
 
 impl Connection {
+    pub fn with_s3_request_options(
+        mut self,
+        virtual_host: bool,
+        requester_pays: bool,
+    ) -> io::Result<Self> {
+        if self.security != Security::S3 {
+            return Err(invalid_input(
+                "Die gewählten Verbindungsoptionen benötigen S3.",
+            ));
+        }
+        if virtual_host && !matches!(self.url.host(), Some(url::Host::Domain(_))) {
+            return Err(invalid_input(
+                "S3-Virtual-Host-Adressierung benötigt einen DNS-Namen.",
+            ));
+        }
+        self.s3_virtual_host = virtual_host;
+        self.s3_requester_pays = requester_pays;
+        Ok(self)
+    }
+
+    pub(super) fn s3_wire_url(&self, url: &Url) -> io::Result<Url> {
+        let mut wire = url.clone();
+        if !self.s3_virtual_host || url.path() == "/" {
+            wire.set_path(&encode_s3_path(url.path()));
+            return Ok(wire);
+        }
+        let path = url.path().trim_start_matches('/');
+        let (bucket, key) = path.split_once('/').unwrap_or((path, ""));
+        if bucket.is_empty() {
+            return Ok(wire);
+        }
+        let (valid, _) = coordinates(url)?;
+        if !valid.split('.').all(|label| {
+            label
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+        }) {
+            return Err(invalid_input(
+                "Der Bucket-Name eignet sich nicht für einen S3-Virtual-Host.",
+            ));
+        }
+        let host = url
+            .host_str()
+            .ok_or_else(|| invalid_input("S3-Servername fehlt."))?;
+        wire.set_host(Some(&format!("{bucket}.{host}")))
+            .map_err(|_| invalid_input("Ungültiger S3-Virtual-Host."))?;
+        wire.set_path(&encode_s3_path(&format!("/{key}")));
+        Ok(wire)
+    }
+
     pub fn with_s3_region(mut self, region: &str) -> io::Result<Self> {
         let region = region.trim();
         if self.security != Security::S3
@@ -52,8 +108,22 @@ impl Session {
         }
         self.verify_sync_entry(directory, entry, cancel)?;
         let url = self.file(directory, &entry.name)?;
-        let mut request = self.http(&url, "GET")?;
+        let tags = self.read_s3_tags(&url, None, cancel)?;
+        self.verify_sync_entry(directory, entry, cancel)?;
+        Ok(tags)
+    }
+
+    fn read_s3_tags(
+        &self,
+        url: &Url,
+        version: Option<&str>,
+        cancel: &AtomicBool,
+    ) -> io::Result<S3Tags> {
+        let mut request = self.http(url, "GET")?;
         request.query("tagging", "");
+        if let Some(id) = version {
+            request.query("versionId", id);
+        }
         let response = request.send(cancel)?.expect(&[200])?;
         let xml = http::xml(&response.body)?;
         let root = xml.root_element();
@@ -71,7 +141,6 @@ impl Session {
                 return Err(invalid_input("Doppelter S3-Tag-Schlüssel."));
             }
         }
-        self.verify_sync_entry(directory, entry, cancel)?;
         Ok(S3Tags {
             tags,
             version: response.headers.get("x-amz-version-id").cloned(),
@@ -244,6 +313,7 @@ impl Session {
                     Entry {
                         name: name.to_owned(),
                         directory: Some(false),
+                        symlink: false,
                         size: Some(
                             text(item, "Size")
                                 .and_then(|value| value.parse().ok())
@@ -422,98 +492,26 @@ impl Session {
                 .expect(&[200, 201, 204])
                 .map(|_| ());
         }
-        let mut start = self.http(url, "POST")?;
-        start.query("uploads", "").header("Content-Length", "0")?;
-        let response = start.send(cancel)?.expect(&[200, 201])?;
-        let xml = http::xml(&response.body)?;
-        let id = text(xml.root_element(), "UploadId")
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| invalid_input("Der Server hat keine Multipart-ID bestätigt."))?;
-        let result = self.s3_parts(
-            url,
-            id,
-            condition,
-            &mut file,
-            (size, modified),
-            verify,
-            cancel,
-        );
-        if result.is_err() {
-            let mut abort = self.http(url, "DELETE")?;
-            abort.query("uploadId", id);
-            if abort
-                .send(&AtomicBool::new(false))
-                .and_then(|response| response.expect(&[200, 204, 404]))
-                .is_err()
-            {
-                return Err(io::Error::other(
-                    "Der S3-Multipart-Auftrag wurde unterbrochen. Prüfe offene Uploads im Ziel-Bucket.",
-                ));
+        let multipart = multipart::Multipart::start(self, url, cancel)?;
+        let layout = multipart::Layout::new(size);
+        let mut tags = Vec::new();
+        let result = (|| {
+            for number in 1..=layout.count() {
+                let part = stage_part(&mut file, layout.size_of(number), cancel)?;
+                tags.push(multipart.put(number, part.path(), cancel)?);
             }
-        }
-        result
-    }
-
-    fn s3_parts(
-        &self,
-        url: &Url,
-        id: &str,
-        condition: (&str, &str),
-        source: &mut File,
-        original: (u64, std::time::SystemTime),
-        verify: impl FnOnce() -> io::Result<()>,
-        cancel: &AtomicBool,
-    ) -> io::Result<()> {
-        use std::fmt::Write as _;
-        let (size, modified) = original;
-        let part_size = PART.max(size.div_ceil(10_000));
-        let mut remaining = size;
-        let mut body = "<CompleteMultipartUpload>".to_owned();
-        for number in 1..=size.div_ceil(part_size) {
-            check_cancel(cancel)?;
-            let count = remaining.min(part_size);
-            let part = stage_part(source, count, cancel)?;
-            remaining -= count;
-            let mut request = self.http(url, "PUT")?;
-            request
-                .query("partNumber", &number.to_string())
-                .query("uploadId", id)
-                .upload(part.path());
-            let response = request.execute(None, cancel, || Ok(()))?.expect(&[200])?;
-            let tag = response
-                .headers
-                .get("etag")
-                .and_then(|value| etag(value))
-                .ok_or_else(|| {
-                    invalid_input("Der Server bestätigt keinen ETag für den S3-Teil.")
-                })?;
-            write!(
-                body,
-                "<Part><PartNumber>{number}</PartNumber><ETag>{}</ETag></Part>",
-                escape_xml(tag)
-            )
-            .expect("format multipart XML");
-        }
-        verify_local(source, size, modified)?;
-        verify()?;
-        body.push_str("</CompleteMultipartUpload>");
-        let mut request = self.http(url, "POST")?;
-        request
-            .query("uploadId", id)
-            .header(condition.0, condition.1)?
-            .header("Content-Type", "application/xml")?
-            .body(&body)?;
-        let response = request.send(cancel)?.expect(&[200])?;
-        let reply = http::xml(&response.body)?;
-        if !reply
-            .root_element()
-            .has_tag_name("CompleteMultipartUploadResult")
-        {
+            verify_local(&file, size, modified)?;
+            verify()?;
+            multipart
+                .complete(tags.iter().map(String::as_str), condition, cancel)
+                .map(|_| ())
+        })();
+        if result.is_err() && multipart.abort(&AtomicBool::new(false)).is_err() {
             return Err(io::Error::other(
-                "Der Server hat den S3-Multipart-Abschluss nicht bestätigt.",
+                "Der S3-Multipart-Auftrag wurde unterbrochen. Prüfe offene Uploads im Ziel-Bucket.",
             ));
         }
-        Ok(())
+        result
     }
 }
 
@@ -521,6 +519,7 @@ fn directory_entry(name: &str) -> Entry {
     Entry {
         name: name.to_owned(),
         directory: Some(true),
+        symlink: false,
         size: None,
         modified: None,
         unique: None,
@@ -550,6 +549,26 @@ fn verify_local(source: &File, size: u64, modified: std::time::SystemTime) -> io
         return Err(invalid_input("Die lokale S3-Quelldatei hat sich geändert."));
     }
     Ok(())
+}
+
+fn encode_s3_path(path: &str) -> String {
+    use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, percent_encode};
+    use std::fmt::Write as _;
+
+    const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'_')
+        .remove(b'.')
+        .remove(b'~');
+    let mut encoded = String::with_capacity(path.len());
+    for (index, segment) in path.split('/').enumerate() {
+        if index > 0 {
+            encoded.push('/');
+        }
+        let bytes: Vec<_> = percent_decode_str(segment).collect();
+        write!(encoded, "{}", percent_encode(&bytes, SEGMENT)).expect("format S3 path");
+    }
+    encoded
 }
 
 fn coordinates(url: &Url) -> io::Result<(String, String)> {
@@ -624,6 +643,7 @@ mod tests {
         let folder = session
             .relative_directory(&bucket, Path::new("Büro #1"))
             .unwrap();
+        crate::ftp::rate::tests::check_live_download(&session, &folder);
         let local = tempfile::tempdir().unwrap();
         let input = local.path().join("input");
         let output = local.path().join("output");

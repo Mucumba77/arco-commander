@@ -1,5 +1,6 @@
 use super::{SESSION_LIMIT, invalid, require_sites};
 use crate::profile::{self, FtpProfile, SshAgent};
+use crate::ssh_host_keys::HostKeyPins;
 use crate::winscp::{self, ImportedSite};
 use base64::{
     Engine,
@@ -27,7 +28,6 @@ pub struct KnownHosts(Vec<KnownHost>);
 
 struct KnownHost {
     hosts: String,
-    priority: u8,
     revoked: bool,
     fingerprint: String,
 }
@@ -61,14 +61,16 @@ impl KnownHosts {
                     "Ein known_hosts-Eintrag enthält keinen öffentlichen Schlüssel.",
                 ));
             };
-            let priority = match kind {
-                "ssh-ed25519" => 0,
-                "ecdsa-sha2-nistp256" => 1,
-                "ecdsa-sha2-nistp384" => 2,
-                "ecdsa-sha2-nistp521" => 3,
-                "ssh-rsa" => 4,
-                _ => continue,
-            };
+            if !matches!(
+                kind,
+                "ssh-ed25519"
+                    | "ecdsa-sha2-nistp256"
+                    | "ecdsa-sha2-nistp384"
+                    | "ecdsa-sha2-nistp521"
+                    | "ssh-rsa"
+            ) {
+                continue;
+            }
             if encoded.len() > 8192 || keys.len() >= 20_000 {
                 return Err(invalid("known_hosts überschreitet die Schlüsselgrenze."));
             }
@@ -82,7 +84,6 @@ impl KnownHosts {
             }
             keys.push(KnownHost {
                 hosts: hosts.to_owned(),
-                priority,
                 revoked,
                 fingerprint: format!("SHA256:{}", STANDARD_NO_PAD.encode(Sha256::digest(blob))),
             });
@@ -112,7 +113,7 @@ impl KnownHosts {
             .filter(|key| key.revoked)
             .map(|key| key.fingerprint.as_str())
             .collect();
-        let mut candidates = BTreeMap::<u8, BTreeSet<&str>>::new();
+        let mut candidates = BTreeSet::new();
         for key in &self.0 {
             if !key.revoked && known_host_matches(&key.hosts, identity) {
                 if revoked.contains(key.fingerprint.as_str()) {
@@ -120,19 +121,14 @@ impl KnownHosts {
                         "known_hosts kennzeichnet einen passenden Schlüssel als widerrufen.",
                     ));
                 }
-                candidates
-                    .entry(key.priority)
-                    .or_default()
-                    .insert(&key.fingerprint);
+                candidates.insert(key.fingerprint.as_str());
             }
         }
-        match candidates.first_key_value() {
-            Some((_, values)) if values.len() > 1 => Err(invalid(
-                "known_hosts enthält mehrere passende Schlüssel desselben Typs. Prüfe den Fingerabdruck manuell.",
-            )),
-            Some((_, values)) => Ok(values.first().map(|value| (*value).to_owned())),
-            None => Ok(None),
+        if candidates.is_empty() {
+            return Ok(None);
         }
+        let pins = candidates.into_iter().collect::<Vec<_>>().join(";");
+        Ok(Some(HostKeyPins::parse(&pins)?.to_string()))
     }
 }
 
@@ -461,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn known_hosts_binds_hashes_and_rejects_conflicting_or_revoked_keys() {
+    fn known_hosts_binds_hashes_preserves_alternatives_and_rejects_revoked_keys() {
         let salt = [7; 20];
         let mut mac = Hmac::<sha1_modern::Sha1>::new_from_slice(&salt).unwrap();
         mac.update(b"[build.example]:2222");
@@ -476,7 +472,14 @@ mod tests {
             "build.example ssh-ed25519 {key}\nbuild.example ssh-ed25519 {other}"
         ))
         .unwrap();
-        assert!(keys.lookup("build.example").is_err());
+        assert_eq!(
+            keys.lookup("build.example")
+                .unwrap()
+                .unwrap()
+                .split(';')
+                .count(),
+            2
+        );
         let keys = KnownHosts::parse(&format!(
             "build.example ssh-ed25519 {key}\n@revoked * ssh-ed25519 {key}"
         ))

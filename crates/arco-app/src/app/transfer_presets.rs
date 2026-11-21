@@ -5,6 +5,42 @@ use arco_core::transfer_presets::{self, TransferPreset, TransferRule};
 use std::io;
 
 impl App {
+    pub(crate) fn prepare_job_transfer_form(&self, enabled: bool) {
+        let ui = self.ui();
+        ui.set_job_transfer_form(Default::default());
+        ui.set_job_transfer_presets(if enabled {
+            strings(
+                std::iter::once(tr("Profil und automatische Regeln")).chain(
+                    self.profile
+                        .network_transfer_presets
+                        .iter()
+                        .map(|preset| preset.name.as_str()),
+                ),
+            )
+        } else {
+            Default::default()
+        });
+    }
+
+    pub(crate) fn job_transfer_options(
+        &self,
+    ) -> io::Result<arco_app::network_transfer::JobOptions> {
+        let ui = self.ui();
+        let form = ui.get_job_transfer_form();
+        let preset = if form.preset > 0 {
+            use slint::Model;
+            Some(
+                ui.get_job_transfer_presets()
+                    .row_data(form.preset as usize)
+                    .ok_or_else(|| io::Error::other("Wähle eine verfügbare Transfervorgabe."))?
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+        arco_app::network_transfer::JobOptions::new(preset, form.speed.as_str())
+    }
+
     pub(crate) fn open_transfer_presets(&mut self) {
         self.pending = None;
         self.publish_transfer_preset(
@@ -42,6 +78,8 @@ impl App {
                     Some(false) => 2,
                 },
                 masks: preset.settings.masks.as_str().into(),
+                name_case: preset.settings.names.case.index(),
+                windows_names: preset.settings.names.windows,
                 automatic: rule.is_some(),
                 host: rule.map_or("", |rule| rule.host.as_str()).into(),
                 user: rule.map_or("", |rule| rule.user.as_str()).into(),
@@ -185,6 +223,10 @@ fn parse_draft(data: TransferPresetData) -> io::Result<TransferPreset> {
                 _ => None,
             },
             masks: data.masks.trim().into(),
+            names: arco_core::transfer_names::NameRules {
+                case: arco_core::transfer_names::NameCase::from_index(data.name_case),
+                windows: data.windows_names,
+            },
         },
         rule: data.automatic.then(|| TransferRule {
             host: data.host.trim().into(),

@@ -5,7 +5,7 @@ use arco_core::{
     files::{self, TransferReport},
     ignore::IgnoreList,
 };
-use arco_windows::MetadataEdit;
+use arco_windows::{MetadataEdit, ftp::UnixMetadata};
 use chrono::{Local, NaiveDateTime, TimeZone};
 use std::{
     collections::BTreeSet,
@@ -25,6 +25,8 @@ impl App {
             return;
         }
         let ui = self.ui();
+        ui.set_permissions_ownership(location.session.security().is_ssh());
+        ui.set_permissions_recursive(entries.iter().any(|entry| entry.directory == Some(true)));
         ui.set_metadata_selection(
             format!(
                 "{} · {} {}",
@@ -37,31 +39,78 @@ impl App {
         ui.set_mutation_data(MutationData::default());
         self.dialog(
             "permissions",
-            Pending::FtpPanelEdit(location, super::FtpEdit::Permissions(entries)),
+            Pending::RemoteMetadata(location, entries),
             Dialog::default(),
         );
     }
 
-    pub(super) fn submit_ftp_permissions(&mut self, mode: &str) {
+    pub(super) fn submit_ftp_permissions(
+        &mut self,
+        mode: &str,
+        owner: &str,
+        group: &str,
+        recursive: bool,
+    ) {
         if self.job.is_some() {
             return;
         }
-        let Some(Pending::FtpPanelEdit(location, super::FtpEdit::Permissions(entries))) =
-            &self.pending
-        else {
+        let Some(Pending::RemoteMetadata(location, entries)) = &self.pending else {
             return;
         };
-        let location = location.clone();
+        let parse = || {
+            let decimal = |raw: &str| {
+                let raw = raw.trim();
+                (!raw.is_empty())
+                    .then(|| arco_app::network_metadata::parse_unix_id(raw))
+                    .transpose()
+            };
+            let edit = UnixMetadata {
+                mode: (!mode.trim().is_empty())
+                    .then(|| parse_mode(mode))
+                    .transpose()?,
+                owner: decimal(owner)?,
+                group: decimal(group)?,
+            };
+            edit.validate(location.session.security())?;
+            Ok::<_, io::Error>(edit)
+        };
+        let edit = match parse() {
+            Ok(edit) => edit,
+            Err(error) => {
+                self.ui().set_mutation_data(MutationData {
+                    notice: tr(&error.to_string()).into(),
+                    ..Default::default()
+                });
+                return;
+            }
+        };
+        let endpoint = (location.session.clone(), location.directory.clone());
         let entries = entries.clone();
         self.ui().set_mutation_data(MutationData::default());
-        if let Err(error) =
-            self.execute_ftp_edit(location, super::FtpEdit::Permissions(entries), mode)
-        {
-            self.ui().set_mutation_data(MutationData {
-                notice: tr(&error.to_string()).into(),
-                ..Default::default()
-            });
-        }
+        let title = "Server-Rechte und Besitzer ändern";
+        let description = JobDescription::new(
+            crate::OperationKind::Metadata,
+            endpoint.1.to_string(),
+            String::new(),
+        );
+        self.start_operation_job(title, true, description, move |job| {
+            let report = arco_app::network_metadata::edit_selection(
+                &endpoint,
+                &entries,
+                edit,
+                recursive,
+                &job.cancel,
+                |path, done, total| {
+                    let phase = if total == 0 {
+                        "Ordnerstruktur ermitteln …"
+                    } else {
+                        title
+                    };
+                    job.entry_progress(display_path(path), done, total, phase);
+                },
+            )?;
+            Ok(Outcome::MetadataEdited(title, report))
+        });
     }
     pub(super) fn open_metadata_paths(&mut self, paths: Vec<PathBuf>) {
         if self.job.is_some() || paths.is_empty() {

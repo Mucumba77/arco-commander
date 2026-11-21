@@ -1,4 +1,4 @@
-use super::{App, Event, JobContext, JobDescription, Outcome};
+use super::{App, DraftUpload, Event, JobContext, JobDescription, Outcome};
 use crate::commands::{Dialog, Pending, TransferDestination};
 use crate::{FileConflictData, OperationKind, display_path};
 use arco_core::advanced_search::Query;
@@ -16,6 +16,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
+
+mod network;
+pub(crate) use network::{Access, NetworkTransfer};
+const QUEUE_ACTION_START: usize = 6;
+
+fn row_action(id: u64, action: u8) -> i32 {
+    (id * 3 + QUEUE_ACTION_START as u64 + u64::from(action)) as i32
+}
 
 #[derive(Clone)]
 pub(crate) struct TransferTask {
@@ -203,6 +211,8 @@ enum QueuedTransfer {
         presentation: JobDescription,
         refresh: bool,
         ftp_draft: Option<PathBuf>,
+        automatic: bool,
+        network: Option<NetworkTransfer>,
         work: TransferWork,
     },
 }
@@ -585,12 +595,27 @@ mod tests {
 pub(super) struct Queue {
     waiting: VecDeque<(u64, QueuedTransfer)>,
     current: Option<Running>,
+    network: Vec<network::Running>,
+    connections: arco_windows::ftp::TransferConnections,
     retry: Option<TransferTask>,
-    pub(super) prompt: Option<ConflictTicket>,
+    pub(super) prompts: VecDeque<ConflictTicket>,
     next_id: u64,
 }
 
 impl Queue {
+    pub(super) fn has_network_work(&self) -> bool {
+        !self.network.is_empty()
+            || self.waiting.iter().any(|(_, task)| {
+                matches!(
+                    task,
+                    QueuedTransfer::Virtual {
+                        network: Some(_),
+                        ..
+                    }
+                )
+            })
+    }
+
     pub(super) fn paused(&self) -> bool {
         self.current
             .as_ref()
@@ -606,6 +631,10 @@ impl Queue {
 }
 
 impl App {
+    pub(crate) fn has_network_transfers(&self) -> bool {
+        self.transfers.has_network_work()
+    }
+
     pub(super) fn toggle_transfer_pause(&mut self) {
         if let Some((_, paused)) = self
             .transfers
@@ -624,18 +653,15 @@ impl App {
             self.close_dialog();
         }
         let ui = self.ui();
-        if !ui.get_dialog_kind().is_empty()
+        if (!ui.get_dialog_kind().is_empty() && ui.get_dialog_kind() != "transfer-manager")
             || ui.get_settings_open()
             || ui.get_drive_side() >= 0
             || self.context_menu_open
         {
             return;
         }
-        let Some(ticket) = self
-            .transfers
-            .prompt
-            .take()
-            .filter(|ticket| !ticket.cancelled())
+        let Some(ticket) = std::iter::from_fn(|| self.transfers.prompts.pop_front())
+            .find(|ticket| !ticket.cancelled())
         else {
             return;
         };
@@ -686,27 +712,54 @@ impl App {
             presentation,
             refresh,
             ftp_draft: None,
+            automatic: false,
+            network: None,
             work: Box::new(work),
         }) {
             self.status(error.to_string());
         }
     }
 
+    pub(crate) fn enqueue_network_transfer(
+        &mut self,
+        label: &str,
+        refresh: bool,
+        presentation: JobDescription,
+        transfer: NetworkTransfer,
+        work: impl FnOnce(JobContext) -> io::Result<Outcome> + Send + 'static,
+    ) -> io::Result<()> {
+        self.enqueue_work(QueuedTransfer::Virtual {
+            label: label.into(),
+            presentation,
+            refresh,
+            ftp_draft: None,
+            automatic: false,
+            network: Some(transfer),
+            work: Box::new(work),
+        })
+    }
+
     pub(super) fn enqueue_ftp_upload(
         &mut self,
         label: String,
         path: PathBuf,
+        destination: String,
+        automatic: bool,
         work: impl FnOnce(JobContext) -> io::Result<Outcome> + Send + 'static,
     ) -> io::Result<()> {
+        let mut presentation = JobDescription::files(
+            OperationKind::Ftp,
+            std::slice::from_ref(&path),
+            Path::new(""),
+        );
+        presentation.target = destination;
         self.enqueue_work(QueuedTransfer::Virtual {
             label,
-            presentation: JobDescription::files(
-                OperationKind::Copy,
-                std::slice::from_ref(&path),
-                Path::new(""),
-            ),
+            presentation,
             refresh: false,
             ftp_draft: Some(path),
+            automatic,
+            network: None,
             work: Box::new(work),
         })
     }
@@ -742,6 +795,9 @@ impl App {
             .waiting
             .push_back((self.transfers.next_id, task));
         self.advance_transfers();
+        if self.ui().get_dialog_kind() == "transfer-manager" {
+            self.publish_transfer_manager();
+        }
         if !self.transfers.waiting.is_empty() {
             self.status(format!(
                 "Transfer vorgemerkt · {} warten.",
@@ -753,17 +809,55 @@ impl App {
 
     pub(super) fn advance_transfers(&mut self) {
         let ui = self.ui();
+        let limit = usize::from(self.profile.parallel_network_transfers.clamp(1, 8));
+        self.transfers.connections.set_limit(limit);
+        let Some((_, waiting)) = self.transfers.waiting.front() else {
+            return;
+        };
+        let network = match waiting {
+            QueuedTransfer::Virtual { network, .. } => {
+                network.as_ref().map(|network| network.access.as_slice())
+            }
+            QueuedTransfer::Local(_) => None,
+        };
+        let auto_in_editor = matches!(
+            self.pending.as_ref(),
+            Some(Pending::FtpEditAction(_) | Pending::FtpTextEdit(_))
+        ) && self.transfers.waiting.front().is_some_and(|(_, task)| {
+            matches!(
+                task,
+                QueuedTransfer::Virtual {
+                    automatic: true,
+                    ..
+                }
+            )
+        });
         if self.job.is_some()
-            || !ui.get_dialog_kind().is_empty()
+            || (!ui.get_dialog_kind().is_empty()
+                && !auto_in_editor
+                && !(network.is_some() && ui.get_dialog_kind() == "transfer-manager"))
             || ui.get_settings_open()
             || ui.get_drive_side() >= 0
             || self.context_menu_open
         {
             return;
         }
-        let Some((_, task)) = self.transfers.waiting.pop_front() else {
+        if let Some(access) = network {
+            if network::can_start(
+                access,
+                self.transfers.network.iter().map(|job| &job.access),
+                limit,
+            ) && let Some(slot) = self.transfers.connections.try_claim()
+            {
+                let (id, task) = self.transfers.waiting.pop_front().unwrap();
+                self.start_network_transfer(id, task, slot);
+            }
             return;
-        };
+        }
+        if !self.transfers.network.is_empty() {
+            return;
+        }
+        let (_, task) = self.transfers.waiting.pop_front().unwrap();
         let log = self.profile.transfer_log.clone();
         let task = match task {
             QueuedTransfer::Virtual {
@@ -771,6 +865,8 @@ impl App {
                 presentation,
                 refresh,
                 ftp_draft,
+                automatic,
+                network: _,
                 work,
             } => {
                 self.transfers.current = Some(Running {
@@ -780,46 +876,11 @@ impl App {
                 });
                 let description = label.clone();
                 self.start_operation_job(&label, refresh, presentation, move |job| {
-                    let mut outcome = match work(job) {
-                        Ok(outcome) => outcome,
-                        Err(error) if error.kind() == io::ErrorKind::Interrupted => {
-                            Outcome::Report(
-                                description.clone(),
-                                TransferReport {
-                                    cancelled: true,
-                                    ..Default::default()
-                                },
-                            )
-                        }
-                        Err(error) => Outcome::Report(
-                            description.clone(),
-                            TransferReport {
-                                errors: vec![error.to_string()],
-                                ..Default::default()
-                            },
-                        ),
-                    };
-                    if let Some(log) = log {
-                        match &mut outcome {
-                            Outcome::Report(_, report) => {
-                                if let Err(error) = write_log(&log, &description, report) {
-                                    report.errors.push(format!("Transferprotokoll · {error}"));
-                                }
-                            }
-                            Outcome::FtpEditUploaded(_, log_error) => {
-                                let report = TransferReport {
-                                    completed: 1,
-                                    ..Default::default()
-                                };
-                                if let Err(error) = write_log(&log, &description, &report) {
-                                    *log_error = Some(error.to_string());
-                                }
-                            }
-                            _ => (),
-                        }
-                    }
-                    Ok(outcome)
+                    Ok(virtual_result(&description, log.as_deref(), work(job)))
                 });
+                if automatic {
+                    ui.set_job_expanded(false);
+                }
                 return;
             }
             QueuedTransfer::Local(task) => task,
@@ -908,13 +969,17 @@ impl App {
     }
 
     pub(super) fn publish_transfer_manager(&self) {
+        self.publish_network_transfers();
         let running = self.transfers.current.as_ref();
         let local = running.and_then(|running| running.local.as_ref());
         let waiting = self
             .transfers
             .waiting
             .iter()
-            .map(|(_, task)| task.describe());
+            .map(|(id, task)| crate::WaitingTransferRow {
+                action: row_action(*id, 0),
+                title: task.describe().into(),
+            });
         self.ui()
             .set_transfer_manager_data(crate::TransferManagerData {
                 active: running
@@ -923,10 +988,51 @@ impl App {
                     .into(),
                 pausable: local.is_some(),
                 paused: local.is_some_and(|(_, paused)| paused.load(Ordering::Relaxed)),
-                waiting: super::strings(waiting),
+                waiting: slint::ModelRc::new(slint::VecModel::from_iter(waiting)),
                 retry: self.transfers.retry.is_some(),
                 descriptions: self.profile.transfer_descriptions,
             });
+    }
+
+    fn publish_network_transfers(&self) {
+        use slint::{Model, ModelRc, VecModel};
+        let ui = self.ui();
+        ui.set_network_transfer_count(self.transfers.network.len() as i32);
+        let model = ui.get_network_transfers();
+        let rows = self
+            .transfers
+            .network
+            .iter()
+            .map(|running| crate::NetworkTransferRow {
+                action: row_action(running.id, 1),
+                limit_action: running
+                    .limit
+                    .as_ref()
+                    .map_or(0, |_| row_action(running.id, 2)),
+                title: crate::locale::message(&running.label).as_ref().into(),
+                detail: crate::locale::message(&running.detail).as_ref().into(),
+                target: running.target.as_str().into(),
+                metrics: running.metrics.clone(),
+                fraction: running.fraction,
+                cancelling: running.cancel.load(Ordering::Relaxed),
+            });
+        if let Some(model) = model
+            .as_any()
+            .downcast_ref::<VecModel<crate::NetworkTransferRow>>()
+            && model.row_count() == self.transfers.network.len()
+            && model
+                .iter()
+                .zip(&self.transfers.network)
+                .all(|(row, job)| row.action == row_action(job.id, 1))
+        {
+            for (index, row) in rows.enumerate() {
+                if model.row_data(index).as_ref() != Some(&row) {
+                    model.set_row_data(index, row);
+                }
+            }
+        } else {
+            ui.set_network_transfers(ModelRc::new(VecModel::from_iter(rows)));
+        }
     }
 
     pub(crate) fn transfer_manager_action(&mut self, action: usize) -> io::Result<()> {
@@ -966,13 +1072,71 @@ impl App {
                 self.profile = draft;
                 self.open_transfer_manager();
             }
-            6.. => {
-                if let Some((id, _)) = self.transfers.waiting.get(action - 6) {
-                    self.open_queued_transfer(*id);
+            QUEUE_ACTION_START.. => {
+                let action = action - QUEUE_ACTION_START;
+                let id = (action / 3) as u64;
+                match action % 3 {
+                    0 => self.open_queued_transfer(id),
+                    1 => {
+                        if let Some(running) = self
+                            .transfers
+                            .network
+                            .iter_mut()
+                            .find(|running| running.id == id)
+                        {
+                            running.cancel.store(true, Ordering::Relaxed);
+                            running.detail = "Abbruch angefordert …".into();
+                            running.fraction = -1.0;
+                        }
+                        self.open_transfer_manager();
+                    }
+                    _ => self.edit_network_limit(id)?,
                 }
             }
             _ => {}
         }
+        Ok(())
+    }
+
+    fn edit_network_limit(&mut self, id: u64) -> io::Result<()> {
+        let running = self
+            .transfers
+            .network
+            .iter()
+            .find(|running| running.id == id && !running.cancel.load(Ordering::Relaxed))
+            .ok_or_else(|| io::Error::other("Der Netzwerkauftrag ist nicht mehr aktiv."))?;
+        let limit = running
+            .limit
+            .as_ref()
+            .ok_or_else(|| io::Error::other("Bei FXP bestimmen die Server den Durchsatz."))?
+            .override_kib()
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        self.dialog("input", Pending::TransferQueueLimit(id), Dialog {
+            title: "Durchsatzlimit für den Auftrag",
+            description: "Leeres Feld übernimmt die Transfervorgabe. 0 bedeutet unbegrenzt. Bei manchen Uploads und FTP-Textdownloads gilt der Wert ab dem nächsten Dateitransfer.",
+            value: &limit,
+            placeholder: "KiB/s",
+            confirm_label: "Übernehmen",
+            ..Default::default()
+        });
+        Ok(())
+    }
+
+    pub(crate) fn set_network_limit(&mut self, id: u64, value: &str) -> io::Result<()> {
+        let limit = arco_app::network_transfer::parse_speed(value)?;
+        let running = self
+            .transfers
+            .network
+            .iter()
+            .find(|running| running.id == id && !running.cancel.load(Ordering::Relaxed))
+            .ok_or_else(|| io::Error::other("Der Netzwerkauftrag ist nicht mehr aktiv."))?;
+        running
+            .limit
+            .as_ref()
+            .ok_or_else(|| io::Error::other("Bei FXP bestimmen die Server den Durchsatz."))?
+            .set_override_kib(limit)?;
+        self.open_transfer_manager();
         Ok(())
     }
 
@@ -1005,13 +1169,60 @@ impl App {
                 0 if index > 0 => waiting.swap(index, index - 1),
                 1 if index + 1 < waiting.len() => waiting.swap(index, index + 1),
                 2 => {
-                    waiting.remove(index);
+                    if let Some((
+                        _,
+                        QueuedTransfer::Virtual {
+                            ftp_draft: Some(path),
+                            ..
+                        },
+                    )) = waiting.remove(index)
+                    {
+                        self.stop_ftp_upload(&path);
+                    }
                 }
                 _ => {}
             }
         }
         self.open_transfer_manager();
     }
+}
+
+fn virtual_result(description: &str, log: Option<&Path>, result: io::Result<Outcome>) -> Outcome {
+    let mut outcome = result.unwrap_or_else(|error| {
+        let cancelled = error.kind() == io::ErrorKind::Interrupted;
+        Outcome::Report(
+            description.into(),
+            TransferReport {
+                cancelled,
+                errors: if cancelled {
+                    Vec::new()
+                } else {
+                    vec![error.to_string()]
+                },
+                ..Default::default()
+            },
+        )
+    });
+    if let Some(log) = log {
+        match &mut outcome {
+            Outcome::Report(_, report) | Outcome::FtpEditStopped(_, _, report) => {
+                if let Err(error) = write_log(log, description, report) {
+                    report.errors.push(format!("Transferprotokoll · {error}"));
+                }
+            }
+            Outcome::FtpEditFinished(_, DraftUpload::Published, log_error) => {
+                let report = TransferReport {
+                    completed: 1,
+                    ..Default::default()
+                };
+                if let Err(error) = write_log(log, description, &report) {
+                    *log_error = Some(error.to_string());
+                }
+            }
+            _ => (),
+        }
+    }
+    outcome
 }
 
 fn write_log(path: &Path, description: &str, report: &TransferReport) -> io::Result<()> {
@@ -1030,6 +1241,8 @@ fn write_log(path: &Path, description: &str, report: &TransferReport) -> io::Res
     for error in &report.errors {
         writeln!(body, "  {error}").unwrap();
     }
+    static LOG: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = LOG.lock().unwrap_or_else(|error| error.into_inner());
     let mut log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

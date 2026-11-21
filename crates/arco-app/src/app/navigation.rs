@@ -797,6 +797,7 @@ fn button_text(form: &NavigationForm, previous: Option<&ButtonbarButton>) -> io:
 
 pub(super) fn clone_pending(pending: &Pending) -> Option<Pending> {
     Some(match pending {
+        Pending::TransferQueueLimit(id) => Pending::TransferQueueLimit(*id),
         Pending::ViewSetup(setup) => Pending::ViewSetup(setup.clone()),
         Pending::Associations(setup) => Pending::Associations(setup.clone()),
         Pending::Favorites(setup) => Pending::Favorites(setup.clone()),
@@ -820,9 +821,17 @@ pub(super) fn clone_pending(pending: &Pending) -> Option<Pending> {
         Pending::TabGroupAction(n) => Pending::TabGroupAction(n.clone()),
         Pending::TabGroupReplace(n) => Pending::TabGroupReplace(n.clone()),
         Pending::TabGroupDelete(n) => Pending::TabGroupDelete(n.clone()),
+        Pending::Workspace(dialog) => Pending::Workspace(dialog.clone()),
         Pending::TabImport => Pending::TabImport,
         Pending::TabExport(n) => Pending::TabExport(n.clone()),
         Pending::S3Tags(tags) => Pending::S3Tags(tags.clone()),
+        Pending::S3VersionDelete(version, mode) => Pending::S3VersionDelete(version.clone(), *mode),
+        Pending::ChooseS3Versioning(endpoint, bucket, current) => {
+            Pending::ChooseS3Versioning(endpoint.clone(), bucket.clone(), *current)
+        }
+        Pending::SetS3Versioning(endpoint, before, next) => {
+            Pending::SetS3Versioning(endpoint.clone(), *before, *next)
+        }
         _ => return super::auxiliary::clone_pending(pending),
     })
 }

@@ -1,3 +1,4 @@
+use crate::network_batch::{Batch, copy_groups};
 use arco_core::files::{self, TransferReport};
 use arco_core::ignore::{IgnoreList, Source};
 use arco_core::sync::{
@@ -119,7 +120,12 @@ pub struct FtpPlan {
     protected: BTreeSet<String>,
     preserve_time: bool,
     timestamps_only: bool,
+    copy_names: Option<copy_names::CopyNames>,
+    sync_names: Option<sync_names::SyncNames>,
 }
+
+pub mod copy_names;
+pub(crate) mod sync_names;
 
 #[derive(Default)]
 pub struct CopyChoices {
@@ -167,6 +173,26 @@ impl FtpPlan {
         cancel: &AtomicBool,
         progress: impl FnMut(&Path),
     ) -> io::Result<Self> {
+        Self::compare_selection(
+            local,
+            endpoint,
+            options,
+            [selected, &[]],
+            ignored,
+            cancel,
+            progress,
+        )
+    }
+
+    pub fn compare_selection(
+        local: &Path,
+        endpoint: FtpEndpoint,
+        options: &Options,
+        selected: [&[PathBuf]; 2],
+        ignored: &IgnorePath<'_>,
+        cancel: &AtomicBool,
+        progress: impl FnMut(&Path),
+    ) -> io::Result<Self> {
         Self::prepare(
             local, endpoint, options, selected, false, None, ignored, cancel, progress,
         )
@@ -193,7 +219,15 @@ impl FtpPlan {
             ..Options::default()
         };
         let mut plan = Self::prepare(
-            local, endpoint, &options, selected, true, None, ignored, cancel, progress,
+            local,
+            endpoint,
+            &options,
+            [selected, &[]],
+            true,
+            None,
+            ignored,
+            cancel,
+            progress,
         )?;
         let source = usize::from(!upload);
         skip_existing_copies(&mut plan.rows, source);
@@ -212,7 +246,7 @@ impl FtpPlan {
             local,
             endpoint,
             options,
-            &[],
+            [&[], &[]],
             false,
             Some(comparison),
             ignored,
@@ -225,7 +259,7 @@ impl FtpPlan {
         local: &Path,
         endpoint: FtpEndpoint,
         options: &Options,
-        selected: &[PathBuf],
+        selected: [&[PathBuf]; 2],
         copy_only: bool,
         script: Option<ScriptComparison>,
         ignored: &IgnorePath<'_>,
@@ -233,6 +267,12 @@ impl FtpPlan {
         mut progress: impl FnMut(&Path),
     ) -> io::Result<Self> {
         let local = LocalRoot::open(local)?;
+        if endpoint.0.is_http_forward_ftp() && !(copy_only && options.mode == Mode::RightToLeft) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "FTP über HTTP-Forward unterstützt Kopien zum lokalen Rechner.",
+            ));
+        }
         if options.timestamps_only
             && options.mode != Mode::RightToLeft
             && !(endpoint.0.security().is_ssh() || endpoint.0.security().is_ftp())
@@ -242,30 +282,152 @@ impl FtpPlan {
                 "WebDAV und S3 können hier nur als Quelle für den Zeitstempelabgleich dienen.",
             ));
         }
-        let scope = Scope::new(options.selected_only, selected)?;
+        let rules = endpoint.0.transfer_settings().names;
+        let mut copy_names = (copy_only && !rules.is_default()).then(|| {
+            copy_names::CopyNames::new(usize::from(options.mode == Mode::RightToLeft), rules)
+        });
+        let mut sync_names =
+            (!copy_only && !rules.is_default()).then(|| sync_names::SyncNames::new(rules));
+        let mut source_paths = None;
+        let mut target_paths = None;
+        if let Some(mapping) = &copy_names {
+            let paths = selected[0]
+                .iter()
+                .map(|path| mapping.selected_source(path))
+                .collect::<io::Result<Vec<_>>>()?;
+            target_paths = Some(
+                paths
+                    .iter()
+                    .map(|path| mapping.destination(path))
+                    .collect::<io::Result<Vec<_>>>()?,
+            );
+            source_paths = Some(paths);
+        }
+        let mut selected_paths = Vec::new();
+        if options.selected_only && copy_names.is_none() {
+            for path in selected[0] {
+                selected_paths.push(match &sync_names {
+                    Some(names) => names.project(path)?,
+                    None => path.clone(),
+                });
+            }
+            for path in selected[1] {
+                selected_paths.push(match &sync_names {
+                    Some(names) => PathBuf::from(names.project_remote_leaf(path.as_os_str())?),
+                    None => path.clone(),
+                });
+            }
+        } else {
+            selected_paths.extend_from_slice(selected[0]);
+        }
+        let source_scope = Scope::new(
+            options.selected_only,
+            source_paths.as_deref().unwrap_or(&selected_paths),
+        )?;
+        let scope = Scope::new(
+            options.selected_only,
+            target_paths.as_deref().unwrap_or(&selected_paths),
+        )?;
+        let unrestricted = Scope::new(false, &[])?;
+        let local_is_target = copy_names
+            .as_ref()
+            .is_some_and(|mapping| mapping.source() == 1);
+        let remote_is_target = copy_names
+            .as_ref()
+            .is_some_and(|mapping| mapping.source() == 0);
         let masks = sync::FileMasks::new(endpoint.0.transfer_masks())?;
         let excluded = RefCell::new(BTreeSet::new());
+        let projection_error = RefCell::new(None);
         let skip = |path: &Path, directory| {
+            let projected = match &sync_names {
+                Some(names) => match names.project(path) {
+                    Ok(name) if scope.visits(&name) => name,
+                    Ok(_) => return true,
+                    Err(error) => {
+                        projection_error.borrow_mut().get_or_insert(error);
+                        return true;
+                    }
+                },
+                None => path.to_path_buf(),
+            };
             let skip = endpoint.0.recycle_relative_path(&endpoint.1, path)
                 || ignored(path, directory)
                 || (!directory && !masks.includes(path));
             if skip {
-                excluded.borrow_mut().insert(path.to_path_buf());
+                excluded.borrow_mut().insert(projected);
             }
             skip
         };
-        let mut local_entries = local.scan_ignoring(options, &scope, skip, cancel)?;
-        let (mut remote_entries, expected) = scan(
+        let no_skip = |_: &Path, _: bool| false;
+        let mut local_entries = local.scan_ignoring(
+            options,
+            if sync_names.is_some() {
+                &unrestricted
+            } else if local_is_target {
+                &scope
+            } else {
+                &source_scope
+            },
+            if local_is_target {
+                &no_skip as &IgnorePath<'_>
+            } else {
+                &skip
+            },
+            cancel,
+        )?;
+        let (mut remote_entries, expected) = scan_remote(
             &endpoint,
-            &scope,
+            if sync_names.is_some() {
+                &unrestricted
+            } else if remote_is_target {
+                &scope
+            } else {
+                &source_scope
+            },
             options.recursive,
-            &skip,
+            if remote_is_target { &no_skip } else { &skip },
+            RemoteScan::Compare,
+            (copy_names.is_some() || sync_names.is_some()) && rules.windows,
             cancel,
             &mut progress,
         )?;
-        let excluded = excluded.into_inner();
-        local_entries.discard_subtrees(&excluded);
-        remote_entries.discard_subtrees(&excluded);
+        if let Some(error) = projection_error.into_inner() {
+            return Err(error);
+        }
+        let mut excluded = excluded.into_inner();
+        if let Some(mapping) = &mut copy_names {
+            let source = if local_is_target {
+                &mut remote_entries
+            } else {
+                &mut local_entries
+            };
+            mapping.remap(source)?;
+        } else {
+            if let Some(names) = &mut sync_names {
+                names.remap(0, &mut local_entries)?;
+                names.remap(1, &mut remote_entries)?;
+            }
+            local_entries.discard_subtrees(&excluded);
+            remote_entries.discard_subtrees(&excluded);
+        }
+        let links = expected
+            .iter()
+            .filter(|(_, entry)| entry.symlink)
+            .map(|(path, _)| {
+                if let Some(names) = &sync_names {
+                    names.project(path)
+                } else if let Some(mapping) = &copy_names
+                    && mapping.source() == 1
+                {
+                    mapping.destination(path)
+                } else {
+                    Ok(path.clone())
+                }
+            })
+            .collect::<io::Result<BTreeSet<_>>>()?;
+        local_entries.discard_subtrees(&links);
+        remote_entries.discard_subtrees(&links);
+        excluded.extend(links);
         let mut checksum_method = None;
         let mut rows = sync::compare_trees_by(
             [&local_entries, &remote_entries],
@@ -277,12 +439,21 @@ impl FtpPlan {
                     if copy_only {
                         return Ok(false);
                     }
-                    progress(right.path());
-                    let file = local.checked_path(left.path())?;
+                    let local_path = sync_names
+                        .as_ref()
+                        .map_or(left.path(), |names| names.physical(0, left.path()));
+                    let remote_path = sync_names
+                        .as_ref()
+                        .map_or(right.path(), |names| names.physical(1, right.path()));
+                    progress(remote_path);
+                    let file = local.checked_path(local_path)?;
                     let meta = left.metadata().expect("local entry");
                     files::ensure_unchanged(&file, meta)?;
-                    let remote = &expected[right.path()];
-                    let parent = remote_parent(&endpoint, right.path())?;
+                    let remote = &expected[remote_path];
+                    let parent = match &sync_names {
+                        Some(names) => names.remote_parent(&endpoint, remote_path)?,
+                        None => remote_parent(&endpoint, remote_path)?,
+                    };
                     let method = match checksum_method {
                         Some(method) => method,
                         None => {
@@ -318,12 +489,27 @@ impl FtpPlan {
                 }
             },
         )?;
+        if let Some(names) = &mut sync_names {
+            names.plan_targets(&rows, cancel)?;
+        }
         let protected: BTreeSet<_> = excluded
             .iter()
             .flat_map(|path| path.ancestors().skip(1))
             .map(|path| path.to_string_lossy().to_lowercase())
             .collect();
         for row in &mut rows {
+            let target = sync_names
+                .as_ref()
+                .map_or(row.path(1), |names| names.physical(1, row.path(1)));
+            if (remote_is_target || sync_names.is_some())
+                && row.info(0).is_some()
+                && row.info(1).is_none()
+                && endpoint.0.recycle_relative_path(&endpoint.1, target)
+            {
+                return Err(io::Error::other(
+                    "Der erzeugte Zielname liegt im Server-Papierkorb.",
+                ));
+            }
             if protected.contains(&row.relative.to_string_lossy().to_lowercase()) {
                 row.prevent_delete();
             }
@@ -340,11 +526,55 @@ impl FtpPlan {
             protected,
             preserve_time,
             timestamps_only: options.timestamps_only,
+            copy_names,
+            sync_names,
         })
     }
 
     pub fn apply(&self, cancel: &AtomicBool, progress: impl FnMut(&Path)) -> TransferReport {
         self.apply_with_uploads(cancel, progress, |_, _| Ok(()))
+    }
+
+    pub fn apply_background_copy(
+        &self,
+        batch: Batch<'_>,
+        progress: impl FnMut(&Path),
+    ) -> TransferReport {
+        if self.timestamps_only
+            || self
+                .rows
+                .iter()
+                .any(|row| row.action == Action::DeleteRight)
+        {
+            return self.apply(batch.cancel, progress);
+        }
+        let rows = self.rows.iter().filter(|row| {
+            matches!(row.action, Action::CopyLeft | Action::CopyRight) && row.can(row.action)
+        });
+        copy_groups(
+            batch,
+            rows,
+            |row| {
+                let source = usize::from(row.action == Action::CopyLeft);
+                if row.info(source).is_none_or(EntryInfo::is_dir)
+                    || self.choices.append.contains(&row.relative)
+                    || self.choices.alternate.contains_key(&row.relative)
+                {
+                    return None;
+                }
+                let side = 1 - source;
+                let path = self.original_copy_path(side, row.path(side));
+                if side == 1 {
+                    let remote = self.reported_remote_copy_path(path).ok()?;
+                    Some(remote.to_string_lossy().to_lowercase())
+                } else {
+                    Some(path.to_string_lossy().to_lowercase())
+                }
+            },
+            |index, width| file_worker_endpoint(&self.endpoint, index, width),
+            |endpoint, row| self.copy(row, endpoint, batch.cancel, &mut |_, _| Ok(())),
+            progress,
+        )
     }
 
     pub fn apply_with_uploads(
@@ -361,7 +591,7 @@ impl FtpPlan {
             if self.timestamps_only {
                 self.apply_timestamp(row, cancel)
             } else {
-                self.copy(row, cancel, &mut uploaded)
+                self.copy(row, &self.endpoint, cancel, &mut uploaded)
             }
         });
         if self.timestamps_only {
@@ -404,54 +634,68 @@ impl FtpPlan {
             return;
         }
         run_rows(obsolete, report, cancel, &mut |_| {}, |row| {
-            self.endpoint
-                .0
-                .verify_sync_absent(&self.endpoint.1, row.path(1), cancel)?;
+            if let Some(names) = &self.sync_names {
+                names.verify_remote_absent(&self.endpoint, row.path(1), cancel)?;
+            } else {
+                self.endpoint
+                    .0
+                    .verify_sync_absent(&self.endpoint.1, row.path(1), cancel)?;
+            }
+            let local = self.original_copy_path(0, row.path(0));
             self.local
-                .delete_checked(row.path(0), row.metadata(0).expect("local delete target"))
+                .delete_checked(local, row.metadata(0).expect("local delete target"))
         });
     }
 
     fn delete(&self, row: &Row, cancel: &AtomicBool) -> io::Result<()> {
-        self.local.verify_absent(row.path(0))?;
-        let parent = remote_parent(&self.endpoint, row.path(1))?;
-        let entry = &self.expected[row.path(1)];
+        if let Some(names) = &self.sync_names {
+            names.verify_local_absent(&self.local, row.path(0), cancel)?;
+        } else {
+            self.local.verify_absent(row.path(0))?;
+        }
+        let remote = self.original_copy_path(1, row.path(1));
+        let parent = self.copy_remote_parent(remote)?;
+        let entry = &self.expected[remote];
         self.endpoint.0.discard_sync_entry(&parent, entry, cancel)
     }
 
     fn apply_timestamp(&self, row: &Row, cancel: &AtomicBool) -> io::Result<()> {
         let session = &self.endpoint.0;
-        let parent = remote_parent(&self.endpoint, row.path(1))?;
-        let entry = &self.expected[row.path(1)];
-        let local = row.metadata(0).expect("local timestamp snapshot");
+        let local = self.original_copy_path(0, row.path(0));
+        let remote = self.original_copy_path(1, row.path(1));
+        let parent = self.copy_remote_parent(remote)?;
+        let entry = &self.expected[remote];
+        let metadata = row.metadata(0).expect("local timestamp snapshot");
         if row.action == Action::CopyLeft {
             session.verify_sync_entry(&parent, entry, cancel)?;
             let time =
                 modified(entry)?.ok_or_else(|| io::Error::other("Server-Zeitstempel fehlt."))?;
-            return self.local.set_modified_checked(row.path(0), local, time);
+            return self.local.set_modified_checked(local, metadata, time);
         }
-        let path = self.local.checked_path(row.path(0))?;
-        files::ensure_unchanged(&path, local)?;
-        session.set_sync_modified(&parent, entry, &ftp_timestamp(local.modified()?), cancel)
+        let path = self.local.checked_path(local)?;
+        files::ensure_unchanged(&path, metadata)?;
+        session.set_sync_modified(&parent, entry, &ftp_timestamp(metadata.modified()?), cancel)
     }
 
     fn copy(
         &self,
         row: &Row,
+        endpoint: &FtpEndpoint,
         cancel: &AtomicBool,
         uploaded: &mut impl FnMut(&Row, ftp::Entry) -> io::Result<()>,
     ) -> io::Result<()> {
         let alternate = self.choices.alternate.get(&row.relative);
         let append = self.choices.append.contains(&row.relative);
-        let local_relative = if row.action == Action::CopyLeft {
-            alternate.map_or_else(|| row.path(0), PathBuf::as_path)
-        } else {
-            row.path(0)
-        };
+        let mut local_relative = self.original_copy_path(0, row.path(0));
+        if row.action == Action::CopyLeft
+            && let Some(alternate) = alternate
+        {
+            local_relative = alternate;
+        }
         let local = self.local.checked_path(local_relative)?;
-        let remote = row.path(1);
-        let parent = remote_parent(&self.endpoint, remote)?;
-        let session = &self.endpoint.0;
+        let remote = self.original_copy_path(1, row.path(1));
+        let parent = self.copy_remote_parent(remote)?;
+        let session = &endpoint.0;
         let expected = self.expected.get(remote);
         if row.action == Action::CopyRight {
             let before = row.metadata(0).expect("local copy source");
@@ -461,8 +705,16 @@ impl FtpPlan {
                 .file_name()
                 .and_then(OsStr::to_str)
                 .ok_or_else(|| io::Error::other("FTP-Dateinamen benötigen Unicode."))?;
+            let name = if alternate.is_none() && self.escaped_remote_copy_names() {
+                copy_names::decode_remote_name(name)?
+            } else {
+                name.to_owned()
+            };
             if before.is_dir() {
-                return session.create_sync_directory(&parent, name, cancel);
+                if let Some(names) = &self.sync_names {
+                    names.verify_remote_absent(endpoint, row.path(1), cancel)?;
+                }
+                return session.create_sync_directory(&parent, &name, cancel);
             }
             let modified = before
                 .modified()
@@ -487,14 +739,20 @@ impl FtpPlan {
                     &parent,
                     SyncUpload {
                         source: upload,
-                        name,
+                        name: &name,
                         expected: previous,
                         size,
                         modified_utc: modified.as_deref(),
                     },
                     || {
-                        self.local.checked_path(row.path(0))?;
-                        files::ensure_unchanged(&local, before)
+                        self.local.checked_path(local_relative)?;
+                        files::ensure_unchanged(&local, before)?;
+                        if previous.is_none()
+                            && let Some(names) = &self.sync_names
+                        {
+                            names.verify_remote_absent(endpoint, row.path(1), cancel)?;
+                        }
+                        Ok(())
                     },
                     cancel,
                 )
@@ -504,7 +762,10 @@ impl FtpPlan {
         let expected = expected.expect("remote copy source");
         if expected.directory == Some(true) {
             session.verify_sync_entry(&parent, expected, cancel)?;
-            self.local.checked_path(row.path(0))?;
+            self.local.checked_path(local_relative)?;
+            if let Some(names) = &self.sync_names {
+                names.verify_local_absent(&self.local, row.path(0), cancel)?;
+            }
             return fs::create_dir(local);
         }
         let previous = if alternate.is_some() {
@@ -523,6 +784,11 @@ impl FtpPlan {
             temporary.as_file().set_modified(time)?;
         }
         self.local.checked_path(local_relative)?;
+        if previous.is_none()
+            && let Some(names) = &self.sync_names
+        {
+            names.verify_local_absent(&self.local, row.path(0), cancel)?;
+        }
         if append {
             let previous = previous
                 .ok_or_else(|| io::Error::other("Die lokale Zieldatei zum Anhängen fehlt."))?;
@@ -532,6 +798,60 @@ impl FtpPlan {
         }
         files::publish_checked(temporary, &local, previous, cancel)?;
         Ok(())
+    }
+
+    pub fn original_copy_path<'a>(&'a self, side: usize, path: &'a Path) -> &'a Path {
+        if let Some(names) = &self.sync_names {
+            return names.physical(side, path);
+        }
+        self.copy_names
+            .as_ref()
+            .map_or(path, |mapping| mapping.original(side, path))
+    }
+
+    pub fn escaped_remote_copy_names(&self) -> bool {
+        (self.copy_names.is_some() || self.sync_names.is_some())
+            && self.endpoint.0.transfer_settings().names.windows
+    }
+
+    pub fn copy_remote_parent(&self, path: &Path) -> io::Result<ftp::Url> {
+        copy_names::remote_parent(&self.endpoint, path, self.escaped_remote_copy_names())
+    }
+
+    pub fn copy_source_paths(&self, side: usize) -> Option<&BTreeMap<PathBuf, PathBuf>> {
+        self.copy_names
+            .as_ref()
+            .filter(|names| names.source() == side)
+            .map(|names| names.original_paths())
+    }
+
+    pub fn reported_remote_copy_path(&self, path: &Path) -> io::Result<PathBuf> {
+        copy_names::reported_path(path, self.escaped_remote_copy_names())
+    }
+
+    pub fn copy_preview_paths(&self, row: &Row) -> Option<(PathBuf, PathBuf)> {
+        let paths = self.mapped_paths(row)?;
+        let source = self.copy_names.as_ref().map_or_else(
+            || usize::from(row.action == Action::CopyLeft),
+            copy_names::CopyNames::source,
+        );
+        let [local, remote] = paths;
+        Some(if source == 0 {
+            (local, remote)
+        } else {
+            (remote, local)
+        })
+    }
+
+    pub fn mapped_paths(&self, row: &Row) -> Option<[PathBuf; 2]> {
+        if self.sync_names.is_none() && self.copy_names.is_none() {
+            return None;
+        }
+        let local = self.original_copy_path(0, row.path(0));
+        let remote = self
+            .reported_remote_copy_path(self.original_copy_path(1, row.path(1)))
+            .ok()?;
+        Some([local.to_path_buf(), remote])
     }
 }
 
@@ -573,60 +893,143 @@ pub fn remote_parent(endpoint: &FtpEndpoint, path: &Path) -> io::Result<ftp::Url
         .relative_directory(&endpoint.1, path.parent().unwrap_or(Path::new("")))
 }
 
-pub fn scan(
+pub fn file_worker_endpoint(endpoint: &FtpEndpoint, index: usize, width: usize) -> FtpEndpoint {
+    (
+        Arc::new(endpoint.0.for_file_worker(index, width)),
+        endpoint.1.clone(),
+    )
+}
+
+pub fn scan_for_delete(
+    endpoint: &FtpEndpoint,
+    scope: &Scope,
+    cancel: &AtomicBool,
+) -> io::Result<BTreeMap<PathBuf, ftp::Entry>> {
+    scan_remote(
+        endpoint,
+        scope,
+        true,
+        &|_, _| false,
+        RemoteScan::Delete,
+        true,
+        cancel,
+        &mut |_| {},
+    )
+    .map(|(_, entries)| entries)
+}
+
+pub fn scan_with_aliases(
     endpoint: &FtpEndpoint,
     scope: &Scope,
     recursive: bool,
     ignored: &IgnorePath<'_>,
+    escape_windows_names: bool,
+    cancel: &AtomicBool,
+    progress: &mut impl FnMut(&Path),
+) -> io::Result<(Tree, BTreeMap<PathBuf, ftp::Entry>)> {
+    scan_remote(
+        endpoint,
+        scope,
+        recursive,
+        ignored,
+        RemoteScan::Compare,
+        escape_windows_names,
+        cancel,
+        progress,
+    )
+}
+
+pub(crate) fn scan_metadata(
+    endpoint: &FtpEndpoint,
+    scope: &Scope,
+    cancel: &AtomicBool,
+    progress: &mut impl FnMut(&Path),
+) -> io::Result<BTreeMap<PathBuf, ftp::Entry>> {
+    let (_, entries) = scan_remote(
+        endpoint,
+        scope,
+        true,
+        &|_, _| false,
+        RemoteScan::Metadata,
+        false,
+        cancel,
+        progress,
+    )?;
+    Ok(entries)
+}
+
+#[derive(PartialEq, Eq)]
+enum RemoteScan {
+    Compare,
+    Metadata,
+    Delete,
+}
+
+fn scan_remote(
+    endpoint: &FtpEndpoint,
+    scope: &Scope,
+    recursive: bool,
+    ignored: &IgnorePath<'_>,
+    scan: RemoteScan,
+    escape_windows_names: bool,
     cancel: &AtomicBool,
     progress: &mut impl FnMut(&Path),
 ) -> io::Result<(Tree, BTreeMap<PathBuf, ftp::Entry>)> {
     let mut tree = Tree::default();
     let mut expected = BTreeMap::new();
     let mut unique = BTreeSet::new();
-    let mut queue = vec![(PathBuf::new(), 0)];
-    while let Some((relative, depth)) = queue.pop() {
+    let mut queue = vec![(PathBuf::new(), endpoint.1.clone(), 0)];
+    while let Some((relative, url, depth)) = queue.pop() {
         if depth >= MAX_DEPTH {
             return Err(io::Error::other(
                 "Der FTP-Ordnerbaum ist zu tief für einen sicheren Vergleich.",
             ));
         }
         progress(&relative);
-        let url = endpoint.0.relative_directory(&endpoint.1, &relative)?;
         for entry in endpoint.0.list_sync(&url, cancel)?.entries {
             if cancel.load(Ordering::Relaxed) {
                 return Err(io::ErrorKind::Interrupted.into());
             }
-            let name = files::leaf_name(OsStr::new(&entry.name))?;
-            let path = relative.join(name);
+            let path = if escape_windows_names {
+                relative.join(copy_names::encode_remote_name(&entry.name)?)
+            } else {
+                relative.join(files::leaf_name(OsStr::new(&entry.name))?)
+            };
             if !scope.visits(&path) || ignored(&path, entry.directory == Some(true)) {
                 continue;
             }
-            let directory = entry.directory.ok_or_else(|| {
-                io::Error::other(format!(
-                    "Der Eintrag „{}“ kann im Serverabgleich nicht als Datei oder Ordner geprüft werden.",
-                    path.display()
-                ))
-            })?;
             if expected.len() >= MAX_ENTRIES {
                 return Err(io::Error::other(
                     "Der FTP-Ordnerbaum enthält zu viele Einträge.",
                 ));
             }
-            let info = EntryInfo {
-                size: if directory {
-                    None
-                } else {
-                    Some(entry.size.ok_or_else(|| {
-                        io::Error::other(format!(
-                            "Für die Serverdatei „{}“ fehlt die Größe.",
-                            path.display()
-                        ))
-                    })?)
-                },
-                modified: modified(&entry)?,
+            let Some(directory) = entry.directory else {
+                if scan == RemoteScan::Metadata {
+                    continue;
+                }
+                if entry.symlink {
+                    expected.insert(path, entry);
+                    continue;
+                }
+                return Err(io::Error::other(format!(
+                    "Der Eintrag „{}“ kann im Serverabgleich nicht als Datei oder Ordner geprüft werden.",
+                    path.display()
+                )));
             };
-            tree.insert_remote(path.clone(), info)?;
+            if scan != RemoteScan::Delete {
+                if !directory && entry.size.is_none() && !endpoint.0.is_http_forward_ftp() {
+                    return Err(io::Error::other(format!(
+                        "Für die Serverdatei „{}“ fehlt die Größe.",
+                        path.display()
+                    )));
+                }
+                let info = EntryInfo {
+                    directory,
+                    size: entry.size.filter(|_| !directory),
+                    modified: modified(&entry)?,
+                };
+                tree.insert_remote(path.clone(), info)?;
+            }
             if directory && recursive {
                 if let Some(id) = &entry.unique
                     && !unique.insert(id.clone())
@@ -636,7 +1039,11 @@ pub fn scan(
                         path.display()
                     )));
                 }
-                queue.push((path.clone(), depth + 1));
+                queue.push((
+                    path.clone(),
+                    endpoint.0.child_directory(&url, &entry.name)?,
+                    depth + 1,
+                ));
             }
             expected.insert(path, entry);
         }

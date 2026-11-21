@@ -16,8 +16,77 @@ use tempfile::NamedTempFile;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 const BUFFER: usize = 32 * 1024;
+const COMMAND_OUTPUT_LIMIT: usize = 1024 * 1024;
+
+pub struct CommandOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub status: u32,
+}
 
 impl Session {
+    pub fn ssh_command(
+        &self,
+        directory: &Url,
+        command: &str,
+        cancel: &AtomicBool,
+    ) -> io::Result<CommandOutput> {
+        if !self.security().is_ssh() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Dieser Serverbefehl benötigt SFTP oder SCP.",
+            ));
+        }
+        if command.trim().is_empty() || command.len() > 16 * 1024 || command.contains('\0') {
+            return Err(invalid_input("Der SSH-Befehl fehlt oder ist ungültig."));
+        }
+        self.validate(directory)?;
+        let command = format!("cd {} || exit $?; {command}", shell_arg(&path(directory)?));
+        let timeout = self.scp_timeout()?;
+        self.with_scp(cancel, async |ssh| {
+            let mut channel = ssh.exec(command, timeout, cancel).await?;
+            let result = bounded(cancel, timeout, async {
+                channel.eof().await.map_err(io::Error::other)?;
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                let mut status = None;
+                while let Some(message) = channel.wait().await {
+                    let (buffer, data) = match message {
+                        ChannelMsg::Data { data } => (&mut stdout, data),
+                        ChannelMsg::ExtendedData { ext: 1, data } => (&mut stderr, data),
+                        ChannelMsg::ExitStatus { exit_status } => {
+                            status = Some(exit_status);
+                            continue;
+                        }
+                        ChannelMsg::Close => break,
+                        _ => continue,
+                    };
+                    if buffer.len().saturating_add(data.len()) > COMMAND_OUTPUT_LIMIT {
+                        return Err(invalid_input("Die SSH-Serverantwort überschreitet 1 MiB."));
+                    }
+                    buffer.extend_from_slice(&data);
+                }
+                let status = status.ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "Der SSH-Server hat keinen Befehlsstatus geliefert.",
+                    )
+                })?;
+                Ok(CommandOutput {
+                    stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&stderr).into_owned(),
+                    status,
+                })
+            })
+            .await;
+            if result.is_err() {
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_secs(1), channel.close()).await;
+            }
+            result
+        })
+    }
+
     pub fn scp_download(
         &self,
         directory: &Url,
@@ -93,7 +162,7 @@ impl Session {
                 }
                 bounded(cancel, timeout, async { writer.write_u8(0).await }).await?;
                 let mut received = 0;
-                let rate = self.transfer_rate();
+                let mut rate = self.transfer_rate();
                 while received < size {
                     let count = (size - received).min(rate.chunk(buffer.len()) as u64) as usize;
                     bounded(cancel, timeout, async {
@@ -218,6 +287,18 @@ impl Session {
         })
     }
 
+    pub(in crate::ftp) fn connected_scp_fingerprint(
+        &self,
+        cancel: &AtomicBool,
+    ) -> io::Result<String> {
+        self.with_scp(cancel, async |connection| {
+            match connection.peer_fingerprint() {
+                Some(fingerprint) => Ok(fingerprint.to_owned()),
+                None => self.sftp_fingerprint(),
+            }
+        })
+    }
+
     pub(in crate::ftp) fn list_scp(
         &self,
         directory: &Url,
@@ -228,37 +309,12 @@ impl Session {
         let command = format!(
             "LC_ALL=C find {target} -mindepth 1 -maxdepth 1 -printf '%f\\0%y\\0%s\\0%T@\\0%i\\0'"
         );
-        let timeout = self.scp_timeout()?;
-        let mut data = self.with_scp(cancel, async |ssh| {
-            let mut channel = ssh.exec(command, timeout, cancel).await?;
-            let mut data = Vec::new();
-            bounded(cancel, timeout, async {
-                let mut status = None;
-                while let Some(message) = channel.wait().await {
-                    match message {
-                        ChannelMsg::Data { data: bytes } => {
-                            if data.len().saturating_add(bytes.len()) > LIST_LIMIT {
-                                return Err(invalid_input(
-                                    "Der SCP-Ordner enthält zu viele Daten.",
-                                ));
-                            }
-                            data.extend_from_slice(&bytes);
-                        }
-                        ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
-                        ChannelMsg::Close => break,
-                        _ => (),
-                    }
-                }
-                if status != Some(0) {
-                    return Err(io::Error::other(
-                        "Der SCP-Server konnte den Ordner mit GNU find nicht auflisten.",
-                    ));
-                }
-                Ok(())
-            })
-            .await?;
-            Ok(data)
-        })?;
+        let mut data = self.scp_output(
+            command,
+            LIST_LIMIT,
+            "Der SCP-Server konnte den Ordner mit GNU find nicht auflisten.",
+            cancel,
+        )?;
         if data.is_empty() {
             return Ok(Listing {
                 entries: Vec::new(),
@@ -277,8 +333,9 @@ impl Session {
         for row in fields.chunks_exact(5) {
             check_cancel(cancel)?;
             let directory = match row[1] {
-                "d" => true,
-                "f" => false,
+                "d" => Some(true),
+                "f" => Some(false),
+                "l" => None,
                 _ => continue,
             };
             check_segment(row[0])?;
@@ -290,8 +347,11 @@ impl Session {
                 .map(|value| value.format("%Y%m%d%H%M%S").to_string());
             entries.push(Entry {
                 name: row[0].to_owned(),
-                directory: Some(directory),
-                size: (!directory).then(|| row[2].parse().ok()).flatten(),
+                directory,
+                symlink: row[1] == "l",
+                size: (directory == Some(false))
+                    .then(|| row[2].parse().ok())
+                    .flatten(),
                 modified: stamp,
                 unique: Some(row[4].to_owned()),
             });
@@ -367,12 +427,156 @@ impl Session {
         Ok(())
     }
 
+    pub(in crate::ftp) fn scp_set_unix_metadata(
+        &self,
+        url: &Url,
+        before: &Entry,
+        edit: super::super::UnixMetadata,
+        cancel: &AtomicBool,
+    ) -> io::Result<()> {
+        let target = shell_arg(&path(url)?);
+        let kind = if before.directory == Some(true) {
+            "-d"
+        } else {
+            "-f"
+        };
+        let guard = format!("test ! -L {target} && test {kind} {target}");
+        if let Some((owner, group)) = edit.owner.zip(edit.group) {
+            self.scp_command(
+                format!("{guard} && chown -h -- +{owner}:+{group} {target}"),
+                cancel,
+            )?;
+        } else if let Some(owner) = edit.owner {
+            self.scp_command(format!("{guard} && chown -h -- +{owner} {target}"), cancel)?;
+        } else if let Some(group) = edit.group {
+            self.scp_command(format!("{guard} && chgrp -h -- +{group} {target}"), cancel)?;
+        }
+        if let Some(mode) = edit.mode {
+            self.scp_command(format!("{guard} && chmod {mode:05o} -- {target}"), cancel)?;
+        }
+        let after = self.scp_unix_metadata(url, cancel)?;
+        if edit.mode.is_some_and(|mode| after.mode != Some(mode))
+            || edit.owner.is_some_and(|owner| after.owner != Some(owner))
+            || edit.group.is_some_and(|group| after.group != Some(group))
+        {
+            return Err(io::Error::other(
+                "Der Server hat die neuen Rechte oder Besitzdaten nicht bestätigt.",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(in crate::ftp) fn scp_unix_metadata(
+        &self,
+        url: &Url,
+        cancel: &AtomicBool,
+    ) -> io::Result<super::super::UnixMetadata> {
+        let target = shell_arg(&path(url)?);
+        let data = self.scp_output(
+            format!("LC_ALL=C stat -c '%a %u %g' -- {target}"),
+            128,
+            "Der SCP-Server konnte die Unix-Rechte nicht lesen.",
+            cancel,
+        )?;
+        let text = std::str::from_utf8(&data).map_err(io::Error::other)?;
+        let tokens = text.split_ascii_whitespace().collect::<Vec<_>>();
+        let [mode, owner, group] = tokens.as_slice() else {
+            return Err(invalid_input("Ungültige Besitzdaten vom SCP-Server."));
+        };
+        let mode = u16::from_str_radix(mode, 8).map_err(io::Error::other)?;
+        if mode > 0o7777 {
+            return Err(invalid_input("Ungültige Besitzdaten vom SCP-Server."));
+        }
+        Ok(super::super::UnixMetadata {
+            mode: Some(mode),
+            owner: Some(owner.parse().map_err(io::Error::other)?),
+            group: Some(group.parse().map_err(io::Error::other)?),
+        })
+    }
+
+    pub(in crate::ftp) fn scp_checksum(
+        &self,
+        parent: &Url,
+        entry: &Entry,
+        program: &str,
+        width: usize,
+        cancel: &AtomicBool,
+    ) -> io::Result<String> {
+        if entry.directory != Some(false) {
+            return Err(invalid_input(
+                "Für die Prüfsumme wird eine reguläre SCP-Datei benötigt.",
+            ));
+        }
+        self.verify_sync_entry(parent, entry, cancel)?;
+        let target = path(&self.file(parent, &entry.name)?)?;
+        let quoted = shell_arg(&target);
+        let data = self.scp_output(
+            format!("LC_ALL=C {program} --zero -- {quoted}"),
+            width + target.len() + 3,
+            "Der SCP-Server konnte das gewählte Prüfprogramm nicht ausführen.",
+            cancel,
+        )?;
+        let digest = parse_checksum_reply(&data, &target, width)?;
+        self.verify_sync_entry(parent, entry, cancel)?;
+        Ok(digest)
+    }
+
+    pub(super) fn scp_output(
+        &self,
+        command: String,
+        limit: usize,
+        failure: &str,
+        cancel: &AtomicBool,
+    ) -> io::Result<Vec<u8>> {
+        let timeout = self.scp_timeout()?;
+        self.with_scp(cancel, async |ssh| {
+            let mut channel = ssh.exec(command, timeout, cancel).await?;
+            bounded(cancel, timeout, async {
+                let mut data = Vec::new();
+                let mut status = None;
+                while let Some(message) = channel.wait().await {
+                    match message {
+                        ChannelMsg::Data { data: bytes } => {
+                            if data.len().saturating_add(bytes.len()) > limit {
+                                return Err(invalid_input("Die SCP-Serverantwort ist zu groß."));
+                            }
+                            data.extend_from_slice(&bytes);
+                        }
+                        ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
+                        ChannelMsg::Close => break,
+                        _ => (),
+                    }
+                }
+                if status != Some(0) {
+                    return Err(io::Error::other(failure));
+                }
+                Ok(data)
+            })
+            .await
+        })
+    }
+
     fn scp_command(&self, command: String, cancel: &AtomicBool) -> io::Result<()> {
         let timeout = self.scp_timeout()?;
         self.with_scp(cancel, async |ssh| {
             shell(ssh, command, timeout, cancel).await
         })
     }
+}
+
+fn parse_checksum_reply(bytes: &[u8], path: &str, width: usize) -> io::Result<String> {
+    let parse = || {
+        let output = bytes.strip_suffix(&[0])?;
+        let (digest, name) = output.split_at_checked(width)?;
+        if !digest.iter().all(u8::is_ascii_hexdigit) {
+            return None;
+        }
+        let name = name
+            .strip_prefix(b"  ")
+            .or_else(|| name.strip_prefix(b" *"))?;
+        (name == path.as_bytes()).then(|| String::from_utf8_lossy(digest).to_ascii_lowercase())
+    };
+    parse().ok_or_else(|| invalid_input("Ungültige Prüfsumme vom SCP-Server."))
 }
 
 async fn put(
@@ -382,7 +586,7 @@ async fn put(
     size: u64,
     cancel: &AtomicBool,
     timeout: u64,
-    rate: Rate,
+    mut rate: Rate,
     progress: &mut impl FnMut(DownloadProgress),
 ) -> io::Result<()> {
     let mut channel = ssh
@@ -560,9 +764,20 @@ mod tests {
         let body: Vec<_> = (0..230_000).map(|i| (i % 231) as u8).collect();
         fs::write(&source, &body).unwrap();
         let remote = "Arco's report #1.txt";
-        session
-            .scp_upload(&directory, &source, remote, &cancel, |_| {})
+        let speed = crate::ftp::TransferLimit::default();
+        speed.set_override_kib(Some(8)).unwrap();
+        let adjustable = session.with_transfer_limit(speed.clone());
+        let upload_start = std::time::Instant::now();
+        let mut changed = false;
+        adjustable
+            .scp_upload(&directory, &source, remote, &cancel, |progress| {
+                if !changed && progress.received > 0 && progress.received < body.len() as u64 {
+                    speed.set_override_kib(Some(0)).unwrap();
+                    changed = true;
+                }
+            })
             .unwrap();
+        assert!(changed && upload_start.elapsed() < std::time::Duration::from_secs(8));
         session
             .scp_download(&directory, remote, &destination, &cancel, |_| {})
             .unwrap();
@@ -586,16 +801,62 @@ mod tests {
     #[test]
     #[cfg(windows)]
     #[ignore = "requires scripts/test-sftp-reference.py and Windows OpenSSH"]
+    fn reference_scp_authenticated_proxies() {
+        use crate::ftp::{Connection, Security};
+
+        let address = std::env::var("ARCO_SCP_TEST_URL").unwrap().replacen(
+            "sftp://127.0.0.1",
+            "scp://ssh.invalid",
+            1,
+        );
+        let pin = std::env::var("ARCO_SCP_TEST_FINGERPRINT").unwrap();
+        let cancel = AtomicBool::new(false);
+        let temporary = tempfile::tempdir().unwrap();
+        for kind in ["HTTP_DIGEST", "SOCKS_CHAP"] {
+            let proxy = std::env::var(format!("ARCO_SCP_TEST_{kind}")).unwrap();
+            let session = Connection::new(&address, "arco", Security::Scp)
+                .unwrap()
+                .with_ssh(&pin, None)
+                .unwrap()
+                .with_proxy(&proxy)
+                .unwrap()
+                .with_proxy_user("proxy-fixture")
+                .unwrap()
+                .with_proxy_password(r#"gate:"\only"#)
+                .unwrap()
+                .authenticate("fixture-only")
+                .unwrap();
+            let root = session.initial_directory();
+            assert_eq!(
+                session.list(&root, &cancel).unwrap().format,
+                ListFormat::Scp
+            );
+            let target = temporary.path().join(kind);
+            session
+                .download(&root, "proxy-reference.txt", &target, &cancel)
+                .unwrap();
+            assert_eq!(
+                std::fs::read(target).unwrap(),
+                b"SCP through an authenticated proxy\n"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "requires scripts/test-sftp-reference.py and Windows OpenSSH"]
     fn reference_scp_panel() {
         use crate::ftp::{Connection, Security};
+        use base64::{Engine, engine::general_purpose::STANDARD_NO_PAD};
         use std::fs;
         let address = std::env::var("ARCO_SCP_TEST_URL")
             .unwrap()
             .replacen("sftp://", "scp://", 1);
         let pin = std::env::var("ARCO_SCP_TEST_FINGERPRINT").unwrap();
+        let alternate = format!("SHA256:{}", STANDARD_NO_PAD.encode([0; 32]));
         let session = Connection::new(&address, "arco", Security::Scp)
             .unwrap()
-            .with_ssh(&pin, None)
+            .with_ssh(&format!("{pin};{alternate}"), None)
             .unwrap()
             .authenticate("fixture-only")
             .unwrap();
@@ -605,6 +866,9 @@ mod tests {
             session.list(&root, &cancel).unwrap().format,
             ListFormat::Scp
         );
+        let details = session.connection_details(&root, &cancel).unwrap();
+        assert!(details.contains(&pin));
+        assert!(!details.contains(&alternate));
         session
             .create_sync_directory(&root, "Arco's folder", &cancel)
             .unwrap();

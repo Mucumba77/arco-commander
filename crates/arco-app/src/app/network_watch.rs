@@ -87,12 +87,11 @@ impl App {
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
         let session = remote.session.clone();
-        remote.session = arco_app::network_transfer::resolve(
+        remote.session = self.job_transfer_options()?.resolve(
             &self.profile.network_transfer_presets,
             &session,
             &remote.directory,
             Some(root.path()),
-            None,
         )?;
         std::thread::Builder::new()
             .name("arco-network-watch".into())

@@ -59,6 +59,7 @@ impl App {
     }
 
     pub(crate) fn toggle_linked_navigation(&mut self) {
+        self.pending_navigation_link = None;
         if self.navigation_linked() {
             self.linked_navigation = None;
             self.ui().set_navigation_linked(false);
@@ -88,13 +89,57 @@ impl App {
             self.status("Ein fest gesperrter Tab kann der Navigation nicht folgen.");
             return;
         }
+        self.pair_navigation(roots);
+        self.status("Navigation gekoppelt.");
+    }
+
+    fn pair_navigation(&mut self, roots: [Location; 2]) {
         self.linked_navigation = Some(Pair {
             roots,
             tabs: self.navigation_tabs(),
             requests: [None, None],
         });
         self.ui().set_navigation_linked(true);
-        self.status("Navigation gekoppelt.");
+    }
+
+    pub(super) fn set_pending_navigation_link(&mut self, linked: bool) {
+        self.linked_navigation = None;
+        self.pending_navigation_link = linked.then(|| self.navigation_tabs());
+        self.ui().set_navigation_linked(false);
+    }
+
+    pub(super) fn workspace_link_enabled(&self) -> bool {
+        self.navigation_linked() || self.pending_navigation_link == Some(self.navigation_tabs())
+    }
+
+    pub(super) fn restore_pending_navigation_link(&mut self) {
+        let Some(tabs) = self.pending_navigation_link else {
+            return;
+        };
+        if tabs != self.navigation_tabs() {
+            self.pending_navigation_link = None;
+            return;
+        }
+        if self.panels.iter().any(|panel| {
+            panel.loading || !panel.current().loaded || panel.current().deferred.is_some()
+        }) {
+            return;
+        }
+        self.pending_navigation_link = None;
+        let roots = self
+            .panels
+            .each_ref()
+            .map(|panel| panel.current().location());
+        if roots
+            .iter()
+            .all(|root| matches!(root, Location::Local(_) | Location::Ftp(_)))
+            && self
+                .panels
+                .iter()
+                .all(|panel| panel.current().options.lock != TabLock::Fixed)
+        {
+            self.pair_navigation(roots);
+        }
     }
 
     pub(super) fn follow_linked_navigation(&mut self, side: usize, target: &Location) {

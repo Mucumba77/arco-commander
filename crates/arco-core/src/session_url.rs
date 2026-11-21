@@ -1,8 +1,5 @@
 use crate::profile::{FtpProfile, FtpSecurity};
-use base64::{
-    Engine,
-    engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD},
-};
+use crate::ssh_host_keys::HostKeyPins;
 use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use std::{collections::BTreeMap, io};
 use url::Url;
@@ -85,13 +82,14 @@ pub fn resolve(value: &str, profiles: &BTreeMap<String, FtpProfile>) -> io::Resu
     if !inline.is_empty() && supplied.is_some() {
         return Err(invalid("Die Sitzungs-URL enthält zwei SSH-Fingerabdrücke."));
     }
-    let mut pin = supplied.unwrap_or(inline);
+    let pin = supplied.unwrap_or(inline);
+    let mut trusted = None;
     if security.is_ssh() {
         if user.is_empty() {
             return Err(invalid("Die SSH-Sitzungs-URL braucht einen Benutzernamen."));
         }
         if !pin.is_empty() {
-            pin = normalize_pin(&pin)?;
+            trusted = Some(HostKeyPins::parse(&pin)?);
         }
         for known in profiles
             .values()
@@ -109,13 +107,19 @@ pub fn resolve(value: &str, profiles: &BTreeMap<String, FtpProfile>) -> io::Resu
                 })
                 && endpoint.port().unwrap_or(22) == address.port().unwrap_or(22)
             {
-                let saved = normalize_pin(&known.ssh_fingerprint)?;
-                if !pin.is_empty() && pin != saved {
-                    return Err(invalid(
-                        "Der Fingerabdruck der URL weicht vom gespeicherten SSH-Hostschlüssel ab.",
-                    ));
+                let saved = HostKeyPins::parse(&known.ssh_fingerprint)?;
+                if let Some(trusted) = trusted.as_mut() {
+                    if pin.is_empty() {
+                        trusted.retain_shared(&saved);
+                    }
+                    if trusted.is_empty() || !trusted.is_subset(&saved) {
+                        return Err(invalid(
+                            "Die Sitzung hat keinen gemeinsamen vertrauenswürdigen SSH-Hostschlüssel oder die URL nennt einen unbekannten Schlüssel.",
+                        ));
+                    }
+                } else {
+                    trusted = Some(saved);
                 }
-                pin = saved;
             }
         }
     } else if !pin.is_empty() {
@@ -130,7 +134,7 @@ pub fn resolve(value: &str, profiles: &BTreeMap<String, FtpProfile>) -> io::Resu
             address: address.into(),
             user,
             security,
-            ssh_fingerprint: pin,
+            ssh_fingerprint: trusted.map(|pins| pins.to_string()).unwrap_or_default(),
             ..FtpProfile::default()
         },
         file,
@@ -266,29 +270,10 @@ pub fn direct_link(
 }
 
 pub fn normalize_pin(pin: &str) -> io::Result<String> {
-    let pin = pin.trim();
-    let digest = pin
-        .strip_prefix("SHA256:")
-        .or_else(|| {
-            [
-                "ssh-rsa-",
-                "ssh-ed25519-",
-                "ecdsa-sha2-nistp256-",
-                "ecdsa-sha2-nistp384-",
-                "ecdsa-sha2-nistp521-",
-            ]
-            .into_iter()
-            .find_map(|prefix| pin.strip_prefix(prefix))
-        })
-        .unwrap_or("")
-        .trim_end_matches('=');
-    let bytes = STANDARD_NO_PAD
-        .decode(digest)
-        .or_else(|_| URL_SAFE_NO_PAD.decode(digest))
-        .ok()
-        .filter(|bytes| bytes.len() == 32)
-        .ok_or_else(|| invalid("Erwartet wird ein SSH-Hostschlüssel im SHA256-Format."))?;
-    Ok(format!("SHA256:{}", STANDARD_NO_PAD.encode(bytes)))
+    if pin.contains(';') {
+        return Err(invalid("Erwartet wird genau ein SSH-Hostschlüssel."));
+    }
+    HostKeyPins::parse(pin).map(|pins| pins.to_string())
 }
 
 fn check_path(path: &str) -> io::Result<()> {
@@ -356,6 +341,7 @@ fn invalid(message: &str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{Engine, engine::general_purpose::STANDARD_NO_PAD};
 
     #[test]
     fn profile_links_use_existing_credentials_and_preserve_encoded_paths() {
@@ -427,6 +413,45 @@ mod tests {
         ] {
             assert!(resolve(invalid, &BTreeMap::new()).is_err());
         }
+    }
+
+    #[test]
+    fn direct_links_roundtrip_alternatives_and_respect_all_saved_pins() {
+        let a = format!("SHA256:{}", STANDARD_NO_PAD.encode([1; 32]));
+        let b = format!("SHA256:{}", STANDARD_NO_PAD.encode([2; 32]));
+        let c = format!("SHA256:{}", STANDARD_NO_PAD.encode([3; 32]));
+        let address = Url::parse("sftp://example.test:2222/path/").unwrap();
+        let link = |pins: &str| direct_link(&address, FtpSecurity::Sftp, "arco", pins).unwrap();
+        let profile = |pins: String| FtpProfile {
+            address: address.to_string(),
+            security: FtpSecurity::Sftp,
+            ssh_fingerprint: pins,
+            ..Default::default()
+        };
+        let both = link(&format!("{b};{a}"));
+        assert!(both.contains("%3B"));
+        assert_eq!(
+            resolve(&both, &BTreeMap::new())
+                .unwrap()
+                .connection
+                .ssh_fingerprint,
+            format!("{a};{b}")
+        );
+        let profiles = BTreeMap::from([
+            ("one".into(), profile(format!("{a};{b}"))),
+            ("two".into(), profile(format!("{b};{c}"))),
+        ]);
+        for valid in [link(""), link(&b)] {
+            assert_eq!(
+                resolve(&valid, &profiles)
+                    .unwrap()
+                    .connection
+                    .ssh_fingerprint,
+                b
+            );
+        }
+        assert!(resolve(&both, &profiles).is_err());
+        assert!(resolve(&link(&c), &profiles).is_err());
     }
 
     #[test]

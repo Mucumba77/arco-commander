@@ -11,6 +11,8 @@ const HANDLE: u8 = 102;
 const DATA: u8 = 103;
 const NAME: u8 = 104;
 const ATTRS: u8 = 105;
+const EXTENDED: u8 = 200;
+const EXTENDED_REPLY: u8 = 201;
 
 pub(super) trait Channel: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Channel for T {}
@@ -20,6 +22,9 @@ pub(super) struct Wire {
     runtime: tokio::runtime::Handle,
     timeout: Duration,
     id: u32,
+    hard_links: bool,
+    posix_rename: bool,
+    target_first: Option<bool>,
     pub(super) usable: bool,
 }
 
@@ -34,6 +39,7 @@ impl Drop for Wire {
 #[derive(Default)]
 pub(super) struct Attrs {
     pub size: Option<u64>,
+    pub ownership: Option<(u32, u32)>,
     pub permissions: Option<u32>,
     pub access: Option<u32>,
     pub modified: Option<u32>,
@@ -46,6 +52,11 @@ impl Attrs {
             0o100000 => Some(false),
             _ => None,
         }
+    }
+
+    pub(super) fn is_symlink(&self) -> bool {
+        self.permissions
+            .is_some_and(|mode| mode & 0o170000 == 0o120000)
     }
 }
 
@@ -89,9 +100,9 @@ impl<'a> Packet<'a> {
         } else {
             None
         };
-        if flags & 2 != 0 {
-            self.bytes(8)?;
-        }
+        let ownership = (flags & 2 != 0)
+            .then(|| Ok::<_, io::Error>((self.u32()?, self.u32()?)))
+            .transpose()?;
         let permissions = (flags & 4 != 0).then(|| self.u32()).transpose()?;
         let (access, modified) = if flags & 8 != 0 {
             (Some(self.u32()?), Some(self.u32()?))
@@ -110,6 +121,7 @@ impl<'a> Packet<'a> {
         }
         Ok(Attrs {
             size,
+            ownership,
             permissions,
             access,
             modified,
@@ -119,8 +131,14 @@ impl<'a> Packet<'a> {
 
 fn put_attrs(packet: &mut Vec<u8>, attr: Attrs) {
     let timestamps = attr.access.zip(attr.modified);
-    let flags = u32::from(attr.permissions.is_some()) * 4 + u32::from(timestamps.is_some()) * 8;
+    let flags = u32::from(attr.ownership.is_some()) * 2
+        + u32::from(attr.permissions.is_some()) * 4
+        + u32::from(timestamps.is_some()) * 8;
     packet.extend_from_slice(&flags.to_be_bytes());
+    if let Some((uid, gid)) = attr.ownership {
+        packet.extend_from_slice(&uid.to_be_bytes());
+        packet.extend_from_slice(&gid.to_be_bytes());
+    }
     if let Some(permissions) = attr.permissions {
         packet.extend_from_slice(&permissions.to_be_bytes());
     }
@@ -161,11 +179,23 @@ impl Wire {
                 "Der Server unterstützt SFTP Version 3 nicht.",
             ));
         }
+        let mut extensions = Packet(&reply[5..]);
+        let mut hard_links = false;
+        let mut posix_rename = false;
+        while !extensions.0.is_empty() {
+            let name = extensions.string()?;
+            let version = extensions.string()?;
+            hard_links |= name == b"hardlink@openssh.com" && version == b"1";
+            posix_rename |= name == b"posix-rename@openssh.com" && version == b"1";
+        }
         Ok(Self {
             stream: Some(stream),
             runtime: tokio::runtime::Handle::current(),
             timeout,
             id: 0,
+            hard_links,
+            posix_rename,
+            target_first: None,
             usable: true,
         })
     }
@@ -243,6 +273,37 @@ impl Wire {
     fn status(&mut self, kind: u8, encode: impl FnOnce(&mut Vec<u8>)) -> io::Result<()> {
         self.request(kind, STATUS, encode, |_| Ok(()))?
             .ok_or_else(malformed)
+    }
+
+    pub(super) fn checksum(
+        &mut self,
+        path: &str,
+        algorithm: super::super::ChecksumAlgorithm,
+    ) -> io::Result<Option<Vec<u8>>> {
+        let (name, length) = match algorithm {
+            super::super::ChecksumAlgorithm::Sha512 => ("sha512", 64),
+            super::super::ChecksumAlgorithm::Sha384 => ("sha384", 48),
+            super::super::ChecksumAlgorithm::Sha256 => ("sha256", 32),
+            super::super::ChecksumAlgorithm::Sha224 => ("sha224", 28),
+            super::super::ChecksumAlgorithm::Sha1 => ("sha1", 20),
+            super::super::ChecksumAlgorithm::Md5 => ("md5", 16),
+            super::super::ChecksumAlgorithm::Crc32 => ("crc32", 4),
+        };
+        match self.request(
+            EXTENDED,
+            EXTENDED_REPLY,
+            |packet| {
+                push_string(packet, b"check-file-name");
+                push_string(packet, path.as_bytes());
+                push_string(packet, name.as_bytes());
+                // Zero offset, length and block size request a single digest for the whole file.
+                packet.extend_from_slice(&[0; 20]);
+            },
+            |packet| decode_checksum(packet, name, length),
+        ) {
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => Ok(None),
+            result => result,
+        }
     }
 
     pub(super) fn open(&mut self, path: &str, exclusive: bool) -> io::Result<Vec<u8>> {
@@ -352,6 +413,16 @@ impl Wire {
         .ok_or_else(malformed)
     }
 
+    pub(super) fn fstat(&mut self, handle: &[u8]) -> io::Result<Attrs> {
+        self.request(
+            8,
+            ATTRS,
+            |packet| push_string(packet, handle),
+            |packet| packet.attrs(),
+        )?
+        .ok_or_else(malformed)
+    }
+
     pub(super) fn mkdir(&mut self, path: &str) -> io::Result<()> {
         self.status(14, |packet| {
             push_string(packet, path.as_bytes());
@@ -378,10 +449,138 @@ impl Wire {
         })
     }
 
+    pub(super) fn read_link(&mut self, path: &str) -> io::Result<String> {
+        self.single_name(19, path)
+    }
+
+    pub(super) fn real_path(&mut self, path: &str) -> io::Result<String> {
+        self.single_name(16, path)
+    }
+
+    fn single_name(&mut self, kind: u8, path: &str) -> io::Result<String> {
+        self.request(
+            kind,
+            NAME,
+            |packet| push_string(packet, path.as_bytes()),
+            |packet| {
+                if packet.u32()? != 1 {
+                    return Err(malformed());
+                }
+                let target = str::from_utf8(packet.string()?).map_err(|_| malformed())?;
+                packet.string()?;
+                packet.attrs()?;
+                if target.is_empty() || !packet.0.is_empty() {
+                    return Err(malformed());
+                }
+                Ok(target.to_owned())
+            },
+        )?
+        .ok_or_else(malformed)
+    }
+
+    fn two_paths(&mut self, extension: &[u8], first: &str, second: &str) -> io::Result<()> {
+        self.status(EXTENDED, |packet| {
+            push_string(packet, extension);
+            push_string(packet, first.as_bytes());
+            push_string(packet, second.as_bytes());
+        })
+    }
+
+    pub(super) fn hard_link(&mut self, target: &str, link: &str) -> io::Result<()> {
+        if !self.hard_links {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Der SFTP-Server bietet keine harten Links an.",
+            ));
+        }
+        self.two_paths(b"hardlink@openssh.com", target, link)
+    }
+
+    pub(super) fn can_replace_link(&self) -> bool {
+        self.posix_rename
+    }
+
+    pub(super) fn replace_link(&mut self, staged: &str, link: &str) -> io::Result<()> {
+        self.two_paths(b"posix-rename@openssh.com", staged, link)
+    }
+
+    fn symlink_request(&mut self, first: &str, second: &str) -> io::Result<()> {
+        self.status(20, |packet| {
+            push_string(packet, first.as_bytes());
+            push_string(packet, second.as_bytes());
+        })
+    }
+
+    pub(super) fn knows_symlink_order(&self) -> bool {
+        self.target_first.is_some()
+    }
+
+    pub(super) fn detect_symlink_order(&mut self, scratch: &str) -> io::Result<()> {
+        if self.target_first.is_some() {
+            return Ok(());
+        }
+        // Probe both argument orders inside a directory owned by this operation.
+        let first = format!("{scratch}/first");
+        let second = format!("{scratch}/second");
+        self.symlink_request(&first, &second)?;
+        let target_first = match self.lstat(&second) {
+            Ok(attr) if attr.is_symlink() => {
+                self.remove(&second, false)?;
+                true
+            }
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound && self.lstat(&first)?.is_symlink() =>
+            {
+                self.remove(&first, false)?;
+                false
+            }
+            Ok(_) | Err(_) => return Err(malformed()),
+        };
+        self.target_first = Some(target_first);
+        Ok(())
+    }
+
+    pub(super) fn symlink(&mut self, target: &str, link: &str) -> io::Result<()> {
+        match self.target_first {
+            Some(true) => self.symlink_request(target, link),
+            Some(false) => self.symlink_request(link, target),
+            None => Err(io::Error::other(
+                "Die SFTP-Linkargumente wurden noch nicht geprüft.",
+            )),
+        }
+    }
+
     pub(super) fn set_attrs(&mut self, path: &str, attrs: Attrs) -> io::Result<()> {
         self.status(9, |packet| {
             push_string(packet, path.as_bytes());
             put_attrs(packet, attrs);
         })
+    }
+}
+
+fn decode_checksum(packet: &mut Packet<'_>, algorithm: &str, length: usize) -> io::Result<Vec<u8>> {
+    if !packet.string()?.eq_ignore_ascii_case(algorithm.as_bytes()) || packet.0.len() != length {
+        return Err(malformed());
+    }
+    Ok(packet.bytes(length)?.to_vec())
+}
+
+#[cfg(test)]
+mod checksum_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_only_a_full_digest_of_the_requested_algorithm() {
+        let mut response = Vec::new();
+        push_string(&mut response, b"sha1");
+        response.extend([42; 20]);
+        assert_eq!(
+            decode_checksum(&mut Packet(&response), "sha1", 20).unwrap(),
+            [42; 20]
+        );
+        assert!(decode_checksum(&mut Packet(&response), "md5", 16).is_err());
+        assert!(decode_checksum(&mut Packet(&response[..response.len() - 1]), "sha1", 20).is_err());
+        response.push(1);
+        assert!(decode_checksum(&mut Packet(&response), "sha1", 20).is_err());
     }
 }

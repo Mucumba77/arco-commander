@@ -1,7 +1,6 @@
 use super::{ChallengeHandler, Options, SshAgent, SshChallenge, Wire, runtime};
-use crate::ftp::{AddressFamily, Connection, Session, check_cancel, invalid_input};
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD_NO_PAD;
+use crate::ftp::{AddressFamily, Connection, Session, check_cancel, invalid_input, local_proxy};
+use arco_core::ssh_host_keys::HostKeyPins;
 use russh::client::{AuthResult, KeyboardInteractiveAuthResponse};
 use russh::keys::agent::{AgentIdentity, client::AgentClient};
 use russh::keys::{
@@ -12,12 +11,15 @@ use std::future::Future;
 use std::io::{self, Read};
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use zeroize::Zeroizing;
+
+mod http_proxy;
+mod socks_chap;
 
 pub(in crate::ftp) struct SftpConnection {
     pub(super) wire: Wire,
@@ -28,16 +30,26 @@ impl SftpConnection {
     pub(super) fn is_closed(&self) -> bool {
         self.ssh.target.is_closed() || self.ssh.jumps.iter().any(client::Handle::is_closed)
     }
+
+    pub(super) fn peer_fingerprint(&self) -> Option<&str> {
+        self.ssh.peer_fingerprint()
+    }
 }
 
 pub(in crate::ftp) struct SshConnection {
     target: client::Handle<PinnedHost>,
     jumps: Vec<client::Handle<PinnedHost>>,
+    fingerprint: Arc<OnceLock<String>>,
+    _local_proxies: Vec<local_proxy::Process>,
 }
 
 impl SshConnection {
     pub(super) fn is_closed(&self) -> bool {
         self.target.is_closed() || self.jumps.iter().any(client::Handle::is_closed)
+    }
+
+    pub(super) fn peer_fingerprint(&self) -> Option<&str> {
+        self.fingerprint.get().map(String::as_str)
     }
 }
 
@@ -130,7 +142,8 @@ impl From<russh::Error> for HandshakeError {
 
 struct PinnedHost {
     name: String,
-    fingerprint: Option<String>,
+    fingerprints: HostKeyPins,
+    verified: Arc<OnceLock<String>>,
 }
 
 impl client::Handler for PinnedHost {
@@ -140,19 +153,20 @@ impl client::Handler for PinnedHost {
         &mut self,
         key: &PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
-        let Some(fingerprint) = &self.fingerprint else {
+        if self.fingerprints.is_empty() {
             // This path exists only in GSS-only mode. The exchange already
             // authenticated the explicitly configured Kerberos principal.
             return Ok(true);
-        };
+        }
         let PublicKeyOrCertificate::PublicKey { key, .. } = key else {
             return Err(HandshakeError::Certificate(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "Das Profil erfordert einen SSH-Hostschlüssel mit SHA256-Fingerabdruck.",
             )));
         };
-        let actual = key.fingerprint(HashAlg::Sha256).to_string();
-        if &actual == fingerprint {
+        let actual = key.fingerprint(HashAlg::Sha256);
+        if self.fingerprints.contains(actual.as_bytes()) {
+            let _ = self.verified.set(actual.to_string());
             Ok(true)
         } else {
             Err(HandshakeError::PinMismatch(
@@ -224,15 +238,61 @@ async fn dial(host: &str, port: u16, family: AddressFamily) -> io::Result<TcpStr
 }
 
 async fn connect_tcp(connection: &Connection) -> io::Result<TcpStream> {
-    let (host, port) = endpoint(connection)?;
+    let (host, port) = proxy_endpoint(connection).await?;
     let family = connection.options.family;
     let Some(proxy) = &connection.proxy else {
         return dial(&host, port, family).await;
     };
-    let proxy_port = proxy.port_or_known_default().unwrap_or(1080);
-    let mut stream = dial(&hostname(proxy)?, proxy_port, family).await?;
+    let proxy_port = proxy
+        .port_or_known_default()
+        .unwrap_or(if proxy.scheme() == "telnet" { 23 } else { 1080 });
+    let proxy_host = hostname(proxy)?;
     if proxy.scheme() == "http" {
-        connect_http(&mut stream, &host, port, connection.proxy_credentials()).await?;
+        return http_proxy::connect(
+            (&proxy_host, proxy_port, family),
+            (&host, port),
+            connection.proxy_credentials(),
+        )
+        .await;
+    }
+    let mut stream = dial(&proxy_host, proxy_port, family).await?;
+    if let Some(command) = &connection.telnet_proxy {
+        let bytes = command.render(
+            &host,
+            port,
+            &connection.proxy_user,
+            &connection.proxy_password,
+        )?;
+        tokio::time::timeout(Duration::from_secs(10), stream.write_all(&bytes))
+            .await
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::TimedOut, "Telnet-Proxy antwortet nicht.")
+            })??;
+    } else if connection.proxy_uses_user_id_only() {
+        let target = match host.parse::<IpAddr>() {
+            Ok(IpAddr::V4(ip)) => Some(ip),
+            Ok(IpAddr::V6(_)) => return Err(invalid_input("SOCKS4 benötigt ein IPv4-Ziel.")),
+            Err(_) if proxy.scheme() == "socks4a" => None,
+            Err(_) if family == AddressFamily::Ipv6 => {
+                return Err(invalid_input(
+                    "SOCKS4 mit lokaler DNS-Auflösung benötigt IPv4.",
+                ));
+            }
+            Err(_) => Some(
+                addresses(&host, port, AddressFamily::Ipv4)
+                    .await?
+                    .into_iter()
+                    .find_map(|address| {
+                        if let SocketAddr::V4(address) = address {
+                            Some(*address.ip())
+                        } else {
+                            None
+                        }
+                    })
+                    .ok_or(io::ErrorKind::AddrNotAvailable)?,
+            ),
+        };
+        connect_socks4(&mut stream, &host, port, target, &connection.proxy_user).await?;
     } else {
         let ip = match (proxy.scheme(), host.parse::<IpAddr>()) {
             (_, Ok(address)) => Some(address),
@@ -251,59 +311,69 @@ async fn connect_tcp(connection: &Connection) -> io::Result<TcpStream> {
     Ok(stream)
 }
 
-async fn connect_http(
+async fn proxy_endpoint(connection: &Connection) -> io::Result<(String, u16)> {
+    let (host, port) = endpoint(connection)?;
+    if !connection.ssh_proxy_dns_locally || host.parse::<IpAddr>().is_ok() {
+        return Ok((host, port));
+    }
+    let mut family = connection.options.family;
+    if family == AddressFamily::Automatic
+        && connection
+            .proxy
+            .as_ref()
+            .is_some_and(|url| matches!(url.scheme(), "socks4" | "socks4a"))
+    {
+        family = AddressFamily::Ipv4;
+    }
+    let ip = addresses(&host, port, family)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "Der SSH-Zielname lässt sich lokal nicht auflösen.",
+            )
+        })?
+        .ip();
+    Ok((ip.to_string(), port))
+}
+
+async fn connect_socks4(
     stream: &mut TcpStream,
     host: &str,
     port: u16,
-    credentials: Option<(&str, &str)>,
+    ip: Option<std::net::Ipv4Addr>,
+    user: &str,
 ) -> io::Result<()> {
-    let target = if host.contains(':') {
-        format!("[{host}]:{port}")
-    } else {
-        format!("{host}:{port}")
-    };
-    use std::fmt::Write as _;
-    let mut request = Zeroizing::new(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n"));
-    if let Some((user, password)) = credentials {
-        let login = Zeroizing::new(format!("{user}:{password}"));
-        let encoded =
-            Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(login.as_bytes()));
-        write!(
-            request,
-            "Proxy-Authorization: Basic {}\r\n",
-            encoded.as_str()
-        )
-        .expect("write to string");
+    let mut request = vec![4, 1];
+    request.extend_from_slice(&port.to_be_bytes());
+    request.extend_from_slice(&ip.map_or([0, 0, 0, 1], |address| address.octets()));
+    request.extend_from_slice(user.as_bytes());
+    request.push(0);
+    if ip.is_none() {
+        request.extend_from_slice(host.as_bytes());
+        request.push(0);
     }
-    request.push_str("\r\n");
-    stream.write_all(request.as_bytes()).await?;
-    let mut response = Vec::with_capacity(512);
-    // Read the header without consuming the first bytes of the SSH greeting.
-    while response.len() < 8 * 1024 {
-        response.push(stream.read_u8().await?);
-        if response.ends_with(b"\r\n\r\n") {
-            let mut line = response
-                .split(|&byte| byte == b'\r')
-                .next()
-                .unwrap_or_default()
-                .split(|&byte| byte == b' ');
-            if matches!(line.next(), Some(b"HTTP/1.0" | b"HTTP/1.1"))
-                && line.next().is_some_and(|code| {
-                    code.len() == 3 && code[0] == b'2' && code.iter().all(u8::is_ascii_digit)
-                })
-            {
-                return Ok(());
-            }
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "Der HTTP-Proxy hat den SSH-Tunnel abgelehnt.",
-            ));
-        }
+    stream.write_all(&request).await?;
+    let mut reply = [0; 8];
+    stream.read_exact(&mut reply).await?;
+    if reply[0] != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Ungültige SOCKS4-Antwort.",
+        ));
     }
-    Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        "Die Antwort des HTTP-Proxys ist zu groß.",
-    ))
+    if reply[1] != 90 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "Der SOCKS4-Proxy hat den SSH-Tunnel abgelehnt. Status: {}",
+                reply[1]
+            ),
+        ));
+    }
+    Ok(())
 }
 
 async fn connect_socks5(
@@ -313,33 +383,23 @@ async fn connect_socks5(
     ip: Option<IpAddr>,
     credentials: Option<(&str, &str)>,
 ) -> io::Result<()> {
-    let method = if credentials.is_some() { 2 } else { 0 };
-    stream.write_all(&[5, 1, method]).await?;
+    let offered: &[u8] = if credentials.is_some() { &[3, 2] } else { &[0] };
+    let mut negotiation = vec![5, offered.len() as u8];
+    negotiation.extend_from_slice(offered);
+    stream.write_all(&negotiation).await?;
     let mut greeting = [0; 2];
     stream.read_exact(&mut greeting).await?;
-    if greeting != [5, method] {
+    if greeting[0] != 5 || !offered.contains(&greeting[1]) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "Der SOCKS5-Proxy akzeptiert die konfigurierte Anmeldeart nicht.",
         ));
     }
     if let Some((user, password)) = credentials {
-        let user_len = u8::try_from(user.len())
-            .map_err(|_| invalid_input("Der Proxy-Benutzername ist zu lang."))?;
-        let password_len = u8::try_from(password.len())
-            .map_err(|_| invalid_input("Das Proxy-Passwort ist zu lang."))?;
-        let mut login = Zeroizing::new(Vec::with_capacity(user.len() + password.len() + 3));
-        login.extend_from_slice(&[1, user_len]);
-        login.extend_from_slice(user.as_bytes());
-        login.push(password_len);
-        login.extend_from_slice(password.as_bytes());
-        stream.write_all(&login).await?;
-        stream.read_exact(&mut greeting).await?;
-        if greeting != [1, 0] {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "Die SOCKS5-Proxy-Anmeldung wurde abgelehnt.",
-            ));
+        if greeting[1] == 3 {
+            socks_chap::authenticate(stream, user, password).await?;
+        } else {
+            socks_password(stream, user, password).await?;
         }
     }
     let mut request = vec![5, 1, 0];
@@ -387,13 +447,41 @@ async fn connect_socks5(
     Ok(())
 }
 
+async fn socks_password(stream: &mut TcpStream, user: &str, password: &str) -> io::Result<()> {
+    let user_len = u8::try_from(user.len())
+        .map_err(|_| invalid_input("Der Proxy-Benutzername ist zu lang."))?;
+    let password_len = u8::try_from(password.len())
+        .map_err(|_| invalid_input("Das Proxy-Passwort ist zu lang."))?;
+    let mut login = Zeroizing::new(Vec::with_capacity(user.len() + password.len() + 3));
+    login.extend_from_slice(&[1, user_len]);
+    login.extend_from_slice(user.as_bytes());
+    login.push(password_len);
+    login.extend_from_slice(password.as_bytes());
+    stream.write_all(&login).await?;
+    let mut reply = [0; 2];
+    stream.read_exact(&mut reply).await?;
+    if reply != [1, 0] {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Die SOCKS5-Proxy-Anmeldung wurde abgelehnt.",
+        ));
+    }
+    Ok(())
+}
+
+struct EstablishedSsh {
+    session: client::Handle<PinnedHost>,
+    proxy: Option<local_proxy::Process>,
+    fingerprint: Arc<OnceLock<String>>,
+}
+
 async fn establish(
     connection: &Connection,
     password: &str,
     previous: Option<&client::Handle<PinnedHost>>,
     challenge: Option<&ChallengeHandler>,
     cancel: &AtomicBool,
-) -> io::Result<client::Handle<PinnedHost>> {
+) -> io::Result<EstablishedSsh> {
     let options = connection
         .ssh
         .as_ref()
@@ -401,9 +489,6 @@ async fn establish(
     let (host, port) = endpoint(connection)?;
     let mut preferred = russh::Preferred::DEFAULT;
     let name = format!("{host}:{port}");
-    let fingerprint = options
-        .fingerprint
-        .map(|pin| format!("SHA256:{}", STANDARD_NO_PAD.encode(pin)));
     #[cfg(windows)]
     let gss_kex = if options.kerberos_kex {
         let principal = options
@@ -412,16 +497,18 @@ async fn establish(
             .ok_or_else(|| invalid_input("Kerberos-Dienstprinzipal fehlt."))?;
         Some(super::kerberos::key_exchange(
             principal,
-            fingerprint.is_none(),
+            options.fingerprints.is_empty(),
         ))
     } else {
         None
     };
     let mut first_mismatch = None;
     loop {
+        let verified = Arc::new(OnceLock::new());
         let handler = PinnedHost {
             name: name.clone(),
-            fingerprint: fingerprint.clone(),
+            fingerprints: options.fingerprints.clone(),
+            verified: verified.clone(),
         };
         let offered = Arc::new(client::Config {
             preferred: preferred.clone(),
@@ -431,13 +518,27 @@ async fn establish(
             keepalive_max: 3,
             ..Default::default()
         });
+        let mut proxy_process = None;
         let result = bounded(cancel, options.timeout, async {
             Ok(match previous {
                 Some(jump) => {
                     client::connect_stream(offered, tunnel(jump, connection).await?, handler).await
                 }
                 None => {
-                    client::connect_stream(offered, connect_tcp(connection).await?, handler).await
+                    if let Some(command) = &connection.local_proxy {
+                        let (host, port) = proxy_endpoint(connection).await?;
+                        let (stream, process) = command.spawn(
+                            &host,
+                            port,
+                            &connection.proxy_user,
+                            &connection.proxy_password,
+                        )?;
+                        proxy_process = Some(process);
+                        client::connect_stream(offered, stream, handler).await
+                    } else {
+                        client::connect_stream(offered, connect_tcp(connection).await?, handler)
+                            .await
+                    }
                 }
             })
         })
@@ -454,11 +555,15 @@ async fn establish(
                     cancel,
                 )
                 .await?;
-                return Ok(session);
+                return Ok(EstablishedSsh {
+                    session,
+                    proxy: proxy_process,
+                    fingerprint: verified,
+                });
             }
             Err(HandshakeError::PinMismatch(observed, error)) => {
                 // Only try the remaining algorithms already allowed by the client.
-                // A new handshake must still match the same configured pin.
+                // A new handshake must still match the configured trust set.
                 let keys = preferred.key.to_mut();
                 let old_count = keys.len();
                 let rsa = matches!(observed, Algorithm::Rsa { .. });
@@ -480,7 +585,7 @@ async fn establish(
                     return Err(error);
                 }
                 if options.kerberos_kex
-                    && fingerprint.is_some()
+                    && !options.fingerprints.is_empty()
                     && matches!(&error, russh::Error::NoCommonAlgo { theirs, .. } if theirs == &["null"])
                 {
                     return Err(io::Error::new(
@@ -882,8 +987,9 @@ impl Session {
             .as_ref()
             .ok_or_else(|| invalid_input("SSH-Profil fehlt."))?;
         let mut jumps = Vec::new();
+        let mut local_proxies = Vec::new();
         for (connection, secret) in &settings.jumps {
-            let session = establish(
+            let jump = establish(
                 connection,
                 secret,
                 jumps.last(),
@@ -897,7 +1003,8 @@ impl Session {
                     format!("SSH-Sprungserver {}: {error}", connection.url),
                 )
             })?;
-            jumps.push(session);
+            jumps.push(jump.session);
+            local_proxies.extend(jump.proxy);
         }
         let target = establish(
             &self.connection,
@@ -907,7 +1014,13 @@ impl Session {
             cancel,
         )
         .await?;
-        Ok(SshConnection { target, jumps })
+        local_proxies.extend(target.proxy);
+        Ok(SshConnection {
+            target: target.session,
+            jumps,
+            fingerprint: target.fingerprint,
+            _local_proxies: local_proxies,
+        })
     }
 
     pub(super) fn open_sftp(&self, cancel: &AtomicBool) -> io::Result<SftpConnection> {

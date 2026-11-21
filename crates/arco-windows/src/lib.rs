@@ -3,6 +3,9 @@
 pub mod ftp;
 
 #[cfg(windows)]
+pub mod edit_publication;
+
+#[cfg(windows)]
 pub mod console_cancel;
 #[cfg(windows)]
 pub mod session_protocol;
@@ -29,6 +32,14 @@ pub use icons::resource_icon;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EditFileRevision {
+    size: u64,
+    modified: SystemTime,
+    change_time: Option<i64>,
+    identity: Option<(u64, [u8; 16])>,
+}
 
 #[cfg(not(windows))]
 pub fn resource_icon(_: &Path, _: i32) -> io::Result<Vec<u8>> {
@@ -216,6 +227,8 @@ pub fn total_commander_install() -> Option<PathBuf> {
 }
 
 #[cfg(windows)]
+pub mod jump_list;
+#[cfg(windows)]
 mod shell_actions;
 #[cfg(windows)]
 pub use shell_actions::{
@@ -388,6 +401,22 @@ pub fn is_double_click(_: (i32, i32), _: (i32, i32), _: std::time::Duration) -> 
 #[cfg(not(windows))]
 pub fn edit(_: &Path, _: Option<&Path>) -> io::Result<()> {
     Err(unsupported())
+}
+
+#[cfg(not(windows))]
+pub fn open_edit_copy(path: &Path) -> io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
+
+#[cfg(not(windows))]
+pub fn edit_file_revision(file: &std::fs::File) -> io::Result<EditFileRevision> {
+    let metadata = file.metadata()?;
+    Ok(EditFileRevision {
+        size: metadata.len(),
+        modified: metadata.modified()?,
+        change_time: None,
+        identity: None,
+    })
 }
 
 #[cfg(not(windows))]

@@ -135,15 +135,18 @@ fn result_waits(outcome: &super::Outcome, kind: &str) -> bool {
         | O::PluginImport(_)
         | O::WdxFields(..)
         | O::WdxEditable(..) => Some("plugins"),
-        O::Preview { .. } | O::Image(..) | O::RichPreview(..) | O::StagedPreview(..) => {
-            Some("viewer")
-        }
+        O::Preview { .. }
+        | O::Image(..)
+        | O::RichPreview(..)
+        | O::StagedPreview(..)
+        | O::RemoteLinkResolved { .. } => Some("viewer"),
         O::TextCompared(_, _, false) | O::BinaryCompared(_, _, false) => Some("text-comparison"),
         O::FileComment(..)
         | O::PrintPreview(..)
         | O::RenameNameList(..)
         | O::Ftp(_)
-        | O::FtpEditReady(_)
+        | O::FtpEditReady(..)
+        | O::RemoteLinkLoaded(..)
         | O::S3Tags(_)
         | O::Imported(_)
         | O::ImportedTabs(..)
@@ -482,6 +485,10 @@ impl App {
     }
     pub(crate) fn submit_text_draft(&mut self, form: TextDraftForm) {
         let result = match self.pending.as_ref() {
+            Some(Pending::FtpTextEdit(edit)) => {
+                let path = edit.path.clone();
+                edit.save(&form.body).map(|()| self.review_ftp_draft(&path))
+            }
             Some(Pending::IgnoreList) => self
                 .save_ignore_list(&form.body, form.enabled)
                 .map(|()| self.close_dialog()),
@@ -744,6 +751,16 @@ pub(super) fn clone_pending(p: &Pending) -> Option<Pending> {
         Pending::NetworkWatch(local, remote) => {
             Pending::NetworkWatch(local.clone(), remote.clone())
         }
+        Pending::FtpDownload(endpoint, target) => {
+            Pending::FtpDownload(endpoint.clone(), target.clone())
+        }
+        Pending::FtpDownloadList(endpoint, target) => {
+            Pending::FtpDownloadList(endpoint.clone(), target.clone())
+        }
+        Pending::FtpUpload(endpoint, source) => {
+            Pending::FtpUpload(endpoint.clone(), source.clone())
+        }
+        Pending::NetworkCopy(copy) => Pending::NetworkCopy(copy.clone()),
         Pending::WdxChoose(p, f) => Pending::WdxChoose(p.clone(), f.clone()),
         Pending::WdxEditPlugin(p, f) => Pending::WdxEditPlugin(p.clone(), f.clone()),
         Pending::WdxEditField(t, f) => Pending::WdxEditField(t.clone(), f.clone()),

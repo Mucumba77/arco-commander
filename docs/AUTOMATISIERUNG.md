@@ -14,6 +14,24 @@ lls "*.csv"
 
 Nach `open` listet `ls` den aktuellen Serverordner. `dir` ist ein Alias. Gib optional einen Ordner oder eine Dateimaske im letzten Pfadteil an, etwa `ls "/export/2026/*.csv"`. `option failonnomatch on` behandelt eine Maske ohne Treffer als Skriptfehler. [WinSCP ls](https://winscp.net/eng/docs/scriptcommand_ls)
 
+`checksum [ALGORITHMUS] SERVERDATEI` liefert `checksum`, `algorithm` und `name` als JSON. Der Pfad kann relativ zum aktuellen Serverordner oder absolut sein. FTP und FTPS verwenden ein vom Server bereitgestelltes Verfahren. SFTP nutzt die Servererweiterung `check-file-name` oder liest die Datei und berechnet den Hash beim Empfang. SCP nutzt GNU-Prüfprogramme am Server. Ohne Algorithmus wählt Arco das Verfahren. [WinSCP checksum](https://winscp.net/eng/docs/scriptcommand_checksum)
+
+Mit `chmod [-recursive] MODUS PFAD` änderst du Unix-Rechte. Für numerische Besitzer und Gruppen bieten SFTP und SCP `chown [-recursive] UID[:GID] PFAD` und `chgrp [-recursive] GID PFAD`. `-R` ist ein Alias für `-recursive`. Pfade können absolut oder relativ zum aktuellen Serverordner sein. Bei einem rekursiven Erfolg enthält das JSON-Ereignis die Zahl `completed`.
+
+`stat PFAD` liefert für SFTP und SCP zusätzlich `permissions` im Oktalformat, `uid` und `gid`, wenn der Server diese Eigenschaften liefert.
+
+`get`, `get-url` und `put` übernehmen die Regeln für Zielnamen aus der Transfervorgabe oder dem Netzwerkprofil. Mit `-namecase=preserve|lower|upper|first-upper|lower-dos` und `-windowsnames` bzw. `-nowindowsnames` überschreibst du sie für einen Aufruf. Bei einer ausdrücklich angegebenen Zieldatei gilt der eingegebene Name. Bei einem Zielordner gilt die Regel für automatisch gebildete Namen, auch mit `-recursive`.
+
+`synchronize` und `keepuptodate` wenden die Namensregeln der wirksamen Transfervorgabe auf den Vergleich und neue Zielnamen an. Bei aktivierter Namensumwandlung enthält `synchronize -preview` zusätzlich `local_path` und `remote_path`. `path` enthält den Pfad auf der Seite, auf der die Aktion ausgeführt wird.
+
+Bei diesen Befehlen kannst du auch die WinSCP-Schreibweise `-rawtransfersettings FileNameCase=2 ReplaceInvalidChars=1` verwenden. Arco akzeptiert für `FileNameCase` die Werte 0, 1, 2 und 4 und für `ReplaceInvalidChars` die Werte 0 und 1. Die Angaben gelten für den jeweiligen Aufruf. [WinSCP-Transferparameter](https://winscp.net/eng/docs/rawtransfersettings)
+
+`call "pwd"` startet einen Befehl im aktuellen SFTP- oder SCP-Ordner und liefert `stdout`, `stderr` und `status` als JSON. Mit `call -template "ls -ld !&" "Datei A.txt" "Datei B.txt"` übergibst du Dateinamen als einzelne Argumente. Ein von null abweichender Exit-Code beendet das Skript. FTP und FTPS akzeptieren über `call` dieselben Protokollbefehle wie der Serverbefehlsdialog. [WinSCP call](https://winscp.net/eng/docs/scriptcommand_call)
+
+`call -saved "Dateidetails" "Datei A.txt"` lädt die benannte Vorlage aus demselben Arco-Profil, das auch das Netzwerkmenü verwendet.
+
+In Vorlagen liefern `!@` den Host, `!U` den Benutzernamen, `!#` den Port, `!N` den Profilnamen und `!S` die Sitzungsadresse mit dem aktuellen Serverordner. Arco übergibt jeden Wert als einzelnes Argument. [WinSCP-Platzhalter](https://winscp.net/eng/docs/custom_command)
+
 ## Verschlüsselte Dateitransfers
 
 `put-encrypted LOKALE_DATEI VARIABLENNAME` lädt ein Paket mit verschlüsseltem Inhalt und Namen hoch. Das JSON-Ergebnis enthält den generierten Servernamen unter `uploaded`. `get-encrypted SERVERPAKET VARIABLENNAME [LOKALER_ZIELORDNER]` stellt die geprüfte Originaldatei im vorhandenen Zielordner wieder her. Ohne Zielangabe verwendet Arco den aktuellen lokalen Ordner.
@@ -78,6 +96,27 @@ Ein Mehrfachtransfer prüft doppelte Zieldateinamen und bereits belegte Ziele vo
 - `-resume` nutzt die geprüfte binäre Wiederaufnahme per FTP, FTPS oder SFTP. FTP kann eine passende, kleinere Teildatei am Ziel ergänzen. SFTP verwendet eigene Teildateien und veröffentlicht das fertige Ziel nach der Prüfung. Dieselbe Option ist für Downloads und einzelne Datei-URLs verfügbar. [WinSCP Wiederaufnahme](https://winscp.net/eng/docs/resume)
 - Leere Maskentreffer ergeben standardmäßig `"completed": 0`. Mit `option failonnomatch on` gilt ein leerer Treffer für die nachfolgenden Befehle als Fehler. `option failonnomatch off` setzt das zurück. Für einen einzelnen Befehl gibt es `-failonnomatch`.
 
+Für S3 startet `put -resume "Bericht.bin" "bericht.bin"` einen fortsetzbaren Upload. Wiederhole denselben Befehl nach einer Unterbrechung mit identischem Dateiinhalt und demselben Ziel. Mit `abort-upload "bericht.bin"` verwirfst du die von Arco gespeicherte Multipart-Übertragung für dieses Ziel.
+
+### S3-Versionen und Buckets verwalten
+
+Wechsle mit `cd` in einen S3-Bucket. `s3-versioning` liefert den Zustand als JSON. `s3-versioning enable` aktiviert die Versionierung und `s3-versioning suspend` setzt sie aus. `s3-versions OBJEKT` liefert Versions-IDs und Löschmarkierungen. Mit `s3-get-version OBJEKT ID ZIELDATEI` lädst du einen Stand herunter. `s3-restore-version OBJEKT ID` erstellt aus einer älteren Version einen neuen aktuellen Stand. Bei Versionen über 5 GiB verwendet der Befehl automatisch serverseitige Multipart-Kopien. `s3-delete-version -permanent OBJEKT ID` löscht genau die angegebene unveränderliche Version oder Löschmarkierung dauerhaft. [S3-Versionshistorie und erforderliche Rechte](SFTP.md#s3)
+
+`s3-versioning` liefert auch `mfa_delete`. Mit `s3-versioning mfa-enable` oder `s3-versioning mfa-disable` änderst du den Schutz. MFA-geschützte Änderungen und Löschungen benötigen HTTPS und die beiden Optionen `-mfa-serial=GERÄT` und `-mfa-code-env=VARIABLE`. Der aktuelle sechsstellige Code wird aus der Umgebungsvariable gelesen.
+
+```text
+s3-versioning mfa-enable -mfa-serial=GERÄT -mfa-code-env=ARCO_MFA_CODE
+s3-delete-version -permanent -mfa-serial=GERÄT -mfa-code-env=ARCO_MFA_CODE bericht.txt VERSIONS_ID
+```
+
+### Temporäre S3-Anmeldung im Skript
+
+`open "Mein S3-Profil" -s3-token-env=ARCO_S3_TOKEN` liest das Sitzungstoken aus der genannten Umgebungsvariablen. Der geheime Zugriffsschlüssel kommt aus den Windows-Anmeldeinformationen des Profils oder aus der mit `arco-net.exe --password-env NAME` gewählten Umgebungsvariablen. Eine im Profil gespeicherte Rollen-ARN gilt auch im Skript. [Temporäre S3-Anmeldung](SFTP.md#s3)
+
+`ln "Ziel relativ zum Linkordner" "Ordner/Neuer Link"` legt einen symbolischen Serverlink an. `symlink` ist ein Alias für `ln`. `ln -hard "Datei.txt" "Harter Link"` legt bei Serverunterstützung einen harten Link an. `readlink "Neuer Link"` liefert das bisherige Ziel als JSON-Feld `target`. `setlink "Neuer Link" "Bisheriges Ziel" "Neues Ziel"` ändert einen symbolischen SFTP- oder SCP-Link nach Prüfung des bisherigen Ziels. [Unterstützte Serverlink-Aktionen](SFTP.md#serverlinks-anlegen-und-ändern) · [WinSCP-Skriptbefehl](https://winscp.net/eng/docs/scriptcommand_ln)
+
+`cd /ordner` wechselt zu einem absoluten Serverpfad. `ls` und `stat` kennzeichnen erkannte symbolische Links mit `symlink: true`. `rm -permanent "Neuer Link"` entfernt den Linkeintrag selbst. `rm` verwendet den Server-Papierkorb, wenn das Profil ihn aktiviert hat.
+
 ### Ordner rekursiv übertragen
 
 Ein ausdrücklich angegebener Ordner wird mitsamt Unterordnern und leeren Verzeichnissen in den gewählten Zielordner kopiert. Mit `-recursive` können auch Platzhalter Ordner auswählen. Arco verwendet den Binärmodus und berücksichtigt Profilmasken, `-filemask`, die Ignorierliste und das Durchsatzlimit. Bereits vorhandene Zielordner lassen sich ergänzen. Eine vorhandene Zieldatei beendet die Vorbereitung vor dem ersten Transfer. `-latest` und `-resume` gelten für einzelne Dateien und flache Dateilisten.
@@ -105,9 +144,13 @@ close
 
 ## Server-Papierkorb im Skript
 
-`trash` listet die Kennungen im Server-Papierkorb der aktiven Verbindung. `trash put PFAD` verschiebt einen Eintrag bewusst dorthin. `rm` und `rmdir` verwenden bei eingeschaltetem Papierkorb das gleiche Verfahren. `rm -permanent DATEI` oder `rmdir -permanent ORDNER` löscht ausdrücklich dauerhaft. `trash restore KENNUNG [ZIELORDNER]` stellt den Namen im ausgewählten Zielordner wieder her. Ohne Zielordner gilt der Startordner des Netzwerkprofils. [Server-Papierkorb in Arco](SFTP.md#server-papierkorb)
+`rm [-permanent] PFAD [PFAD …]` entfernt Dateien und Ordner im aktuellen oder angegebenen Serverordner. `*` und `?` sind im letzten Pfadteil Platzhalter. Arco unterscheidet Groß- und Kleinschreibung. Überlappende Treffer werden einmal verarbeitet. `option failonnomatch on` bricht den Befehl bei einer Maske ohne Treffer schon vor dem Entfernen ab. `rmdir` akzeptiert mehrere konkrete Ordnerpfade und prüft beim dauerhaften Löschen, dass die Ordner leer sind. `rm` kann Ordner rekursiv entfernen. [WinSCP rm](https://winscp.net/eng/docs/scriptcommand_rm) · [WinSCP rmdir](https://winscp.net/eng/docs/scriptcommand_rmdir)
+
+`trash` listet die Kennungen im Server-Papierkorb der aktiven Verbindung. `trash put PFAD` verschiebt einen Eintrag bewusst dorthin. `rm` und `rmdir` verwenden bei eingeschaltetem Papierkorb das gleiche Verfahren. Die Option `-permanent` löscht ausdrücklich dauerhaft. Bei mehreren Pfaden oder einer Maske enthält das JSON-Ergebnis die bearbeiteten Ziele in `entries` und deren Anzahl in `completed`. `trash restore KENNUNG [ZIELORDNER]` stellt den Namen im ausgewählten Zielordner wieder her. Ohne Zielordner gilt der Startordner des Netzwerkprofils. [Server-Papierkorb in Arco](SFTP.md#server-papierkorb)
 
 ## Mehrere Server im selben Skript
+
+Mit `open "Mein Server" -hostkey="SHA256:…"` begrenzt du eine SFTP- oder SCP-Verbindung auf die angegebenen Fingerabdrücke. Mehrere mit Semikolon getrennte Werte werden als Alternativen behandelt. Wenn das Profil oder die Sitzungs-URL bereits Schlüssel vorgibt, müssen die angegebenen Fingerabdrücke darin enthalten sein. Hinterlegte Zugangsdaten bleiben bei dieser Eingrenzung verwendbar. [WinSCP open](https://winscp.net/eng/docs/scriptcommand_open)
 
 Jeder `open`-Befehl öffnet eine eigene Sitzung und gibt ihre Nummer aus. `session` listet die offenen Sitzungen. `session 1` aktiviert die Sitzung mit der Nummer 1 und stellt ihren zuletzt verwendeten Serverordner bereit. `close` schließt die aktive Sitzung. Mit `close 2` schließt du gezielt Sitzung 2. Für mehrere Anmeldungen im selben Skript verwendest du die Zugangsdaten der jeweiligen Profile. [WinSCP session](https://winscp.net/eng/docs/scriptcommand_session) · [WinSCP close](https://winscp.net/eng/docs/scriptcommand_close)
 

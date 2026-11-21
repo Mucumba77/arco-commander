@@ -41,6 +41,7 @@ pub(super) fn parse_custom(text: &str, pattern: &regex::Regex) -> std::io::Resul
         entries.push(Entry {
             name: name.to_owned(),
             directory: Some(directory),
+            symlink: false,
             size,
             modified: None,
             unique: None,
@@ -73,6 +74,7 @@ pub(super) fn parse_list(bytes: &[u8]) -> Option<Vec<Entry>> {
             entries.push(Entry {
                 name: name.into(),
                 directory: Some(directory),
+                symlink: false,
                 size,
                 modified: None,
                 unique: None,
@@ -123,6 +125,7 @@ fn parse_vms(text: &str) -> Option<Vec<Entry>> {
         entries.push(Entry {
             name: name.to_owned(),
             directory: Some(folder),
+            symlink: false,
             // VMS reports allocated/used blocks. Neither is the exact byte size.
             size: None,
             modified: None,

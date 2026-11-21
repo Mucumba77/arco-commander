@@ -1,4 +1,4 @@
-use super::{OpenSession, invalid};
+use super::{OpenSession, invalid, transfer_names::NameOverrides};
 use arco_app::network_transfer;
 use arco_app::network_watch::{WatchOptions, parse_interval, watch};
 use arco_core::{
@@ -16,6 +16,7 @@ pub(super) struct KeepUpToDate<'a> {
     remote: Option<&'a str>,
     masks: &'a str,
     preset: Option<&'a str>,
+    names: NameOverrides,
     interval: Duration,
     duration: Option<Duration>,
     delete: bool,
@@ -31,12 +32,14 @@ impl<'a> KeepUpToDate<'a> {
             remote: None,
             masks: "",
             preset: None,
+            names: NameOverrides::default(),
             interval: Duration::from_secs(5),
             duration: None,
             delete: false,
             initial_upload: false,
         };
-        for &arg in args {
+        let mut args = args.iter().copied().peekable();
+        while let Some(arg) = args.next() {
             if !literal {
                 if arg == "--" {
                     literal = true;
@@ -48,6 +51,9 @@ impl<'a> KeepUpToDate<'a> {
                 }
                 if arg == "-initial-sync" {
                     result.initial_upload = true;
+                    continue;
+                }
+                if result.names.parse(arg, &mut args)? {
                     continue;
                 }
                 if let Some(seconds) = arg.strip_prefix("-interval=") {
@@ -120,6 +126,7 @@ impl<'a> KeepUpToDate<'a> {
             Some(root.path()),
             self.preset,
         )?;
+        let session = self.names.session(session);
         let ignore = profile
             .ignore_enabled
             .then(|| IgnoreList::parse(&profile.ignore_rules))

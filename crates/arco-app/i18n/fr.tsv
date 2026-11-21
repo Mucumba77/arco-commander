@@ -376,6 +376,13 @@ Pausieren	Mettre en pause
 Transfer abbrechen	Annuler le transfert
 Wartende Aufträge	Tâches en attente
 Keine Transfers vorgemerkt.	Aucun transfert en attente.
+Netzwerktransfers	Transferts réseau
+Parallele Netzwerktransfers	Transferts réseau simultanés
+Dateien innerhalb eines Netzwerkauftrags parallel übertragen	Transférer plusieurs fichiers en parallèle dans une tâche réseau
+Parallele SFTP-Downloads ab (KiB)	Téléchargements SFTP parallèles à partir de (Kio)
+0 lädt jede SFTP-Datei über eine Verbindung.	Avec 0, chaque fichier SFTP utilise une seule connexion.
+Gib die SFTP-Mindestgröße in KiB als ganze Zahl ein.	Saisissez le seuil SFTP en Kio sous forme de nombre entier.
+Gib 1 bis 8 parallele Netzwerktransfers ein.	Indiquez une limite de 1 à 8 transferts réseau simultanés.
 Dateikommentare mitführen	Conserver les commentaires des fichiers
 Letzte Kopie erneut versuchen	Réessayer la dernière copie
 Geschwindigkeit und Protokoll	Vitesse et journal
@@ -1282,17 +1289,52 @@ HTTP-, SOCKS- oder FTP-Proxy	Proxy HTTP, SOCKS ou FTP
 IP-Version	Version IP
 Serverzeichensatz	Encodage du serveur
 Dateitransfers mit MODE Z komprimieren	Compresser les transferts de fichiers en MODE Z
+FTP über HTTP-Forward-Proxy (nur Lesen)	FTP via un proxy HTTP direct (lecture seule)
+Telnet-Proxy-Kommando (optional)	Commande du proxy Telnet (facultative)
+Lokales Proxy-Programm verwenden	Utiliser un programme proxy local
+Lokales Proxy-Kommando	Commande du proxy local
+SSH-Zielnamen lokal auflösen	Résoudre localement les noms de destination SSH
+Windows-Proxy ermitteln	Détecter le proxy Windows
+Windows-Proxy vorgeschlagen. Speichere das Profil zur Übernahme.	Proxy Windows proposé. Enregistrez le profil pour l’appliquer.
+Windows meldet für dieses Ziel eine Direktverbindung.	Windows indique une connexion directe pour cette destination.
+Diese Proxy-Erkennung benötigt Windows.	Cette détection du proxy nécessite Windows.
+Gib die Benutzerkennung für den Proxy ein.	Saisissez l’identifiant utilisateur du proxy.
+Der gewählte Proxy benötigt kein Passwort.	Le proxy sélectionné ne requiert aucun mot de passe.
+FTP über HTTP-Forward kann nur als Quelle dienen.	Le FTP via un proxy HTTP direct peut uniquement servir de source.
+Größe unbekannt	Taille inconnue
 Versteckte Dateien mit LIST -a anfordern	Demander les fichiers cachés avec LIST -a
 Eigenes LIST-Format (regulärer Ausdruck)	Format LIST personnalisé (expression régulière)
 Benannte Gruppen: name, kind und optional size. Ein eigenes Format verwendet LIST.	Groupes nommés : name, kind et size (facultatif). Les formats personnalisés utilisent LIST.
 FTPS-Zertifikate	Certificats FTPS
 CA-Datei (PEM, optional)	Fichier d’autorité (PEM, facultatif)
 Clientzertifikat (Windows-Fingerabdruck, optional)	Certificat client (empreinte Windows, facultatif)
-Einmalpasswort nach RFC 2289 (OTP)	Mot de passe à usage unique RFC 2289 (OTP)
+Einmalpasswort (OTP / S/KEY)	Mot de passe à usage unique (OTP / S/KEY)
+FTP-Gateway (ftp://)	Passerelle FTP (ftp://)
+USER Benutzer@Server	USER utilisateur@serveur
+SITE Server	SITE serveur
+Proxy-Login → USER Benutzer@Server	Connexion au proxy → USER utilisateur@serveur
+OPEN Server	OPEN serveur
+Proxy-Login → USER Benutzer	Connexion au proxy → USER utilisateur
+USER Proxy@Server → USER Benutzer	USER proxy@serveur → USER utilisateur
+USER Benutzer@Server Proxy	USER utilisateur@serveur proxy
+USER Benutzer@Proxy@Server	USER utilisateur@proxy@serveur
 FTP-Downloadliste …	Liste de téléchargements FTP…
 FTP-Downloadliste	Liste de téléchargements FTP
 FTP-Serverbefehl …	Commande du serveur FTP…
 FTP-Serverbefehl	Commande du serveur FTP
+Serverbefehl …	Commande serveur…
+Serverantwort	Réponse du serveur
+SSH-Serverbefehl	Commande du serveur SSH
+SSH-Befehlsvorlagen …	Modèles de commandes SSH…
+SSH-Befehlsvorlagen	Modèles de commandes SSH
+SSH-Befehlsvorlage	Modèle de commande SSH
+SSH-Befehlsvorlage entfernen	Supprimer le modèle de commande SSH
+Neue Befehlsvorlage	Nouveau modèle de commande
+Name der Vorlage	Nom du modèle
+Programm und Argumente	Programme et arguments
+Direkter Befehl	Commande directe
+Befehlsvorlage	Modèle de commande
+Vorlagen verwenden ! für einen Eintrag, !& für die Auswahl und !/ für den Serverordner. Sitzungsdaten liefern !@, !U, !#, !N und !S.	Les modèles utilisent ! pour un élément, !& pour la sélection et !/ pour le dossier distant. Utilisez !@, !U, !#, !N et !S pour les informations de session.
 FTP-Serverantwort	Réponse du serveur FTP
 FTP-Verbindungsdetails	Détails de la connexion FTP
 FTP-Rohliste	Liste FTP brute
@@ -1316,6 +1358,7 @@ Protokoll	Protocole
 SFTP verwendet SSH. Der Hostschlüssel muss beim Serverbetreiber geprüft werden.	SFTP utilise SSH. Vérifiez la clé d’hôte auprès de l’administrateur du serveur.
 SSH-Server und Schlüssel	Serveur SSH et clés
 SSH-Hostschlüssel (SHA256)	Clé d’hôte SSH (SHA256)
+Mehrere verifizierte Fingerabdrücke durch Semikolon trennen.	Séparez les empreintes vérifiées par des points-virgules.
 Private SSH-Schlüsseldatei (optional)	Fichier de clé privée SSH (facultatif)
 Schlüsselpassphrase	Phrase secrète de la clé
 SFTP-Anmeldung	Connexion SFTP
@@ -1443,6 +1486,139 @@ Wähle eine Dateiversion zum Herunterladen.	Sélectionnez une version de fichier
 Wähle eine S3-Dateiversion.	Sélectionnez une version de fichier S3.
 S3-Version herunterladen	Télécharger la version S3
 S3-Version heruntergeladen	Version S3 téléchargée
+S3-Version wiederherstellen	Restaurer une version S3
+S3-Version wiederhergestellt	Version S3 restaurée
+IAM-Rollen-ARN (optional)	ARN du rôle IAM (facultatif)
+Temporäre S3-Zugangsdaten	Identifiants S3 temporaires
+S3-Sitzungstoken	Jeton de session S3
+Neues Sitzungstoken (optional)	Nouveau jeton de session (facultatif)
+Beim Verbinden eingeben	Saisir lors de la connexion
+Schlüssel und Token in Windows-Anmeldeinformationen speichern	Enregistrer la clé et le jeton dans le Gestionnaire d’identification Windows
+Gib den geheimen S3-Zugriffsschlüssel und das Sitzungstoken ein.	Saisissez la clé d’accès secrète et le jeton de session S3.
+Bucketname als Teil des Hostnamens	Inclure le nom du compartiment dans le nom d’hôte
+Requester Pays akzeptieren	Accepter la facturation au demandeur
+Das verwendete AWS-Konto übernimmt die anfallenden Anfrage- und Transferkosten.	Le compte AWS utilisé paie les frais de requête et de transfert applicables.
+S3-Version löschen	Supprimer une version S3
+Wähle eine Dateiversion oder Löschmarkierung mit unveränderlicher Versions-ID.	Sélectionnez une version du fichier ou un marqueur de suppression dont l’identifiant de version est immuable.
+Das löscht genau diese aktuelle Version dauerhaft. Eine frühere Version kann dadurch sichtbar werden.	Cette version actuelle sera supprimée définitivement. Une version antérieure pourra devenir visible.
+Das löscht die gewählte Version dauerhaft aus der S3-Historie.	La version sélectionnée sera supprimée définitivement de l’historique S3.
+S3-Löschmarkierung entfernt	Marqueur de suppression S3 retiré
+S3-Dateiversion gelöscht	Version du fichier S3 supprimée
+S3-Versionierung lesen	Lire la gestion des versions S3
+S3-Bucket-Versionierung	Gestion des versions du compartiment S3
+Versionierung	Gestion des versions
+Versionierung aktivieren	Activer la gestion des versions
+Versionierung aussetzen	Suspendre la gestion des versions
+S3-Versionierung aktiviert	Gestion des versions S3 activée
+S3-Versionierung ausgesetzt	Gestion des versions S3 suspendue
+Noch nie aktiviert	Jamais activée
+Ausgesetzt	Suspendue
+Neue Uploads erhalten eine eigene Versions-ID.	Les nouveaux téléversements reçoivent un identifiant de version unique.
+Neue Uploads erhalten die Versions-ID null. Weitere Uploads können diese Version überschreiben.	Les nouveaux téléversements reçoivent l’identifiant de version null. Des téléversements ultérieurs peuvent remplacer cette version.
+Fortsetzbare Multipart-Uploads behalten bestätigte Teile nach einem Abbruch.	Les téléversements en plusieurs parties reprenables conservent les parties confirmées après une interruption.
+Fortsetzbaren S3-Upload verwerfen	Abandonner un téléversement S3 reprenable
+Gib den Zielnamen des begonnenen Uploads ein.	Saisissez le nom de destination du téléversement en cours.
+Arco verwirft die übertragenen Teile dieses begonnenen Uploads.	Arco supprime les parties déjà transférées de ce téléversement.
+Upload verwerfen	Abandonner le téléversement
+S3-Upload verworfen.	Téléversement S3 abandonné.
+Kein gespeicherter S3-Upload für dieses Ziel.	Aucun téléversement S3 enregistré pour cette destination.
+Keine ältere Dateiversion gefunden.	Aucune version antérieure du fichier trouvée.
+Wähle die Version, die als neuer Stand veröffentlicht werden soll.	Choisissez la version à publier comme nouvelle version actuelle.
+Arco erstellt auf dem Server aus diesem Stand eine neue aktuelle Dateiversion.	Arco crée sur le serveur une nouvelle version actuelle à partir de cette révision.
+Dateiversion auf dem Server kopieren …	Copie de la version du fichier sur le serveur …
+S3-Version prüfen …	Vérification de la version S3 …
+Nicht kodierte Sonderzeichen in Serverlisten zulassen	Autoriser les caractères spéciaux non échappés dans les listes du serveur
+Mit dem aktuellen Windows-Konto anmelden (Negotiate)	Se connecter avec le compte Windows actuel (Negotiate)
+Weiterleitungen auf andere Hosts oder Ports zulassen	Autoriser les redirections vers d’autres hôtes ou ports
+Weiterleitungen von HTTPS auf HTTP zulassen	Autoriser les redirections de HTTPS vers HTTP
+Ungültiges Ziel der WebDAV-Weiterleitung.	Destination de redirection WebDAV non valide.
+Die WebDAV-Weiterleitung auf unverschlüsseltes HTTP ist deaktiviert.	Les redirections WebDAV vers HTTP sans chiffrement sont désactivées.
+Die WebDAV-Weiterleitung auf einen anderen Host oder Port ist deaktiviert.	Les redirections WebDAV vers d’autres hôtes ou ports sont désactivées.
+Die WebDAV-Weiterleitung führt aus dem geöffneten Stammordner.	La redirection WebDAV mène en dehors du dossier racine ouvert.
+Der WebDAV-Schreibauftrag wurde zu einer anderen Ressource umgeleitet.	L’opération d’écriture WebDAV a été redirigée vers une autre ressource.
+Die WebDAV-Ordneradresse hat sich geändert. Lade den Ordner neu.	L’adresse du dossier WebDAV a changé. Rechargez le dossier.
+Zu viele WebDAV-Ordnerweiterleitungen in dieser Verbindung.	Trop de redirections de dossiers WebDAV dans cette connexion.
+Der WebDAV-Weiterleitungsstatus ist nicht verfügbar.	L’état de la redirection WebDAV est indisponible.
+Die WebDAV-Zwischenantwort ist zu groß.	La réponse WebDAV intermédiaire est trop volumineuse.
+Die WebDAV-Weiterleitung bildet eine Schleife oder ist zu lang.	La redirection WebDAV forme une boucle ou comporte trop d’étapes.
+Die weitergeleitete Ressource stimmt nicht mit der WebDAV-Sperre überein.	La ressource redirigée ne correspond pas au verrou WebDAV.
+Die WebDAV-Dateioperation benötigt Quelle und Ziel auf demselben Server.	L’opération WebDAV exige que la source et la destination soient sur le même serveur.
+Serverdatei bearbeiten	Modifier le fichier du serveur
+Serverdatei im Texteditor bearbeiten	Modifier le fichier du serveur dans l’éditeur de texte
+Serverdatei im Texteditor bearbeiten …	Modifier le fichier du serveur dans l’éditeur de texte …
+Serverlink anlegen	Créer un lien sur le serveur
+Serverlink anlegen …	Créer un lien sur le serveur …
+Symbolischen Serverlink bearbeiten	Modifier le lien symbolique sur le serveur
+Symbolischen Serverlink bearbeiten …	Modifier le lien symbolique sur le serveur …
+Name des neuen Links	Nom du nouveau lien
+Linkziel auf dem Server	Cible sur le serveur
+Linktyp	Type de lien
+Symbolischer Link	Lien symbolique
+Harter Link	Lien physique
+Linkziel lesen …	Lecture de la cible du lien …
+Linkziel öffnen …	Ouverture de la cible du lien …
+Ansicht hat sich während des Öffnens geändert.	Le panneau a changé pendant l’ouverture du lien.
+Der Link verweist auf einen Ordner. Öffne ihn mit der Eingabetaste oder per Doppelklick.	Le lien pointe vers un dossier. Appuyez sur Entrée ou double-cliquez pour l’ouvrir.
+Linkziel ändern	Modifier la cible du lien
+Serverlink angelegt	Lien créé sur le serveur
+Linkziel gespeichert	Cible du lien enregistrée
+Öffne zuerst ein verbundenes Server-Dateifenster.	Ouvrez d’abord un panneau connecté au serveur.
+Symbolische Serverlinks können mit SFTP oder SCP bearbeitet werden.	La modification des liens symboliques nécessite SFTP ou SCP.
+Serverlinks benötigen SFTP, SCP oder FTP mit SITE SYMLINK.	Les liens sur le serveur nécessitent SFTP, SCP ou FTP avec SITE SYMLINK.
+Wähle einen symbolischen Serverlink aus.	Sélectionnez un lien symbolique sur le serveur.
+Offene Serverbearbeitungen	Modifications de fichiers serveur ouvertes
+Offene Serverbearbeitungen …	Modifications de fichiers serveur ouvertes …
+Keine offenen Serverbearbeitungen	Aucune modification de fichier serveur ouverte
+Server-Arbeitskopie laden	Télécharger la copie de travail du serveur
+Server-Arbeitskopie löschen	Supprimer la copie de travail du serveur
+Server-Arbeitskopie gelöscht.	La copie de travail du serveur a été supprimée.
+Server-Arbeitskopie unverändert	La copie de travail du serveur est inchangée
+Server-Arbeitskopie geöffnet	Copie de travail du serveur ouverte
+Serveränderungen hochladen	Téléverser les modifications du fichier serveur
+Serveränderungen hochgeladen	Modifications du fichier serveur téléversées
+Serveränderungen prüfen und zurückübertragen …	Vérification et téléversement des modifications …
+Warte, bis das Serververzeichnis und der laufende Auftrag fertig sind.	Attendez que le dossier du serveur et l’opération en cours soient prêts.
+Wähle eine reguläre Serverdatei.	Sélectionnez un fichier ordinaire sur le serveur.
+Wähle eine Serverdatei mit bekannter Größe von höchstens 64 MiB.	Sélectionnez un fichier serveur dont la taille connue ne dépasse pas 64 Mio.
+Diese Verbindung erlaubt nur Lesezugriffe.	Cette connexion est en lecture seule.
+Server-Arbeitskopien dürfen höchstens 64 MiB groß sein.	Les copies de travail du serveur peuvent atteindre 64 Mio.
+Die Server-Arbeitskopie muss eine reguläre lokale Datei sein.	La copie de travail du serveur doit être un fichier local ordinaire.
+Texteditor konnte nicht geöffnet werden	Impossible d’ouvrir l’éditeur de texte
+Änderungen werden in der lokalen Server-Arbeitskopie gespeichert.	Les modifications sont enregistrées dans la copie de travail locale.
+Die Arbeitskopie wurde außerhalb des Texteditors geändert.	La copie de travail a été modifiée en dehors de l’éditeur de texte.
+Der integrierte Texteditor unterstützt Dateien bis 4 MiB.	L’éditeur de texte intégré prend en charge les fichiers jusqu’à 4 Mio.
+Der integrierte Texteditor benötigt UTF-8 oder UTF-16 mit BOM.	L’éditeur de texte intégré nécessite UTF-8 ou UTF-16 avec une marque d’ordre des octets.
+Im externen Editor öffnen	Ouvrir dans l’éditeur externe
+Im Texteditor öffnen	Ouvrir dans l’éditeur de texte
+Rückübertragung	Téléversement des modifications
+Die automatische Rückübertragung wurde nach einem Fehler oder Abbruch angehalten.	Le téléversement automatique a été suspendu après une erreur ou une annulation.
+Gespeicherte Änderungen werden nach der Prüfung automatisch hochgeladen.	Les modifications enregistrées sont vérifiées et téléversées automatiquement.
+Speichere im Editor und lade die Änderungen über diesen Dialog hoch.	Enregistrez dans l’éditeur et téléversez les modifications depuis cette boîte de dialogue.
+Automatik ausschalten	Désactiver le téléversement automatique
+Automatik fortsetzen	Reprendre le téléversement automatique
+Automatisch hochladen	Téléverser automatiquement
+Ungültige WebDAV-Ressourcenadresse.	Adresse de ressource WebDAV non valide.
+Die WebDAV-Liste enthält nicht kodierte Sonderzeichen. Aktiviere bei Bedarf den Kompatibilitätsmodus im Profil.	La liste WebDAV contient des caractères spéciaux non échappés. Activez le mode de compatibilité du profil si nécessaire.
+MFA Delete aktivieren	Activer MFA Delete
+MFA Delete deaktivieren	Désactiver MFA Delete
+Versionierung und MFA Delete aktivieren	Activer la gestion des versions et MFA Delete
+MFA Delete aktiviert	MFA Delete activé
+MFA Delete deaktiviert	MFA Delete désactivé
+Der MFA-Schutzstatus des Buckets konnte nicht gelesen werden.	Impossible de lire le paramètre MFA Delete du compartiment.
+Standardlöschung	Suppression standard
+Löschen mit MFA-Code	Supprimer avec un code MFA
+Autorisierung	Autorisation
+Änderung	Modification
+Inaktiv	Inactif
+MFA-Gerät (Seriennummer oder ARN)	Appareil MFA (numéro de série ou ARN)
+Sechsstelliger MFA-Code	Code MFA à six chiffres
+Dauerhafte Versionslöschungen benötigen anschließend keinen MFA-Code mehr.	La suppression définitive d’une version ne nécessitera plus de code MFA.
+Das dauerhafte Löschen von Versionen und Änderungen der Versionierung benötigen anschließend einen MFA-Code.	La suppression définitive des versions et les changements de gestion des versions nécessiteront un code MFA.
+Gib die Seriennummer oder ARN des MFA-Geräts ein.	Saisissez le numéro de série ou l’ARN de l’appareil MFA.
+Gib den sechsstelligen MFA-Code ein.	Saisissez le code MFA à six chiffres.
+S3 MFA Delete benötigt eine HTTPS-Verbindung.	S3 MFA Delete nécessite une connexion HTTPS.
+Die Änderung benötigt einen S3-MFA-Code.	Cette modification nécessite un code MFA S3.
+Ungültige S3-Aktion.	Action S3 non valide.
 Kerberos-Tickets an diesen Server delegieren	Déléguer les tickets Kerberos à ce serveur
 WinSCP-Profile importieren	Importer des profils WinSCP
 WinSCP-Profile importieren …	Importer des profils WinSCP…
@@ -1465,6 +1641,8 @@ Kein passender Hostschlüssel	Aucune clé d’hôte correspondante
 Arco ergänzt fehlende Fingerabdrücke in gespeicherten SSH-Profilen.	Arco complète les empreintes manquantes dans les profils SSH enregistrés.
 SSH-Hostschlüssel übernommen	Clés d’hôte SSH importées
 Proxy-Anmeldung	Authentification proxy
+SOCKS4-Benutzerkennung	Identifiant utilisateur SOCKS4
+Gib die Benutzerkennung für den SOCKS4-Proxy ein.	Saisissez l’identifiant utilisateur du proxy SOCKS4.
 Proxy-Anmeldung …	Authentification proxy…
 Proxy-Benutzername	Identifiant du proxy
 Proxy-Passwort	Mot de passe du proxy
@@ -1536,6 +1714,10 @@ Transfervorgaben	Paramètres de transfert
 Übertragungsmodus	Mode de transfert
 Text (ASCII)	Texte (ASCII)
 Durchsatzlimit (KiB/s)	Limite de débit (Kio/s)
+Durchsatzlimit	Limite de débit
+Durchsatzlimit für den Auftrag	Limite de débit de ce transfert
+Leeres Feld übernimmt die Transfervorgabe. 0 bedeutet unbegrenzt. Bei manchen Uploads und FTP-Textdownloads gilt der Wert ab dem nächsten Dateitransfer.	Laissez le champ vide pour utiliser le préréglage. Saisissez 0 pour un débit illimité. Pour certains envois et téléchargements FTP en mode texte, la limite s’applique à partir du prochain fichier.
+Der Netzwerkauftrag ist nicht mehr aktiv.	Le transfert réseau n’est plus actif.
 Unbegrenzt	Sans limite
 Änderungszeiten	Dates de modification
 Je nach Aktion	Selon l’opération
@@ -1550,6 +1732,26 @@ Mit Profilvorgabe herunterladen	Télécharger avec le réglage du profil
 Binär herunterladen	Télécharger en mode binaire
 Transfervorgaben verwalten …	Gérer les préréglages de transfert…
 Transfervorgabe	Préréglage de transfert
+Profil und automatische Regeln	Profil et règles automatiques
+Aus Vorgabe	Selon le préréglage
+Leer übernimmt das Limit der Vorgabe. 0 bedeutet unbegrenzt.	Laissez vide pour conserver la limite du préréglage. Saisissez 0 pour un débit illimité.
+Gib ein Durchsatzlimit von 0 bis 1048576 KiB/s ein.	Saisissez une limite de débit entre 0 et 1048576 Kio/s.
+Wähle eine verfügbare Transfervorgabe.	Choisissez un préréglage de transfert disponible.
+Netzwerkkopie vorbereiten	Préparer la copie réseau
+Kopiervorschau	Vérifier la copie
+Übertragungsweg	Mode de transfert
+Über diesen PC	Via cet ordinateur
+Direkt zwischen den Servern (FXP)	Directement entre les serveurs (FXP)
+FXP-Direktübertragung	Transfert direct FXP
+Kopiervorgang abgeschlossen	Copie terminée
+FXP benötigt zwei direkt verbundene Klartext-FTP-Server mit einer gemeinsamen IP-Version.	FXP exige deux serveurs FTP en clair joignables directement avec la même version d’IP.
+Bei FXP bestimmen die Server den Durchsatz.	En FXP, les serveurs contrôlent le débit.
+Bei FXP bestimmen die Server den Durchsatz. Setze das Limit für diesen Auftrag auf 0 KiB/s.	En FXP, les serveurs contrôlent le débit. Réglez la limite de ce transfert sur 0 Kio/s.
+ausgewählte Einträge	éléments sélectionnés
+Dateiliste	Liste de fichiers
+Strg+S: herunterladen · Esc: abbrechen	Ctrl+S : télécharger · Échap : annuler
+Entfernter Dateiname (leer übernimmt den Namen nach Vorgabe)	Nom distant (laisser vide pour appliquer les règles du préréglage)
+Wähle die Regel für vorhandene Dateien.	Choisissez le traitement des fichiers existants.
 Automatische Auswahl	Sélection automatique
 Einstellungen ohne passende Vorgabe	Paramètres sans préréglage correspondant
 Neue Vorgabe	Nouveau préréglage
@@ -1645,3 +1847,91 @@ Verschlüsselt hochgeladen	Fichier chiffré envoyé
 Entschlüsselt gespeichert	Fichier déchiffré enregistré
 Beim Systemstart	Au démarrage du système
 Der Systemstart benötigt eine Registrierung mit Administratorrechten und das Passwort des Windows-Kontos.	Une tâche au démarrage doit être enregistrée par un administrateur et nécessite le mot de passe de votre compte Windows.
+Arbeitsbereiche	Espaces de travail
+Arbeitsbereiche verwalten	Gérer les espaces de travail
+Arbeitsbereiche verwalten …	Gérer les espaces de travail…
+Aktuellen Arbeitsbereich speichern	Enregistrer l’espace de travail actuel
+Aktuellen Arbeitsbereich speichern …	Enregistrer l’espace de travail actuel…
+Arbeitsbereiche merken sich die Tabs und Anordnung beider Dateifenster.	Les espaces de travail mémorisent les onglets et la disposition des deux panneaux de fichiers.
+Arbeitsbereich speichern	Enregistrer l’espace de travail
+Name des Arbeitsbereichs	Nom de l’espace de travail
+Arbeitsbereich öffnen	Ouvrir l’espace de travail
+Arbeitsbereich öffnen …	Ouvrir l’espace de travail…
+Mit aktuellem Stand überschreiben …	Remplacer par l’espace de travail actuel…
+Arbeitsbereich-Verknüpfung speichern	Enregistrer un raccourci vers l’espace de travail
+Arbeitsbereich-Verknüpfung speichern …	Enregistrer un raccourci vers l’espace de travail…
+Arbeitsbereich entfernen …	Supprimer l’espace de travail…
+Offene Tabs durch den Arbeitsbereich ersetzen?	Remplacer les onglets ouverts par ceux de l’espace de travail ?
+Gespeicherten Arbeitsbereich überschreiben?	Remplacer l’espace de travail enregistré ?
+Gespeicherten Arbeitsbereich entfernen?	Supprimer l’espace de travail enregistré ?
+Arbeitsbereich entfernt.	Espace de travail supprimé.
+Arbeitsbereich gespeichert.	Espace de travail enregistré.
+Der Arbeitsbereich fehlt.	L’espace de travail est introuvable.
+Arbeitsbereich geöffnet.	Espace de travail ouvert.
+Arbeitsbereich geöffnet. Server-Tabs lassen sich mit Eingabe verbinden.	Espace de travail ouvert. Appuyez sur Entrée dans un onglet serveur pour le connecter.
+Arbeitsbereich-Verknüpfung gespeichert.	Raccourci vers l’espace de travail enregistré.
+Warte, bis beide Dateifenster geladen sind.	Attendez que les deux panneaux de fichiers soient chargés.
+Gib einen Arbeitsbereichsnamen mit 1 bis 120 Zeichen ein.	Saisissez un nom d’espace de travail de 1 à 120 caractères.
+Speichere die geöffneten Netzwerkverbindungen als Profile, bevor du den Arbeitsbereich speicherst.	Enregistrez les connexions réseau ouvertes comme profils avant d’enregistrer l’espace de travail.
+Der Arbeitsbereich enthält ungültige Tabs oder Ansichtsoptionen.	L’espace de travail contient des onglets ou des options d’affichage non valides.
+Verwende die Dateiendung .lnk.	Utilisez l’extension de fichier .lnk.
+Navigation nach dem Verbindungsaufbau koppeln	Lier la navigation après la connexion
+Automatisch speichern deaktivieren	Désactiver l’enregistrement automatique de l’espace de travail
+Automatisch speichern und wieder öffnen	Enregistrer et rouvrir automatiquement
+Arbeitsbereich-Einstellung gespeichert.	Paramètre de l’espace de travail enregistré.
+WinSCP-Arbeitsbereiche importieren …	Importer des espaces de travail WinSCP…
+WinSCP-Arbeitsbereiche importieren	Importer des espaces de travail WinSCP
+WinSCP-INI-Datei …	Fichier INI de WinSCP…
+WinSCP-INI-Datei wählen	Choisir un fichier INI de WinSCP
+WinSCP-Registrierung	Registre WinSCP
+Wähle einen Arbeitsbereich. Arco legt seine Tabs und Serverprofile unter freien Namen an.	Choisissez un espace de travail. Arco ajoutera ses onglets et créera des profils serveur avec des noms uniques.
+WinSCP-Arbeitsbereich importiert.	Espace de travail WinSCP importé.
+Windows-Sprungliste	Liste de raccourcis Windows
+Windows-Sprungliste aktivieren	Activer la liste de raccourcis Windows
+Windows-Sprungliste deaktivieren	Désactiver la liste de raccourcis Windows
+Windows-Sprungliste aktiviert.	Liste de raccourcis Windows activée.
+Windows-Sprungliste deaktiviert.	Liste de raccourcis Windows désactivée.
+Windows hat die Sprungliste gesperrt.	Windows a bloqué la liste de raccourcis.
+Server-Prüfsummen berechnen …	Calculer les sommes de contrôle distantes…
+Server-Prüfsummen	Sommes de contrôle distantes
+Wähle Dateien im FTP-, FTPS- oder SFTP-Dateifenster.	Sélectionnez des fichiers dans un panneau FTP, FTPS ou SFTP.
+Wähle mindestens eine Serverdatei.	Sélectionnez au moins un fichier distant.
+Arco fragt die Prüfsumme beim SFTP-Server ab und berechnet sie bei Bedarf aus den Dateidaten.	Arco demande la somme de contrôle au serveur SFTP et la calcule à partir des données du fichier si nécessaire.
+Der FTP-Server berechnet die Prüfsumme mit einem von ihm angebotenen Verfahren.	Le serveur FTP calcule la somme de contrôle avec l’un des algorithmes qu’il prend en charge.
+Prüfsummen berechnen …	Calcul des sommes de contrôle…
+Die gewählte Prüfsumme ist für diese Serververbindung nicht verfügbar.	L’algorithme de somme de contrôle sélectionné est indisponible pour cette connexion.
+Alle Verbindungen	Toutes les connexions
+Ohne Verbindungsordner	Connexions sans dossier
+Verbindungen nach Ordner filtern	Filtrer les connexions par dossier
+Verbindungsordner	Dossier de connexion
+Projekte/Atlas	Projets/Atlas
+Gib einen Verbindungsordner wie Projekte/Atlas ein.	Saisissez un dossier de connexion comme Projets/Atlas.
+Server-Rechte und Besitzer ändern …	Modifier les droits et le propriétaire sur le serveur…
+Server-Rechte und Besitzer ändern	Modifier les droits et le propriétaire sur le serveur
+Server-Rechte ändern	Modifier les droits sur le serveur
+Der Server muss SITE CHMOD unterstützen.	Le serveur doit prendre en charge SITE CHMOD.
+Lasse das Modusfeld für reine Besitzer- oder Gruppenänderungen leer.	Laissez le champ du mode vide pour modifier uniquement le propriétaire ou le groupe.
+Besitzer und Gruppe	Propriétaire et groupe
+Leere Felder behalten die aktuelle UID oder GID bei.	Un champ vide conserve l’UID ou le GID actuel.
+Besitzer-ID (UID)	Identifiant du propriétaire (UID)
+Gruppen-ID (GID)	Identifiant du groupe (GID)
+Dateien und Unterordner einbeziehen	Inclure les fichiers et les sous-dossiers
+Bei Abbruch bleiben bereits angewendete Änderungen bestehen.	Les modifications déjà appliquées sont conservées en cas d’annulation.
+Gib gültige Rechte, eine UID oder eine GID ein.	Saisissez des droits valides, un UID ou un GID.
+Besitzer und Gruppe benötigen SFTP oder SCP.	La modification du propriétaire ou du groupe nécessite SFTP ou SCP.
+Server-Rechte lassen sich nur für reguläre Dateien und Ordner ändern.	Les droits des fichiers ordinaires et des dossiers peuvent être modifiés.
+Ordnerstruktur ermitteln …	Analyse de la structure des dossiers…
+Gib UID und GID als Dezimalzahl zwischen 0 und 4294967294 ein.	Saisissez l’UID et le GID en décimal, entre 0 et 4294967294.
+Der SFTP-Server meldet weder UID noch GID für diesen Eintrag.	Le serveur SFTP n’a fourni ni UID ni GID pour cet élément.
+Der Server hat die neuen Rechte oder Besitzdaten nicht bestätigt.	Le serveur n’a pas confirmé les nouveaux droits ou le changement de propriétaire.
+Der Servereintrag hat sich seit dem Anzeigen geändert.	L’élément distant a changé depuis son affichage.
+Schreibweise beibehalten	Conserver la casse
+Kleinbuchstaben	Minuscules
+Großbuchstaben	Majuscules
+Ersten Buchstaben großschreiben	Initiale en majuscule
+DOS-8.3-Uploads kleinschreiben	Envois DOS 8.3 en minuscules
+Schreibweise des Zielnamens	Casse du nom de destination
+Zielnamen	Noms de destination
+Windows-Dateinamen umwandeln	Convertir les noms de fichiers Windows
+Wähle Dateien im FTP-, FTPS-, SFTP- oder SCP-Dateifenster.	Sélectionnez des fichiers dans un panneau FTP, FTPS, SFTP ou SCP.
+Der SCP-Server berechnet die Prüfsumme mit einem GNU-Prüfprogramm.	Le serveur SCP calcule la somme de contrôle avec un utilitaire GNU.

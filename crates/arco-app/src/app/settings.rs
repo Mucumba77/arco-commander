@@ -152,6 +152,28 @@ fn apply_configuration(
         .parse()
         .map_err(|_| invalid("Gib eine ganze Zahl für KiB/s ein."))
         .map_err(ConfigurationError::at(5))?;
+    let parallel_network_transfers = if value.parallel_network_transfers.trim().is_empty() {
+        draft.parallel_network_transfers
+    } else {
+        value
+            .parallel_network_transfers
+            .trim()
+            .parse::<u8>()
+            .ok()
+            .filter(|limit| (1..=8).contains(limit))
+            .ok_or_else(|| invalid("Gib 1 bis 8 parallele Netzwerktransfers ein."))
+            .map_err(ConfigurationError::at(5))?
+    };
+    let parallel_sftp_minimum_kib = if value.parallel_sftp_minimum.trim().is_empty() {
+        draft.parallel_sftp_minimum_kib
+    } else {
+        value
+            .parallel_sftp_minimum
+            .trim()
+            .parse::<u32>()
+            .map_err(|_| invalid("Gib die SFTP-Mindestgröße in KiB als ganze Zahl ein."))
+            .map_err(ConfigurationError::at(5))?
+    };
 
     let archives = archive_settings(&value.archives).map_err(ConfigurationError::at(7))?;
 
@@ -159,6 +181,9 @@ fn apply_configuration(
     draft.editor = editor;
     draft.everything_cli = everything;
     draft.transfer_rate_kib = transfer_rate_kib;
+    draft.parallel_network_transfers = parallel_network_transfers;
+    draft.parallel_network_files = value.parallel_network_files;
+    draft.parallel_sftp_minimum_kib = parallel_sftp_minimum_kib;
     draft.transfer_log = transfer_log;
     draft.transfer_descriptions = value.transfer_comments;
     draft.archives = archives;
@@ -475,6 +500,22 @@ mod tests {
                 },
                 5,
             ),
+            (
+                SettingsData {
+                    transfer_rate: "0".into(),
+                    parallel_network_transfers: "9".into(),
+                    ..Default::default()
+                },
+                5,
+            ),
+            (
+                SettingsData {
+                    transfer_rate: "0".into(),
+                    parallel_sftp_minimum: "-1".into(),
+                    ..Default::default()
+                },
+                5,
+            ),
         ] {
             let mut profile = Profile::default();
             let error = apply_configuration(&mut profile, &value).unwrap_err();
@@ -498,11 +539,17 @@ mod tests {
         assert_eq!(profile.language, Language::German);
         let settings = SettingsData {
             transfer_rate: "128".into(),
+            parallel_network_transfers: "4".into(),
+            parallel_network_files: true,
+            parallel_sftp_minimum: "65536".into(),
             ..settings
         };
         apply_configuration(&mut profile, &settings).unwrap();
         assert_eq!(profile.language, Language::French);
         assert_eq!(profile.transfer_rate_kib, 128);
+        assert_eq!(profile.parallel_network_transfers, 4);
+        assert!(profile.parallel_network_files);
+        assert_eq!(profile.parallel_sftp_minimum_kib, 65_536);
     }
 
     #[test]

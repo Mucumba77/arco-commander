@@ -1,3 +1,4 @@
+use super::transfer_names::NameOverrides;
 use arco_app::network_sync::{FtpEndpoint, FtpPlan, ScriptComparison, ftp_ignores};
 use arco_core::ignore::IgnoreList;
 use arco_core::profile::Profile;
@@ -5,7 +6,7 @@ use arco_core::sync::{Action, Comparison, Mode, Options};
 use arco_windows::ftp::Session;
 use serde_json::{Value, json};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
 pub(super) struct Synchronize<'a> {
@@ -16,6 +17,7 @@ pub(super) struct Synchronize<'a> {
     preview: bool,
     delete_local: bool,
     preset: Option<&'a str>,
+    names: NameOverrides,
 }
 
 impl<'a> Synchronize<'a> {
@@ -45,7 +47,9 @@ impl<'a> Synchronize<'a> {
         let mut delete = false;
         let mut positional = false;
         let mut preset = None;
-        for &arg in args {
+        let mut names = NameOverrides::default();
+        let mut args = args.iter().copied().peekable();
+        while let Some(arg) = args.next() {
             match arg {
                 "--" if !positional => positional = true,
                 "-preview" if !positional => preview = true,
@@ -55,6 +59,7 @@ impl<'a> Synchronize<'a> {
                 "-all-sizes" if !positional => options.timestamp_all_sizes = true,
                 "-preservetime" if !positional => comparison.preserve_time = Some(true),
                 "-nopreservetime" if !positional => comparison.preserve_time = Some(false),
+                arg if !positional && names.parse(arg, &mut args)? => (),
                 arg if !positional && arg.starts_with("-preset=") => {
                     let name = &arg["-preset=".len()..];
                     if name.is_empty() || preset.replace(name).is_some() {
@@ -125,6 +130,7 @@ impl<'a> Synchronize<'a> {
             remote: paths.get(1).copied(),
             preview,
             preset,
+            names,
         })
     }
 
@@ -153,6 +159,7 @@ impl<'a> Synchronize<'a> {
             Some(&local),
             self.preset,
         )?;
+        let session = self.names.session(session);
         let ignore = profile
             .ignore_enabled
             .then(|| IgnoreList::parse(&profile.ignore_rules))
@@ -173,14 +180,16 @@ impl<'a> Synchronize<'a> {
             cancel,
         )?;
         let masks = !self.options.masks.is_empty() || !session.transfer_masks().is_empty();
-        let local_deletions: Vec<PathBuf> = if self.delete_local {
-            plan.local_obsolete(masks)
-                .map(|row| row.relative.clone())
-                .collect()
-        } else {
-            Vec::new()
-        };
         if self.preview {
+            let preview_entry = |row: &arco_core::sync::Row, action: &str, target: usize| match plan
+                .mapped_paths(row)
+            {
+                Some(paths) => json!({
+                    "path": paths[target], "action": action,
+                    "local_path": paths[0], "remote_path": paths[1],
+                }),
+                None => json!({"path": row.relative, "action": action}),
+            };
             let mut rows: Vec<Value> = plan
                 .rows
                 .iter()
@@ -202,14 +211,19 @@ impl<'a> Synchronize<'a> {
                         }
                         Action::Skip => return None,
                     };
-                    Some(json!({"path": row.relative, "action": action}))
+                    let target = usize::from(matches!(
+                        row.action,
+                        Action::CopyRight | Action::DeleteRight
+                    ));
+                    Some(preview_entry(row, action, target))
                 })
                 .collect();
-            rows.extend(
-                local_deletions
-                    .iter()
-                    .map(|path| json!({"path":path, "action":"delete-local"})),
-            );
+            if self.delete_local {
+                rows.extend(
+                    plan.local_obsolete(masks)
+                        .map(|row| preview_entry(row, "delete-local", 0)),
+                );
+            }
             return Ok(
                 json!({"synchronize": "preview", "local": local, "remote": Session::directory_path(&remote), "changes": rows}),
             );

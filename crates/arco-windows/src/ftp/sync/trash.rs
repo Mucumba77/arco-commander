@@ -240,7 +240,7 @@ impl Session {
         cancel: &AtomicBool,
     ) -> io::Result<()> {
         check_quote_name(&entry.name)?;
-        if entry.directory.is_none() {
+        if entry.directory.is_none() && !entry.symlink {
             return Err(io::Error::other(
                 "Der Servertyp des zu verschiebenden Eintrags ist unbekannt.",
             ));
@@ -285,6 +285,7 @@ impl Session {
         if !find_entry(&listing, &entry.name)?.is_some_and(|target| {
             target.name == entry.name
                 && target.directory == entry.directory
+                && target.symlink == entry.symlink
                 && target.size == entry.size
         }) {
             return Err(io::Error::other(

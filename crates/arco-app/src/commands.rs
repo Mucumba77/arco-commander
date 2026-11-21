@@ -1,7 +1,7 @@
 use crate::app::{
-    App, ArchiveInput, FtpEdit, FtpEndpoint, FtpView, JobDescription, Navigation, NetworkImport,
-    Outcome, PluginFileAction, PromptTicket, SyncReview, SyncSetup, Viewer, ViewerRequest,
-    WdxSearchTarget, ftp_modified, strings,
+    App, ArchiveInput, DraftEditor, FtpEdit, FtpEndpoint, FtpView, JobDescription, Navigation,
+    NetworkImport, Outcome, PluginFileAction, PromptTicket, S3DeleteMode, S3HistoryAction,
+    SyncReview, SyncSetup, Viewer, ViewerRequest, WdxSearchTarget, ftp_modified, strings,
 };
 use crate::panel::{ArchiveTab, FtpLocation, Location, Tab, WfxLocation};
 use crate::preview;
@@ -58,6 +58,7 @@ pub enum Pending {
     PrintText(String, String),
     TransferManager,
     TransferQueueOrder(u64),
+    TransferQueueLimit(u64),
     TransferConflict(crate::app::ConflictTicket),
     ViewSetup(crate::app::ViewSetup),
     Associations(crate::app::AssociationSetup),
@@ -157,12 +158,23 @@ pub enum Pending {
         Option<PathBuf>,
         String,
         crate::app::FtpConnectMode,
+        bool,
     ),
     ScpTransfer(Arc<ftp::Session>, PathBuf),
     S3Tags(Box<(FtpLocation, ftp::Entry, ftp::S3Tags)>),
-    S3History(FtpEndpoint),
+    S3History(FtpEndpoint, S3HistoryAction),
     S3VersionSelect(Box<crate::app::S3History>),
     S3VersionSave(Box<(FtpEndpoint, String, ftp::S3Version, PathBuf)>),
+    S3VersionRestore(Box<(FtpEndpoint, String, ftp::S3Version)>),
+    S3VersionDelete(Box<(FtpEndpoint, String, ftp::S3Version)>, S3DeleteMode),
+    ChooseS3Versioning(FtpEndpoint, String, ftp::S3VersioningConfig),
+    SetS3Versioning(
+        FtpEndpoint,
+        ftp::S3VersioningConfig,
+        ftp::S3VersioningConfig,
+    ),
+    S3DiscardUpload(FtpEndpoint),
+    ConfirmS3DiscardUpload(FtpEndpoint, String),
     WebDavLocks(FtpEndpoint, bool),
     SshJumpPassword(Box<crate::app::SshProfileLogin>),
     FtpProfileDelete(String),
@@ -189,7 +201,13 @@ pub enum Pending {
     FtpDirectory(FtpEndpoint, Option<usize>),
     FtpDownload(FtpEndpoint, PathBuf),
     FtpDownloadList(FtpEndpoint, PathBuf),
-    FtpServerCommand(FtpEndpoint),
+    NetworkCopy(Box<crate::app::NetworkCopy>),
+    FtpServerCommand(FtpEndpoint, Vec<String>, Option<String>),
+    MakeRemoteLink(FtpEndpoint),
+    ChangeRemoteLink(FtpEndpoint, String, String),
+    SshTemplates(Vec<String>),
+    SshTemplate(Option<String>),
+    SshTemplateRemove(String),
     FtpSearch(usize, u64, crate::panel::FtpLocation),
     FtpSearchHit(
         usize,
@@ -199,12 +217,15 @@ pub enum Pending {
     ),
     FtpUpload(FtpEndpoint, PathBuf),
     FtpPanelEdit(FtpLocation, FtpEdit),
+    RemoteMetadata(FtpLocation, Vec<ftp::Entry>),
+    RemoteChecksums(FtpLocation, Vec<ftp::Entry>),
     EncryptedUpload(PathBuf, FtpLocation),
     EncryptedDownload(FtpLocation, ftp::Entry, PathBuf),
     FtpPanelContext,
     FtpEditChoose(Vec<PathBuf>),
     FtpEditAction(PathBuf),
     FtpEditDelete(PathBuf),
+    FtpTextEdit(Box<crate::app::TextEdit>),
     TabMenu,
     TabRename,
     TabList,
@@ -215,6 +236,7 @@ pub enum Pending {
     TabGroupAction(String),
     TabGroupReplace(String),
     TabGroupDelete(String),
+    Workspace(crate::app::WorkspaceDialog),
     TabImport,
     TabExport(Option<String>),
     ApplyTabImport(String, Box<profile::TcTabs>),
@@ -430,16 +452,23 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("Datenträgerbezeichnung ändern", "volume-label"),
     ("Netzwerkprofile …", "ftp-profiles"),
     ("Transfervorgaben verwalten …", "transfer-presets"),
-    ("FTP-Unix-Rechte ändern", "ftp-permissions"),
+    ("Server-Rechte und Besitzer ändern …", "ftp-permissions"),
     ("Server-Änderungszeit setzen", "sftp-modified"),
-    ("SFTP-Prüfsummen berechnen", "sftp-checksums"),
+    ("Server-Prüfsummen berechnen …", "sftp-checksums"),
     ("S3-Objekt-Tags bearbeiten", "s3-tags"),
     ("S3-Versionshistorie", "s3-versions"),
+    ("S3-Version wiederherstellen", "s3-version-restore"),
+    ("S3-Version löschen", "s3-version-delete"),
+    ("S3-Bucket-Versionierung", "s3-versioning"),
+    ("Fortsetzbaren S3-Upload verwerfen", "s3-discard-upload"),
     ("WebDAV-Sperren verwalten", "webdav-locks"),
     ("Verbindungsprofile importieren", "winscp-import"),
     ("Lokalen Ordner überwachen", "network-watch"),
     ("Ordnerüberwachung beenden", "network-watch-stop"),
-    ("Offene FTP-Bearbeitungen", "ftp-edits"),
+    ("Offene Serverbearbeitungen", "ftp-edits"),
+    ("Serverdatei im Texteditor bearbeiten", "ftp-edit-text"),
+    ("Serverlink anlegen", "remote-link-create"),
+    ("Symbolischen Serverlink bearbeiten", "remote-link-edit"),
     ("Ordner-Tab verwalten", "tab-menu"),
     ("Liste der Ordner-Tabs", "tab-list"),
     ("Geschlossenen Ordner-Tab wieder öffnen", "tab-reopen"),
@@ -449,6 +478,8 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "tabs-open-folders-other",
     ),
     ("Tab-Gruppen verwalten", "tab-groups"),
+    ("Arbeitsbereiche verwalten", "workspaces"),
+    ("Aktuellen Arbeitsbereich speichern", "workspace-save"),
     ("Total-Commander-Tabs importieren", "tab-import"),
     ("Ordner-Tabs als .tab exportieren", "tab-export"),
     ("Ordner-Tab sperren oder freigeben", "tab-lock"),
@@ -461,7 +492,8 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("Servereintrag wiederherstellen …", "ftp-trash-restore"),
     ("FTP herunterladen", "ftp-download"),
     ("FTP-Downloadliste …", "ftp-download-list"),
-    ("FTP-Serverbefehl …", "ftp-command"),
+    ("Serverbefehl …", "ftp-command"),
+    ("SSH-Befehlsvorlagen …", "ssh-templates"),
     ("FTP-Verbindungsdetails", "ftp-details"),
     ("FTP-Rohliste", "ftp-raw-list"),
     ("FTP hochladen", "ftp-upload"),
@@ -791,6 +823,21 @@ impl App {
         let ftp = self.current().ftp.is_some();
         let passive = self.panels[1 - side].current();
         let passive_ftp = passive.ftp.is_some();
+        let http_forward = |tab: &crate::panel::Tab| {
+            tab.ftp
+                .as_ref()
+                .is_some_and(|ftp| ftp.location.session.is_http_forward_ftp())
+        };
+        if (http_forward(self.current())
+            && matches!(
+                command,
+                "edit" | "move" | "mkdir" | "delete" | "delete-permanent" | "rename"
+            ))
+            || (http_forward(passive) && matches!(command, "copy" | "move"))
+        {
+            self.status("FTP über HTTP-Forward kann nur als Quelle dienen.");
+            return;
+        }
         if ((self.current().deferred.is_some() || passive.deferred.is_some())
             && matches!(command, "copy" | "move" | "sync"))
             || (self.current().deferred.is_some() && command == "search")
@@ -806,7 +853,7 @@ impl App {
             return;
         }
         if ftp && command == "edit" {
-            self.edit_ftp_file();
+            self.edit_ftp_file(DraftEditor::External);
             return;
         }
         if matches!(command, "copy" | "copy-to-marked" | "zip-extract")
@@ -878,6 +925,8 @@ impl App {
                     | "tab-list"
                     | "tab-reopen"
                     | "tab-groups"
+                    | "workspaces"
+                    | "workspace-save"
                     | "tab-import"
                     | "tab-export"
                     | "tab-lock"
@@ -953,8 +1002,15 @@ impl App {
                     | "sftp-checksums"
                     | "s3-tags"
                     | "s3-versions"
+                    | "s3-version-restore"
+                    | "s3-version-delete"
+                    | "s3-versioning"
+                    | "s3-discard-upload"
                     | "webdav-locks"
                     | "ftp-edits"
+                    | "ftp-edit-text"
+                    | "remote-link-create"
+                    | "remote-link-edit"
                     | "plugins"
                     | "wdx-columns"
                     | "wfx-inspect"
@@ -963,6 +1019,7 @@ impl App {
                     | "ftp-download"
                     | "ftp-download-list"
                     | "ftp-command"
+                    | "ssh-templates"
                     | "ftp-details"
                     | "ftp-raw-list"
                     | "ftp-upload"
@@ -1088,6 +1145,8 @@ impl App {
             "tabs-open-folders" => self.open_selected_folders(side),
             "tabs-open-folders-other" => self.open_selected_folders(1 - side),
             "tab-groups" => self.show_tab_groups(),
+            "workspaces" => self.show_workspaces(),
+            "workspace-save" => self.ask_workspace_name(),
             "tab-import" => self.tab_import_dialog(),
             "tab-export" => self.tab_export_dialog(None),
             "tab-lock" => self.toggle_tab_lock(profile::TabLock::Fixed),
@@ -1295,6 +1354,7 @@ impl App {
             "ftp-connect" | "ftp-list" | "ftp-directory" | "ftp-download" | "ftp-download-list" | "ftp-command" | "ftp-details" | "ftp-raw-list" | "ftp-upload" | "ftp-sync" | "ftp-close"
                 | "ftp-fxp-source" | "ftp-fxp" | "ftp-fxp-clear" => self.ftp_action(command),
             "ftp-profiles" => self.open_ftp_profiles(None),
+            "ssh-templates" => self.open_network_command_templates(),
             "ftp-trash" => {
                 let result = self.open_remote_recycle_bin();
                 self.report(result);
@@ -1330,14 +1390,21 @@ impl App {
             "network-schedule-create" => self.open_network_schedule(),
             "network-schedule-list" => self.list_network_schedule(),
             "ftp-permissions" | "sftp-modified" => self.ftp_panel_edit_dialog(command),
-            "sftp-checksums" => self.sftp_checksums(),
+            "sftp-checksums" => self.ask_remote_checksums(),
             "s3-tags" => self.open_s3_tags(),
-            "s3-versions" => self.open_s3_history(),
+            "s3-versions" => self.open_s3_history(S3HistoryAction::Download),
+            "s3-version-restore" => self.open_s3_history(S3HistoryAction::Restore),
+            "s3-version-delete" => self.open_s3_history(S3HistoryAction::Delete),
+            "s3-versioning" => self.open_s3_versioning(),
+            "s3-discard-upload" => self.ask_s3_discard_upload(),
             "webdav-locks" => self.open_webdav_locks(),
             "winscp-import" => self.open_network_import(),
             "network-watch" => self.open_network_watch(),
             "network-watch-stop" => self.stop_network_watch(),
             "ftp-edits" => self.choose_ftp_draft(),
+            "ftp-edit-text" => self.edit_ftp_file(DraftEditor::Text),
+            "remote-link-create" => self.open_remote_link(false),
+            "remote-link-edit" => self.open_remote_link(true),
             "import-tc" => self.dialog("input", Pending::ImportTc, Dialog {
                 title: "Total-Commander-Profil importieren",
                 description: "Liest lokale Tabs und Verzeichnisfavoriten aus wincmd.ini. Programme und Zugangsdaten werden beim Import übersprungen.",
@@ -1370,6 +1437,8 @@ impl App {
             "job-details" => {
                 if self.job.is_some() {
                     self.ui().set_job_expanded(true);
+                } else if self.has_network_transfers() {
+                    self.open_transfer_manager();
                 } else {
                     self.status("Derzeit läuft kein Auftrag.");
                 }
@@ -1425,6 +1494,14 @@ impl App {
             .or_else(|| self.present_navigation(&pending, &data))
             .or_else(|| self.present_auxiliary(kind, &pending, &data))
             .unwrap_or(kind);
+        self.prepare_job_transfer_form(matches!(
+            &pending,
+            Pending::FtpDownload(..)
+                | Pending::FtpDownloadList(..)
+                | Pending::FtpUpload(..)
+                | Pending::NetworkCopy(_)
+                | Pending::NetworkWatch(..)
+        ));
         self.pending = Some(pending);
         let ui = self.ui();
         ui.set_dialog_transfer_filters(Default::default());
@@ -1585,6 +1662,7 @@ impl App {
             }
             Pending::TransferManager => self.transfer_manager_action(option)?,
             Pending::TransferQueueOrder(id) => self.reorder_transfer(id, option),
+            Pending::TransferQueueLimit(id) => self.set_network_limit(id, value)?,
             Pending::TransferConflict(ticket) => ticket.answer(option, second == "all", value),
             Pending::ViewSetup(setup) => self.submit_view_setup(setup, value, option)?,
             Pending::Associations(setup) => self.submit_association(setup, value, option)?,
@@ -2520,7 +2598,12 @@ impl App {
             Pending::FtpPassword(side, connection) => {
                 self.mount_ftp(side, connection.with_proxy(second)?, value, None, None)?;
             }
-            Pending::FtpProfilePassword(side, connection, local, name, mode) => {
+            Pending::FtpProfilePassword(side, connection, local, name, mode, needs_token) => {
+                let connection = if needs_token {
+                    connection.with_s3_session_token(Zeroizing::new(second.to_owned()))?
+                } else {
+                    connection
+                };
                 self.connect_ftp_secret(side, connection, value, local, name, mode)?;
             }
             Pending::ScpTransfer(session, folder) => {
@@ -2529,21 +2612,23 @@ impl App {
                     session.download_location(&session.initial_directory(), value)?;
                 let input = PathBuf::from(second);
                 let local = if input.is_absolute() {
-                    input
+                    Some(input)
+                } else if upload || !second.is_empty() {
+                    Some(folder.join(tools::output_name(second)?))
                 } else {
-                    folder.join(tools::output_name(if !upload && second.is_empty() {
-                        &name
-                    } else {
-                        second
-                    })?)
+                    None
                 };
                 let session = arco_app::network_transfer::resolve(
                     &self.profile.network_transfer_presets,
                     &session,
                     &directory,
-                    local.parent(),
+                    local.as_deref().and_then(Path::parent).or(Some(&folder)),
                     None,
                 )?;
+                let local = match local {
+                    Some(local) => local,
+                    None => folder.join(session.transfer_settings().names.download(&name)?),
+                };
                 arco_app::network_sync::check_transfer_mask(&session, &name)?;
                 let remote = session.remote_path(&directory)? + &name;
                 let (source, destination) = if upload {
@@ -2553,10 +2638,17 @@ impl App {
                 };
                 let description =
                     JobDescription::new(crate::OperationKind::Ftp, source.clone(), destination);
-                self.enqueue_virtual_operation(
+                let access = vec![
+                    crate::app::TransferAccess::local(&local, !upload),
+                    crate::app::TransferAccess::remote(&session, &directory, Some(&name), upload)?,
+                ];
+                let transfer = self.new_network_transfer(access);
+                let session = transfer.session(&session);
+                self.enqueue_network_transfer(
                     "SCP-Dateitransfer",
                     !upload,
                     description,
+                    transfer,
                     move |job| {
                         job.phase("SSH-Verbindung herstellen …");
                         if upload {
@@ -2584,7 +2676,7 @@ impl App {
                             },
                         ))
                     },
-                );
+                )?;
             }
             Pending::SshJumpPassword(login) => self.continue_ssh_profile(*login, Some(value))?,
             Pending::FtpProfileDelete(name) => self.delete_ftp_profile(&name)?,
@@ -2667,38 +2759,82 @@ impl App {
                 }
             }
             Pending::S3Tags(tags) => self.save_s3_tags(*tags, value)?,
-            Pending::S3History(endpoint) => self.read_s3_history(endpoint, value)?,
+            Pending::S3History(endpoint, action) => {
+                self.read_s3_history(endpoint, action, value)?
+            }
             Pending::S3VersionSelect(history) => self.choose_s3_version(*history, option)?,
             Pending::S3VersionSave(version) => self.save_s3_version(*version, value)?,
+            Pending::S3VersionRestore(version) => self.restore_s3_version(*version),
+            Pending::S3VersionDelete(version, mode) => match mode {
+                S3DeleteMode::Standard | S3DeleteMode::Choose if option == 0 => {
+                    self.delete_s3_version(*version, None)
+                }
+                S3DeleteMode::Choose if option == 1 => {
+                    self.confirm_s3_delete(*version, S3DeleteMode::Mfa)?;
+                }
+                S3DeleteMode::Mfa => {
+                    let mfa = ftp::S3Mfa::new(value, second)?;
+                    self.delete_s3_version(*version, Some(mfa));
+                }
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Ungültige S3-Aktion.",
+                    ));
+                }
+            },
+            Pending::ChooseS3Versioning(endpoint, bucket, current) => {
+                self.choose_s3_versioning(endpoint, bucket, current, option)?;
+            }
+            Pending::SetS3Versioning(endpoint, before, next) => {
+                let mfa = before
+                    .requires_mfa(next)
+                    .then(|| ftp::S3Mfa::new(value, second))
+                    .transpose()?;
+                self.set_s3_versioning(endpoint, before, next, mfa)
+            }
+            Pending::S3DiscardUpload(endpoint) => {
+                self.confirm_s3_discard_upload(endpoint, value)?
+            }
+            Pending::ConfirmS3DiscardUpload(endpoint, name) => {
+                self.discard_s3_upload(endpoint, name)
+            }
             Pending::WebDavLocks(endpoint, directory) => {
                 self.run_webdav_lock_action(endpoint, directory, option, value)?;
             }
             Pending::FtpDownload((session, directory), target) => {
                 let protocol = session.security().label();
                 let (directory, name) = session.download_location(&directory, value)?;
-                let session = arco_app::network_transfer::resolve(
+                let session = self.job_transfer_options()?.resolve(
                     &self.profile.network_transfer_presets,
                     &session,
                     &directory,
                     Some(&target),
-                    None,
                 )?;
                 arco_app::network_sync::check_transfer_mask(&session, &name)?;
-                let target = target.join(tools::output_name(if second.is_empty() {
-                    &name
+                let name_on_disk = if second.is_empty() {
+                    std::ffi::OsString::from(session.transfer_settings().names.download(&name)?)
                 } else {
-                    second
-                })?);
+                    tools::output_name(second)?.to_owned()
+                };
+                let target = target.join(name_on_disk);
                 let source = format!("{directory}{name}");
                 let description = JobDescription::new(
                     crate::OperationKind::Ftp,
                     source.clone(),
                     display_path(&target),
                 );
-                self.enqueue_virtual_operation(
+                let access = vec![
+                    crate::app::TransferAccess::local(&target, true),
+                    crate::app::TransferAccess::remote(&session, &directory, Some(&name), false)?,
+                ];
+                let transfer = self.new_network_transfer(access);
+                let session = transfer.session(&session);
+                self.enqueue_network_transfer(
                     &format!("{protocol}-Download"),
                     true,
                     description,
+                    transfer,
                     move |job| {
                         job.phase(if option == 1 {
                             "Teildatei prüfen …"
@@ -2746,15 +2882,33 @@ impl App {
                             },
                         ))
                     },
-                );
+                )?;
             }
             Pending::FtpDownloadList(endpoint, target) => {
                 self.ftp_download_list(endpoint, target, value)?
             }
-            Pending::FtpServerCommand((session, directory)) => {
-                let command = value.to_owned();
+            Pending::NetworkCopy(copy) => self.prepare_network_copy(*copy, option == 1)?,
+            Pending::MakeRemoteLink(endpoint) => {
+                self.make_remote_link(endpoint, value, second, option);
+            }
+            Pending::ChangeRemoteLink(endpoint, name, previous) => {
+                self.change_remote_link(endpoint, name, previous, value);
+            }
+            Pending::FtpServerCommand((session, directory), selected, profile) => {
+                let commands = if session.security().is_ssh() && option == 1 {
+                    let names = selected.iter().map(String::as_str).collect::<Vec<_>>();
+                    arco_app::network_commands::expand_for_session(
+                        value,
+                        &session,
+                        &directory,
+                        profile.as_deref(),
+                        &names,
+                    )?
+                } else {
+                    vec![value.to_owned()]
+                };
                 self.start_operation_job(
-                    "FTP-Serverbefehl …",
+                    "Serverbefehl …",
                     false,
                     JobDescription::new(
                         crate::OperationKind::Ftp,
@@ -2762,13 +2916,53 @@ impl App {
                         String::new(),
                     ),
                     move |job| {
-                        Ok(Outcome::Text(
-                            "FTP-Serverantwort".into(),
-                            session.server_command(&directory, &command, &job.cancel)?,
-                        ))
+                        let response = if session.security().is_ssh() {
+                            let mut response = String::new();
+                            for (index, command) in commands.iter().enumerate() {
+                                let output =
+                                    session.ssh_command(&directory, command, &job.cancel)?;
+                                if !response.is_empty() {
+                                    response.push_str("\n\n");
+                                }
+                                if commands.len() > 1 {
+                                    response.push_str(&format!(
+                                        "{} / {}\n",
+                                        index + 1,
+                                        commands.len()
+                                    ));
+                                }
+                                response.push_str(&format!("Exit-Code {}", output.status));
+                                if !output.stdout.is_empty() {
+                                    response.push_str("\n");
+                                    response.push_str(&output.stdout);
+                                }
+                                if !output.stderr.is_empty() {
+                                    response.push_str("\nStderr\n");
+                                    response.push_str(&output.stderr);
+                                }
+                                if output.status != 0 || response.len() > 4 * 1024 * 1024 {
+                                    break;
+                                }
+                            }
+                            response
+                        } else {
+                            session.server_command(&directory, &commands[0], &job.cancel)?
+                        };
+                        Ok(Outcome::Text("Serverantwort".into(), response))
                     },
                 );
             }
+            Pending::SshTemplates(names) => {
+                let name = option
+                    .checked_sub(1)
+                    .and_then(|index| names.get(index))
+                    .cloned();
+                self.open_network_command_template(name);
+            }
+            Pending::SshTemplate(name) => {
+                self.edit_network_command_template(name, value, second, option)?
+            }
+            Pending::SshTemplateRemove(name) => self.remove_network_command_template(&name)?,
             Pending::FtpSearch(side, request, location) => {
                 self.search_ftp(side, request, location, value)?;
             }
@@ -2776,8 +2970,8 @@ impl App {
                 self.open_ftp_search_hit(side, request, location, &hits, option)?;
             }
             Pending::FtpUpload((session, directory), source) => {
-                let name = value.to_string();
                 let sftp = session.is_sftp();
+                let s3 = session.security() == ftp::Security::S3;
                 let protocol = session.security().label();
                 let plain_ftp = session.security().is_ftp();
                 let in_panel = self.panels.iter().any(|panel| {
@@ -2786,32 +2980,62 @@ impl App {
                             && ftp.location.directory == directory
                     })
                 });
-                let session = arco_app::network_transfer::resolve(
+                let session = self.job_transfer_options()?.resolve(
                     &self.profile.network_transfer_presets,
                     &session,
                     &directory,
                     source.parent(),
-                    None,
                 )?;
+                let name = if value.is_empty() {
+                    session
+                        .transfer_settings()
+                        .names
+                        .upload(&source.file_name().unwrap_or_default().to_string_lossy())?
+                } else {
+                    value.to_owned()
+                };
                 arco_app::network_sync::check_transfer_mask(&session, &name)?;
                 let description = JobDescription::new(
                     crate::OperationKind::Ftp,
                     display_path(&source),
                     format!("{directory}{name}"),
                 );
-                self.enqueue_virtual_operation(
-                    &format!("{protocol}-Upload"),
-                    in_panel,
-                    description,
-                    move |job| {
-                        job.phase("Datei hochladen …");
-                        if sftp && option == 2 {
-                            let progress = job.ftp_progress(
-                                display_path(&source),
-                                None,
-                                "Datei hochladen …",
-                                "Upload prüfen …",
-                            );
+                let transfer = if in_panel {
+                    Some(self.new_network_transfer(vec![
+                        crate::app::TransferAccess::local(&source, false),
+                        crate::app::TransferAccess::remote(
+                            &session,
+                            &directory,
+                            Some(&name),
+                            true,
+                        )?,
+                    ]))
+                } else {
+                    None
+                };
+                let session = if let Some(transfer) = &transfer {
+                    Arc::new(transfer.session(&session))
+                } else {
+                    session
+                };
+                let work = move |job: crate::app::JobContext| {
+                    job.phase("Datei hochladen …");
+                    if (sftp || s3) && option == 2 {
+                        let progress = job.ftp_progress(
+                            display_path(&source),
+                            None,
+                            "Datei hochladen …",
+                            "Upload prüfen …",
+                        );
+                        if s3 {
+                            session.upload_s3_resuming(
+                                &directory,
+                                &source,
+                                &name,
+                                &job.cancel,
+                                progress,
+                            )?;
+                        } else {
                             session.upload_sftp_resuming(
                                 &directory,
                                 &source,
@@ -2819,40 +3043,58 @@ impl App {
                                 &job.cancel,
                                 progress,
                             )?;
-                        } else if plain_ftp && option == 4 {
-                            session.upload_resuming(&directory, &source, &name, &job.cancel)?;
-                        } else {
-                            let mode = match option {
-                                2 | 3 => ftp::TransferMode::Text,
-                                5 | 6 => ftp::TransferMode::Binary,
-                                _ => session.preferred_transfer_mode(&name),
-                            };
-                            session.upload_with_mode(
-                                &directory,
-                                &source,
-                                &name,
-                                matches!(option, 1 | 3 | 6),
-                                mode,
-                                &job.cancel,
-                            )?;
                         }
-                        if in_panel {
-                            return Ok(Outcome::Report(
-                                format!("{protocol}-Upload · {name}"),
-                                TransferReport {
-                                    completed: 1,
-                                    ..Default::default()
-                                },
-                            ));
-                        }
-                        let listing = session.list(&directory, &job.cancel)?;
-                        Ok(Outcome::Ftp(FtpView {
-                            session,
-                            directory,
-                            listing,
-                        }))
-                    },
-                );
+                    } else if plain_ftp && option == 4 {
+                        let progress = job.ftp_progress(
+                            display_path(&source),
+                            None,
+                            "Datei hochladen …",
+                            "Upload prüfen …",
+                        );
+                        session.upload_resuming_with_progress(
+                            &directory,
+                            &source,
+                            &name,
+                            &job.cancel,
+                            progress,
+                        )?;
+                    } else {
+                        let mode = match option {
+                            2 | 3 => ftp::TransferMode::Text,
+                            5 | 6 => ftp::TransferMode::Binary,
+                            _ => session.preferred_transfer_mode(&name),
+                        };
+                        session.upload_with_mode(
+                            &directory,
+                            &source,
+                            &name,
+                            matches!(option, 1 | 3 | 6),
+                            mode,
+                            &job.cancel,
+                        )?;
+                    }
+                    if in_panel {
+                        return Ok(Outcome::Report(
+                            format!("{protocol}-Upload · {name}"),
+                            TransferReport {
+                                completed: 1,
+                                ..Default::default()
+                            },
+                        ));
+                    }
+                    let listing = session.list(&directory, &job.cancel)?;
+                    Ok(Outcome::Ftp(FtpView {
+                        session,
+                        directory,
+                        listing,
+                    }))
+                };
+                let label = format!("{protocol}-Upload");
+                if let Some(transfer) = transfer {
+                    self.enqueue_network_transfer(&label, true, description, transfer, work)?;
+                } else {
+                    self.enqueue_virtual_operation(&label, false, description, work);
+                }
             }
             Pending::EncryptedUpload(source, remote) => {
                 self.start_encrypted_upload(source, remote, value, second)?;
@@ -2863,6 +3105,10 @@ impl App {
             Pending::FtpPanelEdit(location, edit) => {
                 self.execute_ftp_edit(location, edit, value)?
             }
+            Pending::RemoteMetadata(..) => {}
+            Pending::RemoteChecksums(location, entries) => {
+                self.remote_checksums(location, entries, option)
+            }
             Pending::FtpEditChoose(paths) => {
                 if let Some(path) = paths.get(option) {
                     self.review_ftp_draft(path);
@@ -2870,6 +3116,10 @@ impl App {
             }
             Pending::FtpEditAction(path) => self.ftp_draft_action(&path, option)?,
             Pending::FtpEditDelete(path) => self.delete_ftp_draft(&path)?,
+            Pending::FtpTextEdit(edit) => {
+                edit.save(value)?;
+                self.review_ftp_draft(&edit.path);
+            }
             Pending::TabMenu => self.tab_menu_action(option),
             Pending::TabRename => self.rename_tab(value)?,
             Pending::TabList => self.select_tab(option),
@@ -2880,6 +3130,7 @@ impl App {
             Pending::TabGroupAction(name) => self.tab_group_action(&name, option)?,
             Pending::TabGroupReplace(name) => self.load_tab_group(&name, true)?,
             Pending::TabGroupDelete(name) => self.delete_tab_group(&name)?,
+            Pending::Workspace(dialog) => self.workspace_dialog(dialog, value, option)?,
             Pending::TabImport => self.read_tab_import(value, second)?,
             Pending::TabExport(group) => self.write_tab_export(group.as_deref(), value, option)?,
             Pending::ApplyTabImport(name, import) => self.save_imported_tabs(&name, *import)?,
@@ -4219,12 +4470,16 @@ impl App {
         };
         let sftp = session.is_sftp();
         let plain_ftp = session.security().is_ftp();
-        if !plain_ftp
+        if session.is_http_forward_ftp()
             && matches!(
                 command,
-                "ftp-raw-list" | "ftp-command" | "ftp-fxp-source" | "ftp-fxp"
+                "ftp-command" | "ftp-upload" | "ftp-fxp-source" | "ftp-fxp"
             )
         {
+            self.status("FTP über HTTP-Forward kann nur als Quelle dienen.");
+            return;
+        }
+        if !plain_ftp && matches!(command, "ftp-raw-list" | "ftp-fxp-source" | "ftp-fxp") {
             self.status("Dieser Befehl benötigt eine FTP-Verbindung.");
             return;
         }
@@ -4249,13 +4504,27 @@ impl App {
             }
             "ftp-download" => self.ftp_download_dialog(""),
             "ftp-download-list" => self.ftp_download_list_dialog((session, directory)),
-            "ftp-command" => self.dialog("input", Pending::FtpServerCommand((session, directory)), Dialog {
+            "ftp-command" if session.security().is_ssh() => {
+                let endpoint = (session, directory);
+                let (selected, profile) = self.ssh_command_selection(&endpoint);
+                self.dialog("input", Pending::FtpServerCommand(endpoint, selected, profile), Dialog {
+                    title: "SSH-Serverbefehl",
+                    description: "Vorlagen verwenden ! für einen Eintrag, !& für die Auswahl und !/ für den Serverordner. Sitzungsdaten liefern !@, !U, !#, !N und !S.",
+                    placeholder: "pwd",
+                    options: &["Direkter Befehl", "Befehlsvorlage"],
+                    options_label: "Modus",
+                    confirm_label: "Ausführen",
+                    ..Default::default()
+                });
+            }
+            "ftp-command" if plain_ftp => self.dialog("input", Pending::FtpServerCommand((session, directory), Vec::new(), None), Dialog {
                 title: "FTP-Serverbefehl",
                 description: "Gib einen FTP-Befehl für den aktuellen Ordner ein, zum Beispiel FEAT oder PWD.",
                 placeholder: "FEAT",
                 confirm_label: "Senden",
                 ..Default::default()
             }),
+            "ftp-command" => self.status("Dieser Befehl benötigt FTP, FTPS, SFTP oder SCP."),
             "ftp-details" | "ftp-raw-list" => {
                 let raw = command == "ftp-raw-list";
                 let title = if raw { "FTP-Rohliste" } else { "Verbindungsdetails" };
@@ -4282,11 +4551,6 @@ impl App {
                     self.status("Wähle eine lokale Datei für den FTP-Upload.");
                     return;
                 };
-                let name = source
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
                 let options = [
                     crate::locale::tr("Profilvorgabe · Ziel muss neu sein"),
                     crate::locale::tr("Profilvorgabe · Überschreiben erlauben"),
@@ -4296,12 +4560,15 @@ impl App {
                     crate::locale::tr("Binär · Ziel muss neu sein"),
                     crate::locale::tr("Binär · Überschreiben erlauben"),
                 ];
-                let sftp_options = [options[0], options[1], crate::locale::tr("Fortsetzbar · Ziel muss neu sein")];
+                let resume_options = [options[0], options[1], crate::locale::tr("Fortsetzbar · Ziel muss neu sein")];
+                let s3 = session.security() == ftp::Security::S3;
                 let protocol = session.security().label();
+                let detail = if plain_ftp { "Die Datei wird direkt an den Server übertragen. Nach einem Abbruch kann dort eine Teildatei liegen." } else if s3 { "Fortsetzbare Multipart-Uploads behalten bestätigte Teile nach einem Abbruch." } else { "Wähle die Regel für vorhandene Dateien." };
+                let description = format!("{}\n{}", display_path(&source), crate::locale::tr(detail));
                 self.dialog("input", Pending::FtpUpload((session, directory), source), Dialog {
-                    title: &format!("{protocol} hochladen"), value: &name, placeholder: "Entfernter Dateiname",
-                    description: if plain_ftp { "Die Datei wird direkt an den Server übertragen. Nach einem Abbruch kann dort eine Teildatei liegen." } else { "Wähle einen Zielnamen und die Regel für vorhandene Dateien." },
-                    options: if sftp { &sftp_options } else if plain_ftp { &options } else { &options[..2] }, ..Default::default()
+                    title: &format!("{protocol} hochladen"), placeholder: "Entfernter Dateiname (leer übernimmt den Namen nach Vorgabe)",
+                    description: &description,
+                    options: if sftp || s3 { &resume_options } else if plain_ftp { &options } else { &options[..2] }, ..Default::default()
                 });
             }
             "ftp-close" if self.job.is_none() => self.disconnect_ftp(),
@@ -4350,7 +4617,7 @@ impl App {
             return;
         }
         let sftp = endpoint.0.is_sftp();
-        let plain_ftp = endpoint.0.security().is_ftp();
+        let plain_ftp = endpoint.0.security().is_ftp() && !endpoint.0.is_http_forward_ftp();
         let protocol = endpoint.0.security().label();
         let options = [
             crate::locale::tr("Mit Profilvorgabe herunterladen"),
@@ -4393,10 +4660,7 @@ impl App {
             },
             "open" if entry.is_some_and(|entry| entry.directory == Some(true)) => {
                 let name = &entry.expect("selected FTP directory").name;
-                match view
-                    .session
-                    .relative_directory(&view.directory, Path::new(name))
-                {
+                match view.session.child_directory(&view.directory, name) {
                     Ok(folder) => self.load_ftp(view.session.clone(), folder),
                     Err(error) => self.status(error.to_string()),
                 }

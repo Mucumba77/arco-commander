@@ -1,5 +1,56 @@
 # Änderungen
 
+## 1.8.0 · 21. November 2026
+
+- Bei F5 zwischen geeigneten FTP-Servern lässt sich der direkte FXP-Weg wählen. Die Kopiervorschau berücksichtigt Ordner, Masken und Zielkonflikte. Der Auftrag erscheint separat im Transfermanager.
+- FTP-Direkttransfers (FXP) funktionieren auch über IPv6. Arco prüft Zielnamen am tatsächlich verbundenen Zielserver und meldet Ablehnungen und verkürzte Transfers im Auftrag.
+- `arco-net` verarbeitet mit `rm` und `rmdir` mehrere Serverpfade. `rm` unterstützt Dateimasken, rekursive Ordner und den Server-Papierkorb.
+- Fortsetzbare SFTP-Downloads behalten die bereits geladenen Teilbereiche auch nach einem Abbruch oder Neustart. Arco prüft die Teilstände und lädt die fehlenden Daten über die verfügbaren Verbindungen.
+- Downloadlisten und F5-Netzwerkkopien können unabhängige Dateien parallel innerhalb desselben Auftrags übertragen. Verbindungen und Durchsatzlimit werden gemeinsam verwaltet.
+
+- Große SFTP-Dateien lassen sich über mehrere Verbindungen parallel herunterladen. Arco prüft die Teilbereiche vor dem Freigeben der Zieldatei und teilt das Durchsatzlimit auf die Verbindungen auf.
+- Das Durchsatzlimit für laufende Netzwerkaufträge ist im Transfermanager einstellbar. SFTP, SCP, der interne FTP-Transport und unterstützte Downloads übernehmen Änderungen im Datenstrom.
+- Der Transfermanager führt unabhängige Netzwerkaufträge parallel aus. Er zeigt Fortschritt und Abbruch pro Auftrag an und lässt Aufträge mit überlappenden Schreibpfaden warten. Die Anzahl gleichzeitiger Aufträge ist einstellbar.
+- Fortsetzbare FTP- und FTPS-Transfers verbinden sich nach einer Unterbrechung bis zu zweimal neu. Arco prüft Teildateien vor dem Fortsetzen und kontrolliert bei einer verlorenen Upload-Abschlussantwort den vollständigen Dateiinhalt.
+- Netzwerkaufträge können eine eigene Transfervorgabe und ein Durchsatzlimit verwenden. F5 berücksichtigt die gewählte Vorgabe bereits in der Kopiervorschau. Gespeicherte Profile behalten ihre Werte.
+- Rückübertragungen für dieselbe Serverdatei werden über Arco-Instanzen einer Windows-Anmeldesitzung hinweg koordiniert. Der lokale FTPS-Referenzlauf prüft konkurrierende Rückübertragungen in beiden TLS-Modi.
+- SFTP- und SCP-Dateifenster zeigen symbolische Links mit eigenem Symbol, öffnen deren Ziele und löschen oder recyceln die Links als einzelne Servereinträge. Der Abgleich schützt gleichnamige Einträge auf beiden Seiten.
+- Symbolische Serverlinks lassen sich über SFTP, SCP und FTP/FTPS mit `SITE SYMLINK` anlegen. SFTP und SCP unterstützen außerdem harte Links bei Serverunterstützung und das Ändern symbolischer Linkziele nach erneuter Prüfung. Dieselben Aktionen stehen in `arco-net` bereit.
+- Server-Arbeitskopien können im integrierten Texteditor geöffnet und pro Datei nach dem Speichern automatisch zurückübertragen werden. Konflikte oder Abbrüche halten die Automatik an und erhalten die Arbeitskopie.
+- WebDAV folgt Weiterleitungen für Ordner und Downloads. Profiloptionen erlauben separat andere Hosts oder Ports sowie den Wechsel von HTTPS auf HTTP. Arco übernimmt beide Einstellungen aus WinSCP und bindet Zugangsdaten an den ursprünglichen Server.
+- WebDAV-Profile unterstützen die Windows-Anmeldung über Negotiate und eine Option für nicht kodierte Sonderzeichen in Ressourcenadressen. Der WinSCP-Import übernimmt die Kompatibilitätsoption. WebDAV-Downloads verwenden den IIS-Header `Translate: f`.
+- Arco zeigt den S3-Schutzstatus MFA Delete an und unterstützt geschützte Versionslöschungen und Änderungen der Bucket-Versionierung im Dialog und im Skript. Einmalcodes werden nur über HTTPS gesendet.
+- S3-Profile nehmen temporäre Schlüssel mit Sitzungstoken und eine IAM-Rollen-ARN direkt an. Token können im Windows-Anmeldeinformationsspeicher hinterlegt oder in Skripten über eine Umgebungsvariable übergeben werden. Der WinSCP-Import übernimmt die Rollen-ARN.
+- S3-Bucket-Versionierung lässt sich anzeigen, aktivieren und aussetzen. Dateiversionen und Löschmarkierungen mit unveränderlicher ID lassen sich gezielt löschen. `arco-net` kann die Historie anzeigen, Versionen herunterladen und wiederherstellen sowie Bucket-Versionierung abfragen und ändern.
+- S3-Profile unterstützen Virtual-Host-Adressierung und eine ausdrückliche Kostenübernahme für Requester-Pays-Buckets. Der WinSCP-Import übernimmt beide Einstellungen.
+- S3-Multipart-Uploads lassen sich mit bestätigten Teilen über Sitzungs- und Programmneustarts fortsetzen. Die Oberfläche und `arco-net` bieten eine Funktion zum Verwerfen gespeicherter Uploads.
+- Ältere S3-Dateiversionen lassen sich auf dem Server als neuer aktueller Stand wiederherstellen. Bei Versionen über 5 GiB verwendet Arco eine Multipart-Kopie mit Fortschrittsanzeige, übernimmt Tags und Metadaten und prüft den Zielstand vor dem Abschluss.
+- SFTP und SCP unterstützen mehrere verifizierte SHA256-Hostschlüssel für einen Schlüsselwechsel. Die Verbindungsdetails zeigen den tatsächlich verwendeten Schlüssel. WinSCP- und OpenSSH-Importe übernehmen passende Alternativen. Skripte können die Schlüssel mit `open -hostkey=…` vorgeben oder eingrenzen.
+- Netzwerkprofile können den HTTP-Proxy für die eingegebene Serveradresse aus den Windows-Einstellungen ermitteln. Arco wertet Proxy-Skripte und Ausnahmen für das Ziel aus und schlägt die Adresse zur Übernahme vor.
+- SFTP und SCP können lokale Proxy-Programme über Standardeingabe und Standardausgabe verwenden. Netzwerkprofile können SSH-Zielnamen lokal auflösen. Der WinSCP-Import übernimmt beide Einstellungen.
+- SFTP und SCP handeln bei HTTP-CONNECT Digest oder Basic aus. SOCKS5 bietet mit hinterlegten Zugangsdaten CHAP und die Benutzername-Passwort-Anmeldung an.
+- Klartext-FTP lässt sich über einen HTTP(S)-Forward-Proxy öffnen. Arco zeigt HTML-Verzeichnislisten in beiden Dateifenstern und lädt Dateien und Ordner per HTTP GET herunter.
+- SFTP und SCP unterstützen Telnet-/TCP-Proxys mit WinSCP-kompatiblen Befehlsvorlagen. Der WinSCP-Profilimport übernimmt Adresse, Vorlage und Benutzerkennung.
+- FTP-Profile unterstützen Legacy-S/KEY-Anmeldungen nach RFC 1760 mit Sechswort-Antworten. RFC-2289-Anmeldungen behalten ihr Hexadezimalformat.
+- FTP-Netzwerkprofile unterstützen die acht von WinSCP dokumentierten Gateway-Anmeldeverfahren und übernehmen die Verfahrenswahl aus WinSCP-Profilen. `SITE` und `OPEN` können sich vor der Zielauswahl am Gateway anmelden.
+- FTP und der eingebaute SSH-Transport unterstützen SOCKS4 und SOCKS4a mit Benutzerkennung. Der WinSCP-Profilimport übernimmt die Kennung und die DNS-Auswahl.
+
+- Benannte Arbeitsbereiche speichern beide Tab-Leisten, aktive Seite, Fensteraufteilung und gekoppelte Navigation. Sie lassen sich über das Menü, eine Windows-Verknüpfung oder `--workspace` öffnen.
+- Arbeitsbereiche lassen sich automatisch speichern und wieder öffnen. Arco importiert lokale und entfernte WinSCP-Tabs aus einer INI-Datei oder der Windows-Registrierung und zeigt zuletzt genutzte Arbeitsbereiche optional in der Windows-Sprungliste an.
+- Server-Prüfsummen für FTP, FTPS und SFTP sind im Netzwerkmenü und mit optionalem Algorithmus im Skript verfügbar.
+- Netzwerkprofile lassen sich in verschachtelten Verbindungsordnern organisieren und filtern. Ordneränderungen erhalten bestehende Profilnamen und Verknüpfungen.
+- Serverrechte sowie numerische Besitzer- und Gruppen-IDs lassen sich für SFTP und SCP einzeln oder rekursiv ändern. FTP und FTPS unterstützen rekursive Modusänderungen mit `SITE CHMOD`.
+- Netzwerkprofile und Transfervorgaben speichern Regeln für die Schreibweise von Zielnamen und die Windows-Namenskonvertierung. Einzeltransfers, Listen und Ordnerkopien verwenden die Regeln auch im Skript.
+- Netzwerkabgleich und Ordnerüberwachung ordnen umgewandelte Namen einander zu. Die Vorschau zeigt beide Pfade. Vor dem Löschen prüft Arco erneut, ob inzwischen ein gleichwertiger Gegenname existiert.
+- Kopien zwischen zwei Serverfenstern berücksichtigen die Downloadregel der Quelle und die Uploadregel des Ziels. Die Vorschau zeigt beide Servernamen.
+- Netzwerkskripte übernehmen `FileNameCase` und die reversible Windows-Namensumwandlung über WinSCP-kompatible `-rawtransfersettings`.
+- SFTP- und SCP-Serverbefehle laufen über Arcos SSH-Verbindung. Befehlsvorlagen nehmen markierte Dateien oder den aktuellen Serverordner als Argumente. Im Skript stehen dafür `call` und `call -template` bereit.
+- Benannte SSH-Befehlsvorlagen lassen sich über das Netzwerkmenü verwalten und per `call -saved` aufrufen.
+- SSH-Befehlsvorlagen können Host, Benutzer, Port, Profilname und Sitzungsadresse als Argumente übergeben.
+- SCP-Prüfsummen werden mit GNU-Prüfprogrammen am Server berechnet.
+- Gespeicherte Tabs unterstützen auch native SFTP-, SCP-, WebDAV- und S3-Pfade.
+- Netzwerkprofile können die Navigation beim Verbinden koppeln. Der WinSCP-Import übernimmt die Option `SynchronizeBrowsing`.
+
 ## 1.7.0 · 19. November 2026
 
 - SFTP-Profile können die vorherige Serverdatei beim bestätigten Überschreiben im Server-Papierkorb sichern. Die Sicherung ist getrennt vom Papierkorb für Löschvorgänge einstellbar.

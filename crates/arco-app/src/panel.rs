@@ -200,11 +200,15 @@ impl ArchiveTab {
 pub struct FtpTab {
     pub location: FtpLocation,
     pub listing: ftp::Listing,
+    pub name_aliases: std::collections::BTreeMap<PathBuf, String>,
 }
 
 impl FtpTab {
     pub fn entry(&self, path: &Path) -> Option<&ftp::Entry> {
-        let name = path.to_str()?;
+        let name = match self.name_aliases.get(path) {
+            Some(raw) => raw,
+            None => path.to_str()?,
+        };
         self.listing.entries.iter().find(|entry| entry.name == name)
     }
 }
@@ -237,7 +241,7 @@ impl Panel {
                         .options
                         .virtual_tab
                         .take()
-                        .filter(|location| location.tc_path().is_some());
+                        .and_then(VirtualTab::for_restore);
                     let shell = tab.options.shell.take();
                     if cfg!(windows)
                         && let Some(address) = shell.as_deref()
@@ -315,6 +319,7 @@ impl Panel {
                         Location::Local(_) => (),
                     }
                 }
+                options.virtual_tab = options.virtual_tab.and_then(VirtualTab::for_restore);
                 options
             })
             .collect();
@@ -362,11 +367,7 @@ impl Panel {
                         } => plugin.as_str().into(),
                     };
                     item.label = short_label(&label, 14);
-                    item.path = deferred
-                        .tc_path()
-                        .unwrap_or_default()
-                        .replace('\t', " · ")
-                        .into();
+                    item.path = deferred.saved_label().unwrap_or_default().into();
                 }
                 if !tab.options.title.is_empty() {
                     item.label = short_label(&tab.options.title, 14);
@@ -379,11 +380,7 @@ impl Panel {
                 item
             })
             .collect();
-        let deferred_path = tab
-            .deferred
-            .as_ref()
-            .and_then(VirtualTab::tc_path)
-            .map(|path| path.replace('\t', " · "));
+        let deferred_path = tab.deferred.as_ref().and_then(VirtualTab::saved_label);
         let crumbs = match &deferred_path {
             Some(path) => vec![PathItem {
                 label: short_label(path, 48),
@@ -581,6 +578,7 @@ impl Tab {
                 ftp::ListFormat::Mlsd => "FTP · MLSD",
                 ftp::ListFormat::List => "FTP · LIST",
                 ftp::ListFormat::Names => tr("FTP · Namensliste"),
+                ftp::ListFormat::HttpForward => "FTP · HTTP-Forward",
                 ftp::ListFormat::Sftp => "SFTP · SSH",
                 ftp::ListFormat::Scp => "SCP · SSH",
                 ftp::ListFormat::WebDav => "WebDAV",
@@ -1688,6 +1686,7 @@ mod tests {
         tab.change_location(&location, None);
         tab.ftp = Some(FtpTab {
             location: ftp,
+            name_aliases: Default::default(),
             listing: ftp::Listing {
                 entries: Vec::new(),
                 format: ftp::ListFormat::Mlsd,
@@ -1917,6 +1916,38 @@ mod tests {
         assert_eq!(restored.current().options.title, "Projekt");
         assert_eq!(restored.current().lock_base, Some(Location::Local(base)));
         assert_eq!(restored.current().options.lock, TabLock::ReturnToBase);
+    }
+
+    #[test]
+    fn native_network_tabs_keep_their_server_paths_after_restoring_panels() {
+        let temp = tempfile::tempdir().unwrap();
+        for address in [
+            "sftp://example.test/projects/",
+            "scp://example.test/backup/",
+            "https://example.test/webdav/team/",
+            "http://example.test/s3/bucket/",
+        ] {
+            let target = VirtualTab::Ftp {
+                profile: "Test".into(),
+                url: Some(address.into()),
+            };
+            let panel = Panel::from_saved(
+                SavedPanel {
+                    tabs: vec![temp.path().to_owned()],
+                    tab_options: vec![SavedTab {
+                        virtual_tab: Some(target.clone()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                temp.path(),
+            );
+            assert_eq!(panel.current().deferred.as_ref(), Some(&target));
+            assert_eq!(
+                panel.saved().tab_options[0].virtual_tab.as_ref(),
+                Some(&target)
+            );
+        }
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::profile::{FtpAddressFamily, FtpProfile, FtpSecurity, read_tc_text};
+use crate::profile::{FtpAddressFamily, FtpGateway, FtpProfile, FtpSecurity, read_tc_text};
 use base64::{Engine, engine::general_purpose::STANDARD_NO_PAD};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -8,12 +8,65 @@ use url::Url;
 use zeroize::Zeroizing;
 
 pub type ImportedSite = (String, io::Result<FtpProfile>);
+type SessionFields = BTreeMap<String, String>;
+type SessionRecords = Vec<(String, SessionFields)>;
+type HostKeys<'a> = BTreeMap<String, Option<&'a str>>;
+
+mod workspaces;
+pub use workspaces::{ImportedWorkspace, WorkspaceTab, read_workspaces, registry_workspaces};
+
+pub const WINSCP_FIELDS: &[&str] = &[
+    "HostName",
+    "PortNumber",
+    "UserName",
+    "FSProtocol",
+    "Ftps",
+    "RemoteDirectory",
+    "LocalDirectory",
+    "SynchronizeBrowsing",
+    "PublicKeyFile",
+    "SshHostKey",
+    "AddressFamily",
+    "Timeout",
+    "FtpPasvMode",
+    "ProxyMethod",
+    "FtpProxyLogonType",
+    "ProxyHost",
+    "ProxyPort",
+    "ProxyDNS",
+    "ProxyTelnetCommand",
+    "ProxyLocalCommand",
+    "ProxyUsername",
+    "Tunnel",
+    "WebDavLiberalEscaping",
+    "WebDavCrossDomainRedirects",
+    "WebDavUnencryptedRedirects",
+    "S3DefaultRegion",
+    "S3UrlStyle",
+    "S3RequesterPays",
+    "S3RoleArn",
+    "TlsClientCertificateFile",
+    "Workspace",
+    "IsWorkspace",
+    "Link",
+    "NameOverride",
+    "OtherLocalDirectory",
+    "AuthGSSAPIKEX",
+];
 
 pub fn read_sites(path: &Path) -> io::Result<Vec<ImportedSite>> {
     parse_sites(&Zeroizing::new(read_tc_text(path)?))
 }
 
 fn parse_sites(input: &str) -> io::Result<Vec<ImportedSite>> {
+    let (sites, host_keys) = parse_records(input)?;
+    Ok(sites
+        .into_iter()
+        .map(|(name, fields)| (name, site(&fields, &host_keys)))
+        .collect())
+}
+
+fn parse_records(input: &str) -> io::Result<(SessionRecords, HostKeys<'_>)> {
     let mut sites = Vec::new();
     let mut host_keys = BTreeMap::new();
     let mut section = None;
@@ -52,30 +105,10 @@ fn parse_sites(input: &str) -> io::Result<Vec<ImportedSite>> {
             && let Some((key, value)) = line.split_once('=')
         {
             let key = key.trim().to_ascii_lowercase();
-            if matches!(
-                key.as_str(),
-                "hostname"
-                    | "portnumber"
-                    | "username"
-                    | "fsprotocol"
-                    | "ftps"
-                    | "remotedirectory"
-                    | "localdirectory"
-                    | "publickeyfile"
-                    | "sshhostkey"
-                    | "addressfamily"
-                    | "timeout"
-                    | "ftppasvmode"
-                    | "proxymethod"
-                    | "proxyhost"
-                    | "proxyport"
-                    | "proxyusername"
-                    | "tunnel"
-                    | "s3defaultregion"
-                    | "tlsclientcertificatefile"
-                    | "workspace"
-                    | "authgssapikex"
-            ) {
+            if WINSCP_FIELDS
+                .iter()
+                .any(|field| field.eq_ignore_ascii_case(&key))
+            {
                 sites[index].1.insert(key, unmunge(value.trim()));
             }
         }
@@ -85,10 +118,7 @@ fn parse_sites(input: &str) -> io::Result<Vec<ImportedSite>> {
             "Die Datei enthält keine gespeicherten WinSCP-Sitzungen.",
         ));
     }
-    Ok(sites
-        .into_iter()
-        .map(|(name, fields)| (name, site(&fields, &host_keys)))
-        .collect())
+    Ok((sites, host_keys))
 }
 
 pub(super) fn site(
@@ -96,7 +126,7 @@ pub(super) fn site(
     host_keys: &BTreeMap<String, Option<&str>>,
 ) -> io::Result<FtpProfile> {
     let value = |key| fields.get(key).map(String::as_str).unwrap_or_default();
-    if flag(value("workspace")) || flag(value("tunnel")) {
+    if flag(value("isworkspace")) || flag(value("workspace")) || flag(value("tunnel")) {
         return Err(invalid(
             "Dieser WinSCP-Eintrag benötigt einen Arbeitsbereich oder SSH-Tunnel.",
         ));
@@ -163,24 +193,75 @@ pub(super) fn site(
             segments.push(part);
         }
     }
-    let proxy = match value("proxymethod") {
-        "" | "0" => String::new(),
-        "2" | "3" => {
-            let scheme = if value("proxymethod") == "2" {
-                "socks5h"
-            } else {
-                "http"
-            };
-            let mut proxy = host_url(scheme, value("proxyhost"))?;
-            proxy
-                .set_port(Some(number(value("proxyport"), 8080)?))
-                .map_err(|_| invalid("Ungültiger Proxy-Port."))?;
-            proxy.to_string()
+    let ftp_gateway = match value("ftpproxylogontype") {
+        "" | "0" => None,
+        "1" => Some(FtpGateway::Site),
+        "2" => Some(FtpGateway::ProxyThenUserAtHost),
+        "3" => Some(FtpGateway::Open),
+        "4" => Some(FtpGateway::ProxyThenUser),
+        "5" => Some(FtpGateway::UserAtHost),
+        "6" => Some(FtpGateway::ProxyAtHostThenUser),
+        "7" => Some(FtpGateway::UserAtHostAndProxy),
+        "8" => Some(FtpGateway::UserAtProxyAtHost),
+        _ => return Err(invalid("Unbekannte WinSCP-FTP-Gateway-Anmeldung.")),
+    };
+    let proxy = if ftp_gateway.is_some() {
+        if security != FtpSecurity::Plain {
+            return Err(invalid("Die FTP-Gateway-Anmeldung benötigt Klartext-FTP."));
         }
-        _ => {
-            return Err(invalid(
-                "Dieser Proxy-Typ oder seine Anmeldung benötigt eine manuelle Einrichtung.",
-            ));
+        let host = value("proxyhost").trim();
+        let mut proxy = match host_url("ftp", host) {
+            Ok(proxy) => proxy,
+            Err(_) => Url::parse(&format!("ftp://{host}")).map_err(io::Error::other)?,
+        };
+        if proxy.host_str().is_none()
+            || !proxy.username().is_empty()
+            || proxy.password().is_some()
+            || proxy.query().is_some()
+            || proxy.fragment().is_some()
+            || proxy.path() != "/"
+            || host.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+        {
+            return Err(invalid("Ungültige WinSCP-FTP-Gateway-Adresse."));
+        }
+        if proxy.port().is_none() && !host.ends_with(":21") {
+            proxy
+                .set_port(Some(number(value("proxyport"), 21)?))
+                .map_err(|_| invalid("Ungültiger Proxy-Port."))?;
+        }
+        proxy.to_string()
+    } else {
+        match value("proxymethod") {
+            "" | "0" => String::new(),
+            "1" | "2" | "3" => {
+                let (scheme, default_port) = match (value("proxymethod"), value("proxydns")) {
+                    ("1", "2") => ("socks4a", 1080),
+                    ("1", _) => ("socks4", 1080),
+                    ("2", "0") => ("socks5", 1080),
+                    ("2", _) => ("socks5h", 1080),
+                    _ => ("http", 8080),
+                };
+                let mut proxy = host_url(scheme, value("proxyhost"))?;
+                proxy
+                    .set_port(Some(number(value("proxyport"), default_port)?))
+                    .map_err(|_| invalid("Ungültiger Proxy-Port."))?;
+                proxy.to_string()
+            }
+            "4" | "Telnet" if matches!(security, FtpSecurity::Sftp | FtpSecurity::Scp) => {
+                let mut proxy = host_url("telnet", value("proxyhost"))?;
+                proxy
+                    .set_port(Some(number(value("proxyport"), 23)?))
+                    .map_err(|_| invalid("Ungültiger Telnet-Proxy-Port."))?;
+                proxy.to_string()
+            }
+            "5" | "Cmd" if security.is_ssh() && !value("proxylocalcommand").trim().is_empty() => {
+                "local://command".to_owned()
+            }
+            _ => {
+                return Err(invalid(
+                    "Dieser Proxy-Typ oder seine Anmeldung benötigt eine manuelle Einrichtung.",
+                ));
+            }
         }
     };
     let address_family = match value("addressfamily") {
@@ -211,37 +292,78 @@ pub(super) fn site(
     let pin = if !security.is_ssh() {
         String::new()
     } else if !value("sshhostkey").is_empty() {
-        fingerprint(value("sshhostkey"))
+        crate::ssh_host_keys::HostKeyPins::parse(value("sshhostkey"))?.to_string()
     } else {
         cached_fingerprint(host_keys, address.host_str().unwrap_or_default(), port)
             .unwrap_or_default()
     };
+    let active = proxy.is_empty()
+        && matches!(
+            security,
+            FtpSecurity::Plain | FtpSecurity::ExplicitTls | FtpSecurity::ImplicitTls
+        )
+        && value("ftppasvmode") == "0";
+    let ssh_proxy_dns_locally = security.is_ssh() && !proxy.is_empty() && value("proxydns") == "0";
     Ok(FtpProfile {
         address: address.to_string(),
         user: user.to_owned(),
         security,
         proxy,
-        proxy_user: if matches!(value("proxymethod"), "2" | "3") {
+        ssh_proxy_dns_locally,
+        telnet_proxy_command: match value("proxymethod") {
+            "4" | "Telnet" => value("proxytelnetcommand").to_owned(),
+            _ => String::new(),
+        },
+        local_proxy_command: match value("proxymethod") {
+            "5" | "Cmd" => value("proxylocalcommand").to_owned(),
+            _ => String::new(),
+        },
+        ftp_gateway: ftp_gateway.unwrap_or_default(),
+        proxy_user: if ftp_gateway.map_or_else(
+            || {
+                matches!(
+                    value("proxymethod"),
+                    "1" | "2" | "3" | "4" | "Telnet" | "5" | "Cmd"
+                )
+            },
+            FtpGateway::supports_proxy_login,
+        ) {
             value("proxyusername").to_owned()
         } else {
             String::new()
         },
-        active: matches!(
-            security,
-            FtpSecurity::Plain | FtpSecurity::ExplicitTls | FtpSecurity::ImplicitTls
-        ) && value("ftppasvmode") == "0",
+        active,
         address_family,
         ssh_fingerprint: pin,
         ssh_kerberos: kerberos_kex.then(String::new),
         ssh_kerberos_kex: kerberos_kex,
         ssh_private_key: (security.is_ssh() && key_file.is_absolute()).then_some(key_file),
         ssh_timeout: if security.is_ssh() { timeout } else { None },
+        webdav_liberal_escaping: security == FtpSecurity::WebDav
+            && flag(value("webdavliberalescaping")),
+        webdav_cross_domain_redirects: security == FtpSecurity::WebDav
+            && flag(value("webdavcrossdomainredirects")),
+        webdav_unencrypted_redirects: security == FtpSecurity::WebDav
+            && flag(value("webdavunencryptedredirects")),
         s3_region: if security == FtpSecurity::S3 {
             value("s3defaultregion").to_owned()
         } else {
             String::new()
         },
+        s3_virtual_host: security == FtpSecurity::S3
+            && match value("s3urlstyle") {
+                "" | "0" => true,
+                "1" => false,
+                _ => return Err(invalid("Die WinSCP-S3-Adressierungsart ist unbekannt.")),
+            },
+        s3_requester_pays: security == FtpSecurity::S3 && flag(value("s3requesterpays")),
+        s3_role_arn: if security == FtpSecurity::S3 {
+            value("s3rolearn").to_owned()
+        } else {
+            String::new()
+        },
         local_directory: local_directory.is_absolute().then_some(local_directory),
+        synchronize_browsing: flag(value("synchronizebrowsing")),
         ..Default::default()
     })
 }
@@ -259,15 +381,21 @@ fn cached_fingerprint(
         "rsa2",
     ];
     let host = host.to_ascii_lowercase();
-    KEY_TYPES.iter().find_map(|kind| {
-        let address = format!("{kind}@{port}:{host}");
-        let data = cache.get(&address).copied().flatten()?;
-        let key = cached_key(kind, data)?;
-        Some(format!(
-            "SHA256:{}",
-            STANDARD_NO_PAD.encode(Sha256::digest(key))
-        ))
-    })
+    let pins: Vec<_> = KEY_TYPES
+        .iter()
+        .filter_map(|kind| {
+            let address = format!("{kind}@{port}:{host}");
+            let data = cache.get(&address).copied().flatten()?;
+            let key = cached_key(kind, data)?;
+            Some(format!(
+                "SHA256:{}",
+                STANDARD_NO_PAD.encode(Sha256::digest(key))
+            ))
+        })
+        .collect();
+    crate::ssh_host_keys::HostKeyPins::parse(&pins.join(";"))
+        .ok()
+        .map(|pins| pins.to_string())
 }
 
 fn cached_key(kind: &str, data: &str) -> Option<Vec<u8>> {
@@ -347,17 +475,6 @@ fn ssh_string(blob: &mut Vec<u8>, bytes: &[u8]) {
     blob.extend_from_slice(bytes);
 }
 
-fn fingerprint(value: &str) -> String {
-    let mut candidates = value.split_ascii_whitespace().filter_map(|item| {
-        let digest = item.strip_prefix("SHA256:")?.trim_end_matches('=');
-        (STANDARD_NO_PAD.decode(digest).ok()?.len() == 32).then_some(digest)
-    });
-    match (candidates.next(), candidates.next()) {
-        (Some(digest), None) if !value.contains([';', '*']) => format!("SHA256:{digest}"),
-        _ => String::new(),
-    }
-}
-
 fn host_url(scheme: &str, host: &str) -> io::Result<Url> {
     let host = host.trim();
     let authority = if let Ok(ip) = host.parse::<std::net::Ipv6Addr>() {
@@ -415,6 +532,111 @@ mod tests {
     use super::*;
 
     #[test]
+    fn imports_webdav_compatibility_per_site() {
+        let sites = parse_sites(concat!(
+            "[Sessions\\Legacy]\nHostName=legacy.test\nFSProtocol=6\nWebDavLiberalEscaping=1\n",
+            "WebDavCrossDomainRedirects=1\nWebDavUnencryptedRedirects=1\n",
+            "[Sessions\\Standard]\nHostName=standard.test\nFSProtocol=6\n",
+        ))
+        .unwrap();
+        assert_eq!(sites[0].1.as_ref().unwrap().security, FtpSecurity::WebDav);
+        assert!(sites[0].1.as_ref().unwrap().webdav_liberal_escaping);
+        assert!(sites[0].1.as_ref().unwrap().webdav_cross_domain_redirects);
+        assert!(sites[0].1.as_ref().unwrap().webdav_unencrypted_redirects);
+        assert!(!sites[1].1.as_ref().unwrap().webdav_liberal_escaping);
+        assert!(!sites[1].1.as_ref().unwrap().webdav_cross_domain_redirects);
+        assert!(!sites[1].1.as_ref().unwrap().webdav_unencrypted_redirects);
+    }
+
+    #[test]
+    fn imports_socks_user_id_and_dns_resolution_mode() {
+        for (method, dns, scheme) in [
+            (1, 1, "socks4"),
+            (1, 2, "socks4a"),
+            (2, 0, "socks5"),
+            (2, 1, "socks5h"),
+        ] {
+            let input = format!(
+                "[Sessions\\Proxy]\nHostName=server.test\nFSProtocol=2\nProxyMethod={method}\nProxyDNS={dns}\nProxyHost=proxy.test\nProxyUserName=work-user\n"
+            );
+            let sites = parse_sites(&input).unwrap();
+            let profile = sites[0].1.as_ref().unwrap();
+            assert_eq!(profile.proxy, format!("{scheme}://proxy.test:1080/"));
+            assert_eq!(profile.proxy_user, "work-user");
+            assert!(profile.proxy_credential.is_none());
+        }
+    }
+
+    #[test]
+    fn imports_a_telnet_proxy_command_without_copying_proxy_password() {
+        let sites = parse_sites(concat!(
+            "[Sessions\\Relay]\nHostName=server.test\nFSProtocol=2\n",
+            "ProxyMethod=4\nProxyHost=proxy.test\nProxyPort=9823\n",
+            "ProxyUsername=relay\nProxyPassword=secret\n",
+            "ProxyTelnetCommand=%user\\n%pass\\nconnect %host %port\\r\\n\n",
+        ))
+        .unwrap();
+        let profile = sites[0].1.as_ref().unwrap();
+        assert_eq!(profile.proxy, "telnet://proxy.test:9823/");
+        assert_eq!(
+            profile.telnet_proxy_command,
+            r"%user\n%pass\nconnect %host %port\r\n"
+        );
+        assert_eq!(profile.proxy_user, "relay");
+        assert!(profile.proxy_credential.is_none());
+    }
+
+    #[test]
+    fn imports_local_ssh_proxy_command_and_leaves_password_unstored() {
+        let command = r#""C:\Program Files\Proxy\helper.exe" "%host" %port "%pass""#;
+        for method in ["5", "Cmd"] {
+            let ini = format!(
+                "[Sessions\\Local]\nHostName=server.test\nFSProtocol=2\nProxyMethod={method}\nProxyLocalCommand={command}\nProxyDNS=0\nProxyUsername=relay\nProxyPassword=secret\n"
+            );
+            let sites = parse_sites(&ini).unwrap();
+            let profile = sites[0].1.as_ref().unwrap();
+            assert_eq!(profile.proxy, "local://command");
+            assert_eq!(profile.local_proxy_command, command);
+            assert!(profile.ssh_proxy_dns_locally);
+            assert_eq!(profile.proxy_user, "relay");
+            assert!(profile.proxy_credential.is_none());
+        }
+    }
+
+    #[test]
+    fn imports_ftp_gateway_sequences_without_proxy_passwords() {
+        for (code, mode) in [
+            (1, FtpGateway::Site),
+            (2, FtpGateway::ProxyThenUserAtHost),
+            (3, FtpGateway::Open),
+            (4, FtpGateway::ProxyThenUser),
+            (5, FtpGateway::UserAtHost),
+            (6, FtpGateway::ProxyAtHostThenUser),
+            (7, FtpGateway::UserAtHostAndProxy),
+            (8, FtpGateway::UserAtProxyAtHost),
+        ] {
+            let profile = format!(
+                "[Sessions\\Gateway]\nHostName=server.test\nFSProtocol=5\nFtpPasvMode=0\nFtpProxyLogonType={code}\nProxyHost=gateway.test:2121\nProxyUsername=proxyuser\nProxyPassword=secret\n"
+            );
+            let sites = parse_sites(&profile).unwrap();
+            let site = sites[0].1.as_ref().unwrap();
+            assert_eq!(site.ftp_gateway, mode);
+            assert_eq!(site.proxy, "ftp://gateway.test:2121/");
+            assert_eq!(
+                site.proxy_user,
+                if mode.supports_proxy_login() {
+                    "proxyuser"
+                } else {
+                    ""
+                }
+            );
+            assert!(site.proxy_credential.is_none());
+            assert!(!site.active);
+            assert!(!serde_json::to_string(site).unwrap().contains("secret"));
+        }
+    }
+
+    #[test]
     fn imports_profiles_without_passwords_and_keeps_ssh_pins_explicit() {
         let input = r#"
 [Sessions\Default%20Settings]
@@ -426,11 +648,15 @@ PortNumber=2222
 UserName=arco
 Password=private
 RemoteDirectory=/a b/100%
+SynchronizeBrowsing=1
 [Sessions\Archiv]
 HostName=s3.test
 FSProtocol=7
 Ftps=3
 S3DefaultRegion=eu-central-1
+S3UrlStyle=1
+S3RequesterPays=1
+S3RoleArn=arn:aws:iam::123456789012:role/Archive
 [Sessions\Tunnel]
 HostName=other.test
 Tunnel=1
@@ -442,8 +668,16 @@ Tunnel=1
         assert_eq!(name, "Team/Grüße");
         assert_eq!(profile.address, "sftp://example.test:2222/a%20b/100%25");
         assert_eq!(profile.security, FtpSecurity::Sftp);
+        assert!(profile.synchronize_browsing);
+        assert!(!sites[1].1.as_ref().unwrap().synchronize_browsing);
         assert!(profile.credential.is_none() && profile.ssh_fingerprint.is_empty());
         assert_eq!(sites[1].1.as_ref().unwrap().s3_region, "eu-central-1");
+        assert!(!sites[1].1.as_ref().unwrap().s3_virtual_host);
+        assert!(sites[1].1.as_ref().unwrap().s3_requester_pays);
+        assert_eq!(
+            sites[1].1.as_ref().unwrap().s3_role_arn,
+            "arn:aws:iam::123456789012:role/Archive"
+        );
         assert!(sites[2].1.is_err());
     }
 
@@ -474,6 +708,22 @@ ssh-ed25519%402222%3Aexample.test=0x02,0x1a5107f7681a02af2523a6daf372e10e3a0764c
             "SHA256:bbXpuKG6zhzdmnxq256TlqzFBzRl2f6OOg722cYNbU8"
         );
         assert!(sites[1].1.as_ref().unwrap().ssh_fingerprint.is_empty());
+    }
+
+    #[test]
+    fn imports_all_explicit_ssh_pins_or_rejects_the_profile() {
+        let a = STANDARD_NO_PAD.encode([1; 32]);
+        let b = STANDARD_NO_PAD.encode([2; 32]);
+        let sites = parse_sites(&format!(
+            "[Sessions\\Pinned]\nHostName=server.test\nSshHostKey=ssh-ed25519 255 {b}%3BSHA256:{a}\n\
+             [Sessions\\Invalid]\nHostName=server.test\nSshHostKey=SHA256:{a};*\n"
+        ))
+        .unwrap();
+        assert_eq!(
+            sites[0].1.as_ref().unwrap().ssh_fingerprint,
+            format!("SHA256:{a};SHA256:{b}")
+        );
+        assert!(sites[1].1.is_err());
     }
 
     #[test]

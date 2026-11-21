@@ -1,6 +1,6 @@
 import { LineEdit, TextEdit, ScrollView, ComboBox } from "std-widgets.slint";
 import { Colors, Button, CheckBox } from "dialog-theme.slint";
-import { DialogHeading, FieldLabel, FormSection } from "operation-dialogs.slint";
+import { DialogHeading, FieldLabel, FormSection, JobTransferFields, JobTransferForm } from "operation-dialogs.slint";
 
 export enum MessageLevel { information, success, warning, error }
 export struct MessageStat { label: string, value: string }
@@ -71,6 +71,9 @@ export component TextDraftCard inherits Rectangle {
     in property <int> revision;
     in property <int> focus-cycle;
     in property <string> notice;
+    in property <[string]> transfer-presets;
+    in property <string> transfer-label;
+    in-out property <JobTransferForm> transfer-form;
     property <TextDraftForm> form;
     property <bool> discard;
     property <bool> dirty: root.form != root.data.initial;
@@ -152,6 +155,10 @@ export component TextDraftCard inherits Rectangle {
                     }
                     if root.data.kind == TextDraftKind.text && root.data.second-label != "" : FormSection { title: root.data.second-label; LineEdit { text <=> root.form.second; accessible-label: root.data.second-label; } }
                     if root.data.options.length > 0 : FormSection { title: root.data.options-label; ComboBox { model: root.data.options; current-index <=> root.form.option; accessible-label: root.data.options-label; } }
+                    if root.transfer-presets.length > 0 : FormSection {
+                        title: @tr("Übertragungsoptionen");
+                        JobTransferFields { presets: root.transfer-presets; form <=> root.transfer-form; }
+                    }
                 }
             }
             if root.discard : FormSection { title: @tr("Nicht gespeicherte Änderungen");
@@ -163,9 +170,9 @@ export component TextDraftCard inherits Rectangle {
             }
             Rectangle { height: 1px; background: Colors.edge; }
             HorizontalLayout { spacing: 8px;
-                Text { text: root.dirty ? @tr("Nicht gespeicherte Änderungen · Strg+S: speichern · Esc: abbrechen") : @tr("Tab: nächstes Feld · Umschalt+Tab: zurück · Strg+S: speichern"); color: root.dirty ? Colors.accent : Colors.muted; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; }
+                Text { text: root.transfer-presets.length > 0 ? @tr("Strg+S: herunterladen · Esc: abbrechen") : (root.dirty ? @tr("Nicht gespeicherte Änderungen · Strg+S: speichern · Esc: abbrechen") : @tr("Tab: nächstes Feld · Umschalt+Tab: zurück · Strg+S: speichern")); color: root.dirty ? Colors.accent : Colors.muted; font-size: 11px; wrap: word-wrap; horizontal-stretch: 1; }
                 cancel := Button { text: @tr("Abbrechen"); clicked => { root.request-close(); } }
-                save := Button { text: @tr("Speichern"); primary: true; enabled: !root.discard; clicked => { root.apply(root.form); } }
+                save := Button { text: root.transfer-presets.length > 0 && root.transfer-label != "" ? root.transfer-label : @tr("Speichern"); primary: true; enabled: !root.discard; clicked => { root.apply(root.form); } }
             }
         }
     }

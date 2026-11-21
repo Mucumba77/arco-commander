@@ -125,13 +125,14 @@ pub enum Comparison {
 
 #[derive(Clone, Copy)]
 pub struct EntryInfo {
+    pub directory: bool,
     pub size: Option<u64>,
     pub modified: Option<SystemTime>,
 }
 
 impl EntryInfo {
     pub fn is_dir(self) -> bool {
-        self.size.is_none()
+        self.directory
     }
 }
 
@@ -167,6 +168,20 @@ impl Tree {
         let paths: BTreeSet<_> = paths.iter().map(|path| key(path)).collect();
         self.0
             .retain(|path, _| !path.ancestors().any(|parent| paths.contains(parent)));
+    }
+
+    pub fn remap_paths(
+        &mut self,
+        mut map: impl FnMut(&Path) -> io::Result<PathBuf>,
+    ) -> io::Result<BTreeMap<PathBuf, PathBuf>> {
+        let mut sources = BTreeMap::new();
+        for (_, mut entry) in std::mem::take(&mut self.0) {
+            let mapped = map(&entry.path)?;
+            let original = std::mem::replace(&mut entry.path, mapped.clone());
+            self.insert(entry)?;
+            sources.insert(mapped, original);
+        }
+        Ok(sources)
     }
     pub fn insert_remote(&mut self, path: PathBuf, info: EntryInfo) -> io::Result<()> {
         if !relative_path(&path) {
@@ -755,6 +770,7 @@ fn scan(
             .to_path_buf();
         let meta = files::regular_metadata(item.path())?;
         let info = EntryInfo {
+            directory: meta.is_dir(),
             size: meta.is_file().then_some(meta.len()),
             modified: meta.modified().ok(),
         };
@@ -800,7 +816,7 @@ pub fn compare_file(
         })?;
         compare_time(left, right)
     };
-    let same_size = a.info.size == b.info.size;
+    let same_size = a.info.size.is_some() && a.info.size == b.info.size;
     let equal = if options.by_content && same_size && modified.is_eq() {
         same_content(a, b)?
     } else {

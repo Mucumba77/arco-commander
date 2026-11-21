@@ -1304,7 +1304,7 @@ fn export_program_arguments(arguments: &[String], tc_arguments: bool, prompt: bo
     parameters
 }
 
-fn join_windows_arguments<'a>(arguments: impl Iterator<Item = &'a str>) -> String {
+pub(super) fn join_windows_arguments<'a>(arguments: impl Iterator<Item = &'a str>) -> String {
     arguments.map(quote_argument).collect::<Vec<_>>().join(" ")
 }
 

@@ -11,15 +11,28 @@ use tempfile::NamedTempFile;
 pub use url::Url;
 use zeroize::Zeroizing;
 
+mod checksums;
 #[cfg(windows)]
 mod credentials;
 mod data;
+#[cfg(windows)]
+mod discovery;
+#[cfg(windows)]
+pub use discovery::{HttpProxy, detect_http_proxy};
+mod forward;
 mod fxp;
+mod gateway;
 mod http;
 mod listing;
+mod local_proxy;
+mod native;
 mod options;
 mod otp;
+mod proxy_template;
 mod rate;
+pub use rate::TransferLimit;
+mod connections;
+pub use connections::{ConnectionSlots, TransferConnections};
 #[cfg(all(test, windows))]
 mod reference;
 mod resume;
@@ -29,6 +42,7 @@ mod sftp;
 mod sync;
 mod webdav;
 mod webdav_locks;
+pub use checksums::{ChecksumAlgorithm, RemoteChecksum};
 pub use options::{
     AddressFamily, ConnectionOptions, PreferredTransferMode, TransferMode, TransferSettings,
 };
@@ -36,9 +50,12 @@ pub use options::{
 pub fn ssh_console_bridge() -> io::Result<()> {
     sftp::console_bridge()
 }
-pub use s3::{S3Tags, S3Version};
-pub use sftp::{MAX_SSH_JUMPS, SshAgent, SshChallenge};
+pub use fxp::FxpCopy;
+pub use s3::{S3Mfa, S3Tags, S3Version, S3Versioning, S3VersioningConfig};
+pub use sftp::{CommandOutput, MAX_SSH_JUMPS, SshAgent, SshChallenge};
+pub use sftp::{RemoteLinkKind, ResolvedLink};
 pub use sync::SyncUpload;
+pub use sync::UnixMetadata;
 pub use webdav_locks::WebDavLockInfo;
 
 const LIST_LIMIT: usize = 8 * 1024 * 1024;
@@ -103,15 +120,28 @@ pub struct Connection {
     recycle_remote: bool,
     recycle_overwrites: bool,
     proxy: Option<Url>,
+    telnet_proxy: Option<proxy_template::Command>,
+    local_proxy: Option<local_proxy::Command>,
+    ssh_proxy_dns_locally: bool,
     proxy_user: String,
+    ftp_gateway: arco_core::profile::FtpGateway,
     proxy_password: Zeroizing<String>,
     active: bool,
     listing_mode: ListingMode,
     options: options::Options,
     transfer: TransferSettings,
     ssh: Option<sftp::Options>,
+    webdav_liberal_escaping: bool,
+    webdav_windows_auth: bool,
+    webdav_cross_domain_redirects: bool,
+    webdav_unencrypted_redirects: bool,
     s3_region: String,
     s3_aws_profile: Option<String>,
+    s3_role_arn: Option<String>,
+    s3_session_token: Option<Zeroizing<String>>,
+    s3_token_required: bool,
+    s3_virtual_host: bool,
+    s3_requester_pays: bool,
 }
 
 impl Connection {
@@ -199,15 +229,28 @@ impl Connection {
             recycle_remote: false,
             recycle_overwrites: false,
             proxy: None,
+            telnet_proxy: None,
+            local_proxy: None,
+            ssh_proxy_dns_locally: false,
             proxy_user: String::new(),
+            ftp_gateway: Default::default(),
             proxy_password: Zeroizing::default(),
             active: false,
             listing_mode: ListingMode::Automatic,
             options: Default::default(),
             transfer: TransferSettings::default(),
             ssh: None,
+            webdav_liberal_escaping: false,
+            webdav_windows_auth: false,
+            webdav_cross_domain_redirects: false,
+            webdav_unencrypted_redirects: false,
             s3_region: "us-east-1".into(),
             s3_aws_profile: None,
+            s3_role_arn: None,
+            s3_session_token: None,
+            s3_token_required: false,
+            s3_virtual_host: false,
+            s3_requester_pays: false,
         })
     }
 
@@ -224,25 +267,73 @@ impl Connection {
         let proxy = Url::parse(address.trim()).map_err(io::Error::other)?;
         if !matches!(
             proxy.scheme(),
-            "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h" | "ftp"
+            "http"
+                | "https"
+                | "socks4"
+                | "socks4a"
+                | "socks5"
+                | "socks5h"
+                | "ftp"
+                | "telnet"
+                | "local"
         ) || proxy.host_str().is_none()
             || !matches!(proxy.path(), "" | "/")
             || proxy.query().is_some()
             || proxy.fragment().is_some()
             || !proxy.username().is_empty()
             || proxy.password().is_some()
+            || (proxy.scheme() == "local"
+                && (proxy.host_str() != Some("command") || proxy.port().is_some()))
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "erwartet eine HTTP-, HTTPS- oder SOCKS-Proxy-Adresse ohne Zugangsdaten",
+                "Ungültige Proxy-Adresse oder Zugangsdaten in der Adresse.",
             ));
         }
         if self.proxy.as_ref() != Some(&proxy) {
             self.proxy_user.clear();
             self.proxy_password = Zeroizing::default();
+            self.local_proxy = None;
+            self.telnet_proxy = (proxy.scheme() == "telnet")
+                .then(|| proxy_template::Command::telnet(""))
+                .transpose()?;
         }
         self.proxy = Some(proxy);
         self.validate_options()?;
+        Ok(self)
+    }
+
+    pub fn with_telnet_proxy_command(mut self, command: &str) -> io::Result<Self> {
+        if let Some(configured) = &mut self.telnet_proxy {
+            *configured = proxy_template::Command::telnet(command)?;
+        } else if !command.is_empty() {
+            return Err(invalid_input(
+                "Ein Telnet-Proxy-Kommando benötigt eine telnet://-Adresse.",
+            ));
+        }
+        Ok(self)
+    }
+
+    pub fn with_local_proxy_command(mut self, command: &str) -> io::Result<Self> {
+        if self
+            .proxy
+            .as_ref()
+            .is_some_and(|proxy| proxy.scheme() == "local")
+        {
+            self.local_proxy = Some(local_proxy::Command::parse(command)?);
+        } else if !command.is_empty() {
+            return Err(invalid_input("Aktiviere zuerst den lokalen SSH-Proxy."));
+        }
+        Ok(self)
+    }
+
+    pub fn with_ssh_proxy_dns_locally(mut self, local: bool) -> io::Result<Self> {
+        if local && (!self.security.is_ssh() || self.proxy.is_none()) {
+            return Err(invalid_input(
+                "Diese DNS-Option benötigt eine SSH-Proxy-Verbindung.",
+            ));
+        }
+        self.ssh_proxy_dns_locally = local;
         Ok(self)
     }
 
@@ -264,8 +355,13 @@ impl Connection {
                 .proxy
                 .as_ref()
                 .ok_or_else(|| invalid_input("Trage zuerst eine Proxy-Adresse ein."))?;
-            if !matches!(proxy.scheme(), "http" | "https" | "socks5" | "socks5h")
-                || user.contains(':')
+            let supports_login = matches!(
+                proxy.scheme(),
+                "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h" | "telnet" | "local"
+            ) || (proxy.scheme() == "ftp"
+                && self.ftp_gateway.supports_proxy_login());
+            if !supports_login
+                || (user.contains(':') && !matches!(proxy.scheme(), "local" | "telnet"))
                 || user.chars().any(char::is_control)
                 || (matches!(proxy.scheme(), "socks5" | "socks5h") && user.len() > 255)
             {
@@ -279,6 +375,12 @@ impl Connection {
         Ok(self)
     }
 
+    pub fn with_ftp_gateway(mut self, gateway: arco_core::profile::FtpGateway) -> io::Result<Self> {
+        self.ftp_gateway = gateway;
+        self.validate_options()?;
+        Ok(self)
+    }
+
     pub fn with_proxy_password(mut self, password: &str) -> io::Result<Self> {
         self.check_proxy_password(password)?;
         self.proxy_password = Zeroizing::new(password.to_owned());
@@ -287,7 +389,10 @@ impl Connection {
 
     fn check_proxy_password(&self, password: &str) -> io::Result<()> {
         check_password(password)?;
-        if self.proxy_user.is_empty()
+        if self.proxy_uses_user_id_only() {
+            return Err(invalid_input("Der gewählte Proxy benötigt kein Passwort."));
+        }
+        if !self.proxy_has_credential_identity()
             || password.is_empty()
             || self.proxy.as_ref().is_some_and(|url| {
                 matches!(url.scheme(), "socks5" | "socks5h") && password.len() > 255
@@ -298,6 +403,33 @@ impl Connection {
             ));
         }
         Ok(())
+    }
+
+    pub fn proxy_uses_user_id_only(&self) -> bool {
+        self.proxy
+            .as_ref()
+            .is_some_and(|url| matches!(url.scheme(), "socks4" | "socks4a"))
+            || self
+                .proxy_command_login()
+                .is_some_and(|(_, password)| !password)
+    }
+
+    fn proxy_has_credential_identity(&self) -> bool {
+        !self.proxy_user.is_empty()
+            || self
+                .proxy_command_login()
+                .is_some_and(|(user, password)| password && !user)
+    }
+
+    fn proxy_command_login(&self) -> Option<(bool, bool)> {
+        self.local_proxy
+            .as_ref()
+            .map(|command| (command.user, command.password))
+            .or_else(|| {
+                self.telnet_proxy
+                    .as_ref()
+                    .map(|command| (command.user, command.password))
+            })
     }
 
     fn proxy_credentials(&self) -> Option<(&str, &str)> {
@@ -326,6 +458,23 @@ impl Connection {
     }
 
     fn validate_options(&self) -> io::Result<()> {
+        if self.options.http_forward
+            && (self.security != Security::Plain
+                || self.active
+                || self.listing_mode != ListingMode::Automatic
+                || self.options.mode_z
+                || self.options.otp
+                || self.options.show_hidden
+                || self.options.list_pattern.is_some()
+                || !self
+                    .proxy
+                    .as_ref()
+                    .is_some_and(|proxy| matches!(proxy.scheme(), "http" | "https")))
+        {
+            return Err(invalid_input(
+                "HTTP-Forward benötigt passives Klartext-FTP mit HTTP(S)-Proxy und automatischer Verzeichnisliste.",
+            ));
+        }
         if self.security.is_ssh()
             && (self.active
                 || self.listing_mode != ListingMode::Automatic
@@ -341,25 +490,41 @@ impl Connection {
             ));
         }
         if self.security.is_ssh()
-            && self
-                .proxy
-                .as_ref()
-                .is_some_and(|url| !matches!(url.scheme(), "http" | "socks5" | "socks5h"))
+            && self.proxy.as_ref().is_some_and(|url| {
+                !matches!(
+                    url.scheme(),
+                    "http" | "socks4" | "socks4a" | "socks5" | "socks5h" | "telnet" | "local"
+                )
+            })
         {
             return Err(invalid_input(
-                "SFTP und SCP unterstützen HTTP-CONNECT und SOCKS5.",
+                "SFTP und SCP unterstützen HTTP-CONNECT, SOCKS4, SOCKS5 sowie Telnet- und lokale Proxys.",
             ));
         }
         if self.security == Security::Plain
-            && (self.options.ca_bundle.is_some() || self.options.client_certificate.is_some())
+            && (self.options.client_certificate.is_some()
+                || self.options.ca_bundle.is_some()
+                    && !(self.options.http_forward
+                        && self
+                            .proxy
+                            .as_ref()
+                            .is_some_and(|proxy| proxy.scheme() == "https")))
         {
             return Err(invalid_input("Zertifikate benötigen eine FTPS-Verbindung."));
         }
         if self.security != Security::Plain
             && self.proxy.as_ref().is_some_and(|url| url.scheme() == "ftp")
         {
+            return Err(invalid_input("Das FTP-Gateway benötigt Klartext-FTP."));
+        }
+        if !self.security.is_ssh()
+            && self
+                .proxy
+                .as_ref()
+                .is_some_and(|proxy| matches!(proxy.scheme(), "telnet" | "local"))
+        {
             return Err(invalid_input(
-                "Das FTP-Gateway mit USER Benutzer@Server benötigt Klartext-FTP.",
+                "Ein SSH-Proxy-Kommando benötigt SFTP oder SCP.",
             ));
         }
         if self.options.otp
@@ -369,13 +534,44 @@ impl Connection {
                 "OTP benötigt eine passive Klartext-Direktverbindung.",
             ));
         }
+        if self.ftp_gateway != arco_core::profile::FtpGateway::default()
+            && self
+                .proxy
+                .as_ref()
+                .is_none_or(|proxy| proxy.scheme() != "ftp")
+        {
+            return Err(invalid_input(
+                "Das FTP-Gateway benötigt eine Proxy-Adresse mit ftp://.",
+            ));
+        }
         Ok(())
     }
 
     pub fn authenticate(mut self, password: &str) -> io::Result<Session> {
         check_password(password)?;
         self.validate_options()?;
-        if !self.proxy_user.is_empty() && self.proxy_password.is_empty() {
+        if self
+            .proxy
+            .as_ref()
+            .is_some_and(|proxy| proxy.scheme() == "local")
+            && self.local_proxy.is_none()
+        {
+            return Err(invalid_input("Gib ein lokales SSH-Proxy-Kommando ein."));
+        }
+        let command_login = self.proxy_command_login();
+        if let Some((user, password)) = command_login
+            && (user && self.proxy_user.is_empty() || password && self.proxy_password.is_empty())
+        {
+            return Err(invalid_input(
+                "Ergänze die Zugangsdaten für den SSH-Proxy im Netzwerkprofil.",
+            ));
+        }
+        if (command_login.is_none()
+            && !self.proxy_user.is_empty()
+            && self.proxy_password.is_empty()
+            && !self.proxy_uses_user_id_only())
+            || (self.ftp_gateway.requires_proxy_login() && self.proxy_user.is_empty())
+        {
             return Err(invalid_input(
                 "Hinterlege das Proxy-Passwort in den Netzwerkprofilen.",
             ));
@@ -386,16 +582,26 @@ impl Connection {
             ));
         }
         let preset = self.transfer.preset.take();
+        if self.s3_token_required && self.s3_session_token.is_none() {
+            return Err(invalid_input(
+                "Für dieses S3-Profil fehlt das Sitzungstoken.",
+            ));
+        }
+        let s3_token = self.s3_session_token.take().map(Arc::new);
         let mut session = Session {
             connection: Arc::new(self),
             password: Arc::new(Zeroizing::new(password.to_string())),
             otp_lock: Default::default(),
             ssh: Default::default(),
             scp: Default::default(),
-            s3_token: None,
+            s3_token,
             aws_credentials: Default::default(),
             webdav_locks: Default::default(),
+            webdav_aliases: Default::default(),
             transfer_override: None,
+            transfer_limit: None,
+            parallel_downloads: None,
+            file_workers: 1,
             configured_transfer_preset: Arc::new(Mutex::new(preset)),
         };
         if session.security() == Security::S3 {
@@ -425,7 +631,11 @@ pub struct Session {
     s3_token: Option<Arc<Zeroizing<String>>>,
     aws_credentials: Arc<Mutex<Option<s3_credentials::CachedCredentials>>>,
     webdav_locks: Arc<Mutex<std::collections::BTreeMap<Url, webdav_locks::WriteLock>>>,
+    webdav_aliases: Arc<Mutex<std::collections::BTreeMap<Url, Url>>>,
     transfer_override: Option<TransferSettings>,
+    transfer_limit: Option<TransferLimit>,
+    parallel_downloads: Option<connections::ParallelDownloads>,
+    file_workers: usize,
     configured_transfer_preset: Arc<Mutex<Option<String>>>,
 }
 
@@ -458,6 +668,7 @@ pub enum ListFormat {
     Mlsd,
     List,
     Names,
+    HttpForward,
     Sftp,
     Scp,
     WebDav,
@@ -477,12 +688,17 @@ impl ListFormat {
 pub struct Entry {
     pub name: String,
     pub directory: Option<bool>,
+    pub symlink: bool,
     pub size: Option<u64>,
     pub modified: Option<String>,
     pub unique: Option<String>,
 }
 
 impl Session {
+    fn uses_native_ftp(&self) -> bool {
+        self.connection.options.otp || self.connection.ftp_gateway != Default::default()
+    }
+
     pub fn session_link_identity(&self) -> (&str, String) {
         (
             self.connection.user.as_str(),
@@ -498,8 +714,16 @@ impl Session {
         self.security() == Security::Sftp
     }
 
+    pub fn is_http_forward_ftp(&self) -> bool {
+        self.connection.options.http_forward
+    }
+
     pub fn initial_directory(&self) -> Url {
         self.connection.url.clone()
+    }
+
+    pub fn username(&self) -> &str {
+        &self.connection.user
     }
 
     pub fn restore_directory(&self, address: Option<&str>) -> io::Result<Url> {
@@ -541,6 +765,9 @@ impl Session {
 
     pub fn list(&self, directory: &Url, cancel: &AtomicBool) -> io::Result<Listing> {
         self.validate(directory)?;
+        if self.is_http_forward_ftp() {
+            return self.list_forward(directory, cancel);
+        }
         match self.security() {
             Security::Sftp => return self.list_sftp(directory, false, cancel),
             Security::Scp => return self.list_scp(directory, cancel),
@@ -600,6 +827,7 @@ impl Session {
                 check_segment(name).ok().map(|_| Entry {
                     name: name.into(),
                     directory: None,
+                    symlink: false,
                     size: None,
                     modified: None,
                     unique: None,
@@ -760,17 +988,24 @@ impl Session {
         } else {
             None
         };
-        self.receive_file(&url, temporary.as_file(), mode, limit, cancel, || {
-            progress(DownloadProgress {
-                received: temporary.as_file().metadata()?.len(),
-                total: None,
-                phase: DownloadPhase::Receiving,
-            });
+        let mut total = None;
+        self.receive_file(&url, temporary.as_file(), mode, limit, cancel, |update| {
+            let update = if let Some(update) = update {
+                total = update.total;
+                update
+            } else {
+                DownloadProgress {
+                    received: temporary.as_file().metadata()?.len(),
+                    total,
+                    phase: DownloadPhase::Receiving,
+                }
+            };
+            progress(update);
             Ok(())
         })?;
         progress(DownloadProgress {
             received: temporary.as_file().metadata()?.len(),
-            total: None,
+            total,
             phase: DownloadPhase::Verifying,
         });
         if let Some(limit) = limit
@@ -919,6 +1154,9 @@ impl Session {
 
     fn command(&self, url: &Url) -> io::Result<Request<'_>> {
         self.validate(url)?;
+        if self.is_http_forward_ftp() {
+            return Err(forward::read_only());
+        }
         if !self.security().is_ftp() {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -928,6 +1166,20 @@ impl Session {
         let root = std::env::var_os("SystemRoot")
             .ok_or_else(|| io::Error::other("SystemRoot is missing"))?;
         let mut command = Command::new(PathBuf::from(root).join("System32").join("curl.exe"));
+        if self.uses_native_ftp() {
+            return Ok(Request {
+                command,
+                config: Zeroizing::default(),
+                encoding: self.connection.options.encoding,
+                native_ftp: Some(NativeRequest {
+                    session: self,
+                    url: url.clone(),
+                    transfer: false,
+                }),
+                rate: None,
+                protocol: "FTP",
+            });
+        }
         command.args([
             "--disable",
             "--config",
@@ -1030,14 +1282,19 @@ impl Session {
             command,
             config: Zeroizing::new(config.as_bytes().to_vec()),
             encoding: settings.encoding,
-            otp: settings.otp.then(|| (self, url.clone())),
+            native_ftp: None,
+            rate: None,
             protocol: "FTP",
         })
     }
 
     fn transfer_command(&self, url: &Url) -> io::Result<Request<'_>> {
         let mut request = self.command(url)?;
-        self.apply_curl_rate(&mut request.command);
+        if let Some(native) = &mut request.native_ftp {
+            native.transfer = true;
+        } else {
+            request.rate = Some(self.transfer_rate());
+        }
         Ok(request)
     }
 }
@@ -1065,8 +1322,15 @@ struct Request<'a> {
     command: Command,
     config: Zeroizing<Vec<u8>>,
     encoding: &'static encoding_rs::Encoding,
-    otp: Option<(&'a Session, Url)>,
+    native_ftp: Option<NativeRequest<'a>>,
+    rate: Option<rate::Rate>,
     protocol: &'static str,
+}
+
+struct NativeRequest<'a> {
+    session: &'a Session,
+    url: Url,
+    transfer: bool,
 }
 
 fn run(
@@ -1086,8 +1350,8 @@ fn run_observed(
     mut observe: impl FnMut() -> io::Result<()>,
 ) -> io::Result<Vec<u8>> {
     check_cancel(cancel)?;
-    if let Some((session, url)) = request.otp.take() {
-        return otp::execute(session, &url, arguments, output, cancel, observe);
+    if let Some(native) = request.native_ftp.take() {
+        return native::execute(native, arguments, output, cancel, observe);
     }
     let mut arguments = arguments.iter();
     while let Some(argument) = arguments.next() {
@@ -1109,10 +1373,19 @@ fn run_observed(
             request.command.arg(argument);
         }
     }
+    let streaming = output.is_some() && request.rate.as_ref().is_some_and(rate::Rate::adjustable);
+    let (stdout, streamed_file) = if streaming {
+        (Stdio::piped(), output)
+    } else {
+        if let Some(rate) = request.rate.as_ref().and_then(rate::Rate::bytes_per_second) {
+            request.command.arg("--limit-rate").arg(rate.to_string());
+        }
+        (output.map_or_else(Stdio::piped, Stdio::from), None)
+    };
     let mut child = request
         .command
         .stdin(Stdio::piped())
-        .stdout(output.map_or_else(Stdio::piped, Stdio::from))
+        .stdout(stdout)
         .stderr(Stdio::piped())
         .spawn()?;
     let input = child
@@ -1124,45 +1397,56 @@ fn run_observed(
         let _ = child.wait();
         return Err(error);
     }
-    let output = child
-        .stdout
-        .take()
-        .map(|stdout| std::thread::spawn(move || read_limited(stdout, LIST_LIMIT)));
-    let error = child
-        .stderr
-        .take()
-        .map(|stderr| std::thread::spawn(move || read_limited(stderr, 16 * 1024)));
-    let result = loop {
-        if let Err(error) = check_cancel(cancel).and_then(|()| observe()) {
+    let stop_reading = AtomicBool::new(false);
+    let (status, output, error) = std::thread::scope(|scope| {
+        let rate = request.rate.take();
+        let stop = &stop_reading;
+        let output = child.stdout.take().map(|stdout| {
+            scope.spawn(move || match (streamed_file, rate) {
+                (Some(file), Some(rate)) => rate::copy_output(stdout, file, rate, stop),
+                _ => read_limited(stdout, LIST_LIMIT),
+            })
+        });
+        let error = child
+            .stderr
+            .take()
+            .map(|stderr| scope.spawn(move || read_limited(stderr, 16 * 1024)));
+        let result: io::Result<_> = (|| {
+            loop {
+                check_cancel(cancel)?;
+                observe()?;
+                if let Some(status) = child.try_wait()?
+                    && output.as_ref().is_none_or(|reader| reader.is_finished())
+                {
+                    return Ok(status);
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            }
+        })();
+        if result.is_err() {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
             let _ = child.kill();
             let _ = child.wait();
-            break Err(error);
         }
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) => std::thread::sleep(Duration::from_millis(40)),
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break Err(error);
-            }
-        }
-    };
-    let output = output
-        .map(|reader| {
-            reader
-                .join()
-                .map_err(|_| io::Error::other("FTP output reader failed"))
-        })
-        .transpose()?;
-    let error = error
-        .map(|reader| {
-            reader
-                .join()
-                .map_err(|_| io::Error::other("FTP error reader failed"))
-        })
-        .transpose()?;
-    let status = result?;
+        let output = output
+            .map(|reader| {
+                reader
+                    .join()
+                    .map_err(|_| io::Error::other("FTP output reader failed"))
+            })
+            .transpose()?;
+        let error = error
+            .map(|reader| {
+                reader
+                    .join()
+                    .map_err(|_| io::Error::other("FTP error reader failed"))
+            })
+            .transpose()?;
+        Ok::<_, io::Error>((result?, output, error))
+    })?;
+    if streaming && let Some(Err(error)) = &output {
+        return Err(io::Error::new(error.kind(), error.to_string()));
+    }
     if !status.success() {
         if matches!(status.code(), Some(51 | 58 | 60 | 77 | 90 | 91)) {
             return Err(io::Error::new(
@@ -1174,10 +1458,13 @@ fn run_observed(
                 ),
             ));
         }
-        let kind = if matches!(status.code(), Some(19 | 21)) {
-            io::ErrorKind::Unsupported
-        } else {
-            io::ErrorKind::Other
+        let kind = match status.code() {
+            Some(7) => io::ErrorKind::ConnectionRefused,
+            Some(12 | 28) => io::ErrorKind::TimedOut,
+            Some(18 | 52) => io::ErrorKind::UnexpectedEof,
+            Some(19 | 21) => io::ErrorKind::Unsupported,
+            Some(55 | 56) => io::ErrorKind::ConnectionReset,
+            _ => io::ErrorKind::Other,
         };
         let error = error.transpose()?.unwrap_or_default();
         let error = String::from_utf8_lossy(&error);
@@ -1296,6 +1583,7 @@ fn parse_mlsd_with_policy(bytes: &[u8], strict: bool) -> io::Result<Listing> {
             entries.push(Entry {
                 name: name.into(),
                 directory,
+                symlink: false,
                 size,
                 modified,
                 unique,

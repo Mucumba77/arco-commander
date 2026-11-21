@@ -1,4 +1,4 @@
-use super::{Session, TransferMode, Url, check_cancel, run, run_observed};
+use super::{DownloadProgress, Session, TransferMode, Url, check_cancel, run, run_observed};
 use flate2::{Compression, Decompress, FlushDecompress, Status, write::ZlibEncoder};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -14,14 +14,23 @@ impl Session {
         mode: TransferMode,
         limit: Option<u64>,
         cancel: &AtomicBool,
-        mut observe: impl FnMut() -> io::Result<()>,
+        mut report: impl FnMut(Option<DownloadProgress>) -> io::Result<()>,
     ) -> io::Result<()> {
+        if self.is_http_forward_ftp() {
+            return self.receive_http(url, output, limit, cancel, || report(None));
+        }
         if self.is_sftp() {
             if mode == TransferMode::Text {
                 return Err(super::sftp::binary_only());
             }
-            return self.receive_sftp_file(url, output, 0, limit, cancel, |_| observe());
+            if self
+                .receive_parallel_sftp(url, output, limit, cancel, |update| report(Some(update)))?
+            {
+                return Ok(());
+            }
+            return self.receive_sftp_file(url, output, 0, limit, cancel, |_| report(None));
         }
+        let mut observe = || report(None);
         if !self.security().is_ftp() {
             if mode == TransferMode::Text {
                 return Err(super::sftp::binary_only());
@@ -70,7 +79,7 @@ impl Session {
             );
         }
         if mode == TransferMode::Text {
-            if !self.connection.options.otp {
+            if !self.uses_native_ftp() {
                 // curl switches stdout to text mode on Windows for TYPE A.
                 // Use its binary file output to avoid an extra CR before LF.
                 let text = NamedTempFile::new()?;

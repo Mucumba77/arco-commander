@@ -1,6 +1,7 @@
 use super::{Attrs, Wire, path};
 use crate::ftp::{
-    DownloadPhase, DownloadProgress, Session, Url, check_cancel, invalid_input, resume::retry_sftp,
+    DownloadPhase, DownloadProgress, Session, Url, check_cancel, invalid_input,
+    resume::retry_transfer,
 };
 use std::fs::OpenOptions;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -47,7 +48,7 @@ impl Session {
         let partial_name = format!(".arco-{}.filepart", &hex[..32]);
         let partial = path(&self.file(directory, &partial_name)?)?;
         let destination = path(&destination)?;
-        retry_sftp(cancel, &mut progress, |progress| {
+        retry_transfer(cancel, &mut progress, |progress| {
             self.sftp_operation(cancel, |wire| {
                 require_new(wire, &destination)?;
                 let existing = match wire.lstat(&partial) {
@@ -71,7 +72,7 @@ impl Session {
                 let result = (|| {
                     let start = existing.unwrap_or_default();
                     let mut offset = start;
-                    let rate = self.transfer_rate();
+                    let mut rate = self.transfer_rate();
                     source.seek(SeekFrom::Start(offset))?;
                     let mut buffer = [0; CHUNK];
                     while offset < size {
@@ -253,5 +254,26 @@ mod tests {
             io::ErrorKind::AlreadyExists
         );
         fs::remove_file(target).unwrap();
+        let speed = crate::ftp::TransferLimit::default();
+        speed.set_override_kib(Some(8)).unwrap();
+        let adjustable = session.with_transfer_limit(speed.clone());
+        let name = "adjustable-upload.bin";
+        let started = std::time::Instant::now();
+        let mut changed = false;
+        adjustable
+            .upload_sftp_resuming(&directory, &source, name, &cancel, |progress| {
+                if !changed
+                    && progress.phase == DownloadPhase::Receiving
+                    && progress.received > 0
+                    && progress.received < data.len() as u64
+                {
+                    speed.set_override_kib(Some(0)).unwrap();
+                    changed = true;
+                }
+            })
+            .unwrap();
+        assert!(changed && started.elapsed() < std::time::Duration::from_secs(8));
+        assert_eq!(fs::read(root.join(name)).unwrap(), data);
+        fs::remove_file(root.join(name)).unwrap();
     }
 }

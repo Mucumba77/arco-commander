@@ -36,6 +36,7 @@ pub struct TransferSettings {
     pub speed_kib: Option<u32>,
     pub preserve_time: Option<bool>,
     pub masks: String,
+    pub names: arco_core::transfer_names::NameRules,
 }
 
 impl super::Connection {
@@ -59,6 +60,13 @@ impl super::Connection {
 }
 
 impl Session {
+    pub fn with_transfer_connection(&self) -> Self {
+        let mut session = self.clone();
+        session.ssh = Default::default();
+        session.scp = Default::default();
+        session
+    }
+
     pub fn with_transfer_snapshot(&self, settings: TransferSettings) -> Self {
         let mut session = self.clone();
         session.transfer_override = Some(settings);
@@ -121,14 +129,6 @@ impl Session {
             TransferMode::Binary
         }
     }
-
-    pub(super) fn apply_curl_rate(&self, command: &mut std::process::Command) {
-        if let Some(rate) = self.transfer_settings().speed_kib {
-            command
-                .arg("--limit-rate")
-                .arg((u64::from(rate) * 1024).to_string());
-        }
-    }
 }
 
 #[derive(Default)]
@@ -140,9 +140,11 @@ pub struct ConnectionOptions {
     pub ca_bundle: Option<PathBuf>,
     pub client_certificate: Option<String>,
     pub mode_z: bool,
+    pub http_forward: bool,
     pub otp: bool,
 }
 
+#[derive(Clone)]
 pub(super) struct Options {
     pub family: AddressFamily,
     pub encoding: &'static Encoding,
@@ -151,6 +153,7 @@ pub(super) struct Options {
     pub ca_bundle: Option<PathBuf>,
     pub client_certificate: Option<String>,
     pub mode_z: bool,
+    pub http_forward: bool,
     pub otp: bool,
 }
 
@@ -164,6 +167,7 @@ impl Default for Options {
             ca_bundle: None,
             client_certificate: None,
             mode_z: false,
+            http_forward: false,
             otp: false,
         }
     }
@@ -219,6 +223,7 @@ impl Options {
             ca_bundle: input.ca_bundle,
             client_certificate: input.client_certificate,
             mode_z: input.mode_z,
+            http_forward: input.http_forward,
             otp: input.otp,
         })
     }
@@ -271,16 +276,20 @@ impl Options {
 
 impl Session {
     pub fn connection_details(&self, directory: &Url, cancel: &AtomicBool) -> io::Result<String> {
+        if self.is_http_forward_ftp() {
+            self.list(directory, cancel)?;
+            return Ok(format!("{directory}\nFTP · HTTP-Forward-Proxy (GET)"));
+        }
         if self.is_sftp() {
             self.validate(directory)?;
-            self.check_sftp_connection(cancel)?;
-            return Ok(format!("{directory}\nSSH · {}", self.sftp_fingerprint()?));
+            let fingerprint = self.connected_sftp_fingerprint(cancel)?;
+            return Ok(format!("{directory}\nSSH · {fingerprint}"));
         }
         if !self.security().is_ftp() {
             self.list(directory, cancel)?;
             let mut detail = format!("{directory}\n{}", self.security().label());
-            if self.security().is_ssh() {
-                detail.push_str(&format!(" · {}", self.sftp_fingerprint()?));
+            if self.security() == super::Security::Scp {
+                detail.push_str(&format!(" · {}", self.connected_scp_fingerprint(cancel)?));
             }
             if self.security() == super::Security::S3 {
                 detail.push_str(&format!(" · {}", self.connection.s3_region));
@@ -331,7 +340,7 @@ impl Session {
             .filter(|segment| !segment.is_empty())
         {
             check_segment(segment)?;
-            url = self.relative_directory(&url, std::path::Path::new(segment))?;
+            url = self.child_directory(&url, segment)?;
         }
         self.connection.options.encode_path(&url)?;
         Ok((url, name.to_owned()))
@@ -351,6 +360,9 @@ impl Session {
     }
 
     pub fn raw_listing(&self, directory: &Url, cancel: &AtomicBool) -> io::Result<String> {
+        if self.is_http_forward_ftp() {
+            return self.forward_listing_html(directory, cancel);
+        }
         let output = self.raw_listing_bytes(directory, cancel)?;
         Ok(self.connection.options.decode(&output)?.into_owned())
     }
