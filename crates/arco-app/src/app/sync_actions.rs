@@ -1,10 +1,11 @@
 use super::archive_actions::check_archive;
 use super::ftp_sync::FtpPlanConflicts;
 use super::ftp_sync::{FtpPlan, FtpRelayPlan, ftp_ignores};
-use super::{App, FtpEndpoint, Outcome, strings};
+use super::{App, FtpEndpoint, NetworkTransfer, Outcome, TransferAccess, strings};
 use crate::commands::{Dialog, Pending};
 use crate::panel::ArchiveTab;
 use crate::{SyncOptionsData, SyncRowData, display_path, human_size};
+use arco_app::network_batch::Batch;
 use arco_core::archive_view::{self, Selection};
 use arco_core::files::{self, Kind, TransferReport};
 use arco_core::profile::SavedSyncProfile;
@@ -12,17 +13,40 @@ use arco_core::sync::{
     self, Action, Comparison, EntryInfo, FileMasks, MarkRule, Mode, Options, PanelMarks, Plan, Row,
 };
 use arco_core::tools;
+use arco_windows::ftp::TransferConnections;
 use chrono::{DateTime, Local};
 use slint::{Model, ModelRc, VecModel};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 const LAST_USED: &str = "Letzte Einstellungen";
+
+#[derive(Clone)]
+pub(crate) struct NetworkCopy {
+    destination: CopyDestination,
+    selected: Vec<PathBuf>,
+    labels: [String; 2],
+}
+
+#[derive(Clone)]
+enum CopyDestination {
+    Local {
+        root: PathBuf,
+        endpoint: FtpEndpoint,
+        profile: Option<String>,
+        upload: bool,
+    },
+    Relay {
+        endpoints: [FtpEndpoint; 2],
+        profiles: [Option<String>; 2],
+    },
+}
 
 pub(crate) struct SyncSetup {
     source: SyncSource,
@@ -42,7 +66,13 @@ impl SyncSetup {
     }
 
     fn selected_available(&self) -> bool {
-        if self.selected.is_empty() {
+        let remote_selected = match &self.source {
+            SyncSource::Ftp {
+                selected_remote, ..
+            } => !selected_remote.is_empty(),
+            SyncSource::Disk { .. } => false,
+        };
+        if self.selected.is_empty() && !remote_selected {
             return false;
         }
         match (&self.fixed_roots, &self.source) {
@@ -68,6 +98,7 @@ enum SyncSource {
         local: PathBuf,
         endpoint: FtpEndpoint,
         profile: Option<String>,
+        selected_remote: Vec<PathBuf>,
     },
 }
 
@@ -96,6 +127,46 @@ enum ReviewPlan {
 }
 
 impl ReviewPlan {
+    fn prepare_background_copy(
+        &mut self,
+        rows: &[Row],
+        app: &App,
+    ) -> io::Result<Option<NetworkTransfer>> {
+        let writes = [
+            rows.iter().any(|row| row.action == Action::CopyLeft),
+            rows.iter().any(|row| row.action == Action::CopyRight),
+        ];
+        let access = |endpoint: &FtpEndpoint, write| {
+            TransferAccess::remote(&endpoint.0, &endpoint.1, None, write)
+        };
+        match self {
+            Self::Disk(_) => Ok(None),
+            Self::Ftp(plan) => {
+                let transfer = app.new_network_transfer(vec![
+                    TransferAccess::local(plan.local.path(), writes[0]),
+                    access(&plan.endpoint, writes[1])?,
+                ]);
+                plan.endpoint.0 = Arc::new(transfer.session(&plan.endpoint.0));
+                Ok(Some(transfer))
+            }
+            Self::FtpRelay(plan) => {
+                let direct = plan.is_direct_fxp();
+                let [left, right] = plan.endpoints_mut();
+                let transfer = app.new_network_transfer(vec![
+                    access(left, writes[0])?,
+                    access(right, writes[1])?,
+                ]);
+                if direct {
+                    return Ok(Some(transfer.server_direct()));
+                }
+                for endpoint in [left, right] {
+                    endpoint.0 = Arc::new(transfer.session(&endpoint.0));
+                }
+                Ok(Some(transfer))
+            }
+        }
+    }
+
     fn timestamps_only(&self) -> bool {
         match self {
             Self::Disk(plan) => plan.timestamps_only(),
@@ -104,14 +175,23 @@ impl ReviewPlan {
         }
     }
 
+    fn is_direct_fxp(&self) -> bool {
+        matches!(self, Self::FtpRelay(plan) if plan.is_direct_fxp())
+    }
+
     fn apply(
         self,
         rows: Vec<Row>,
         job: &super::JobContext,
         copy_conflicts: bool,
+        connections: Option<&TransferConnections>,
         progress: impl FnMut(&Path),
     ) -> io::Result<TransferReport> {
         let cancel = &job.cancel;
+        let batch = Batch {
+            connections,
+            cancel,
+        };
         let mut skipped = 0;
         let mut report = match self {
             Self::Disk(mut plan) => {
@@ -123,14 +203,22 @@ impl ReviewPlan {
                 if copy_conflicts {
                     skipped = plan.resolve_conflicts(job)?;
                 }
-                plan.apply(cancel, progress)
+                if connections.is_some() {
+                    plan.apply_background_copy(batch, progress)
+                } else {
+                    plan.apply(cancel, progress)
+                }
             }
             Self::FtpRelay(mut plan) => {
                 plan.rows = rows;
                 if copy_conflicts {
                     skipped = plan.resolve_conflicts(job)?;
                 }
-                plan.apply(cancel, progress)
+                if connections.is_some() {
+                    plan.apply_background_copy(batch, progress)
+                } else {
+                    plan.apply(cancel, progress)
+                }
             }
         };
         report.skipped += skipped;
@@ -149,6 +237,26 @@ impl SyncReview {
         if self.archives.iter().any(Option::is_some) {
             std::thread::spawn(move || drop(self.archives));
         }
+    }
+
+    fn row_data(&self, index: usize) -> SyncRowData {
+        let row = &self.rows[index];
+        let mut data = row_data(index, row, self.copy_only, self.plan.timestamps_only());
+        let paths = match &self.plan {
+            ReviewPlan::Ftp(plan) => plan.copy_preview_paths(row),
+            ReviewPlan::FtpRelay(plan) => plan.preview_paths(row),
+            ReviewPlan::Disk(_) => None,
+        };
+        if let Some((source, target)) = paths {
+            let source = display_path(&source);
+            let target = display_path(&target);
+            data.path = if source.replace('\\', "/") == target.replace('\\', "/") {
+                target.into()
+            } else {
+                format!("{source} → {target}").into()
+            };
+        }
+        data
     }
 }
 
@@ -387,7 +495,7 @@ impl App {
             return;
         }
         let local = tab.path.clone();
-        let mut selected = tab
+        let selected = tab
             .marked_paths()
             .iter()
             .filter_map(|path| path.strip_prefix(&local).ok().map(Path::to_path_buf))
@@ -397,15 +505,20 @@ impl App {
             std::sync::Arc::ptr_eq(&tab.location.session, &endpoint.0)
                 && tab.location.directory == endpoint.1
         });
-        if matching_remote.is_some() {
-            selected.extend(remote.marked_paths());
-        }
+        let selected_remote = matching_remote.map_or_else(Vec::new, |ftp| {
+            remote
+                .marked_paths()
+                .iter()
+                .filter_map(|path| ftp.entry(path).map(|entry| PathBuf::from(&entry.name)))
+                .collect()
+        });
         let labels = [display_path(&local), endpoint.1.to_string()];
         self.begin_sync(SyncSetup {
             source: SyncSource::Ftp {
                 local,
                 endpoint,
                 profile: matching_remote.and_then(|tab| tab.location.profile.clone()),
+                selected_remote,
             },
             labels,
             selected,
@@ -415,12 +528,15 @@ impl App {
 
     pub(crate) fn open_ftp_copy(&mut self) {
         let other = 1 - self.active;
-        let ignore = self.ignore_list();
-        let presets = self.profile.network_transfer_presets.clone();
         if let (Some(source), Some(target)) =
             (&self.current().ftp, &self.panels[other].current().ftp)
         {
-            let selected = self.current().selected_paths();
+            let selected: Vec<_> = self
+                .current()
+                .selected_paths()
+                .iter()
+                .filter_map(|path| source.entry(path).map(|entry| PathBuf::from(&entry.name)))
+                .collect();
             if selected.is_empty() {
                 self.status("Wähle Dateien oder Ordner für die FTP-Kopie.");
                 return;
@@ -430,36 +546,14 @@ impl App {
             let profiles =
                 [&source.location, &target.location].map(|location| location.profile.clone());
             let labels = endpoints.each_ref().map(|endpoint| endpoint.1.to_string());
-            self.enqueue_virtual_transfer(
-                "Bereite Kopie zwischen FTP-Ordnern vor …",
-                false,
-                move |job| {
-                    let endpoints = [
-                        arco_app::network_transfer::endpoint(&presets, &endpoints[0], None, None)?,
-                        arco_app::network_transfer::endpoint(&presets, &endpoints[1], None, None)?,
-                    ];
-                    let from =
-                        ftp_ignores(ignore.as_deref(), &endpoints[0].1, profiles[0].as_deref());
-                    let to =
-                        ftp_ignores(ignore.as_deref(), &endpoints[1].1, profiles[1].as_deref());
-                    let mut plan = FtpRelayPlan::for_copy(
-                        endpoints.clone(),
-                        &selected,
-                        &|path, directory| from(path, directory) || to(path, directory),
-                        &job.cancel,
-                    )?;
-                    let mut rows = std::mem::take(&mut plan.rows);
-                    super::ftp_sync::enable_copy_conflicts(&mut rows, 0);
-                    Ok(Outcome::Sync(Box::new(SyncReview {
-                        plan: ReviewPlan::FtpRelay(plan),
-                        rows,
-                        labels,
-                        visible: Vec::new(),
-                        archives: [None, None],
-                        copy_only: true,
-                    })))
+            self.network_copy_dialog(NetworkCopy {
+                destination: CopyDestination::Relay {
+                    endpoints,
+                    profiles,
                 },
-            );
+                selected,
+                labels,
+            });
             return;
         }
         let (local, remote, upload) =
@@ -483,22 +577,138 @@ impl App {
         let endpoint = (remote.session.clone(), remote.directory.clone());
         let profile = remote.profile.clone();
         let labels = [display_path(&root), remote.directory.to_string()];
-        let selected = if upload {
+        let selected: Vec<PathBuf> = if upload {
             self.current()
                 .paths()
                 .iter()
                 .filter_map(|path| path.strip_prefix(&root).ok().map(Path::to_path_buf))
                 .collect()
         } else {
-            self.current().selected_paths()
+            let tab = self.current();
+            let ftp = tab.ftp.as_ref().expect("remote source tab");
+            tab.selected_paths()
+                .iter()
+                .filter_map(|path| ftp.entry(path).map(|entry| PathBuf::from(&entry.name)))
+                .collect()
         };
         if selected.is_empty() {
             self.status("Wähle Dateien oder Ordner für die FTP-Kopie.");
             return;
         }
-        self.enqueue_virtual_transfer("Bereite FTP-Kopie vor …", false, move |job| {
-            let endpoint =
-                arco_app::network_transfer::endpoint(&presets, &endpoint, Some(&root), None)?;
+        self.network_copy_dialog(NetworkCopy {
+            destination: CopyDestination::Local {
+                root,
+                endpoint,
+                profile,
+                upload,
+            },
+            selected,
+            labels,
+        });
+    }
+
+    fn network_copy_dialog(&mut self, copy: NetworkCopy) {
+        let reverse = matches!(
+            copy.destination,
+            CopyDestination::Local { upload: false, .. }
+        );
+        let source = usize::from(reverse);
+        let options: &[&str] = match &copy.destination {
+            CopyDestination::Relay { endpoints, .. }
+                if endpoints[0].0.can_fxp_to(&endpoints[1].0) =>
+            {
+                &["Über diesen PC", "Direkt zwischen den Servern (FXP)"]
+            }
+            _ => &[],
+        };
+        let description = format!(
+            "{} → {}\n{} {}",
+            copy.labels[source],
+            copy.labels[1 - source],
+            copy.selected.len(),
+            crate::locale::tr("ausgewählte Einträge")
+        );
+        self.dialog(
+            "confirm",
+            Pending::NetworkCopy(Box::new(copy)),
+            Dialog {
+                title: "Netzwerkkopie vorbereiten",
+                description: &description,
+                options,
+                options_label: "Übertragungsweg",
+                confirm_label: "Kopiervorschau",
+                ..Default::default()
+            },
+        );
+    }
+
+    pub(crate) fn prepare_network_copy(
+        &mut self,
+        copy: NetworkCopy,
+        direct: bool,
+    ) -> io::Result<()> {
+        let settings = self.job_transfer_options()?;
+        let presets = &self.profile.network_transfer_presets;
+        let ignore = self.ignore_list();
+        let NetworkCopy {
+            destination,
+            selected,
+            labels,
+        } = copy;
+        if let CopyDestination::Relay {
+            endpoints,
+            profiles,
+        } = destination
+        {
+            let endpoints = [
+                settings.endpoint(presets, &endpoints[0], None)?,
+                settings.endpoint(presets, &endpoints[1], None)?,
+            ];
+            if direct {
+                FtpRelayPlan::validate_direct(&endpoints)?;
+            }
+            self.start_job(
+                "Bereite Kopie zwischen FTP-Ordnern vor …",
+                false,
+                move |job| {
+                    let from =
+                        ftp_ignores(ignore.as_deref(), &endpoints[0].1, profiles[0].as_deref());
+                    let to =
+                        ftp_ignores(ignore.as_deref(), &endpoints[1].1, profiles[1].as_deref());
+                    let mut plan = FtpRelayPlan::for_copy(
+                        endpoints.clone(),
+                        &selected,
+                        &|path, directory| from(path, directory) || to(path, directory),
+                        &job.cancel,
+                    )?;
+                    if direct {
+                        plan.use_direct_fxp();
+                    }
+                    let mut rows = std::mem::take(&mut plan.rows);
+                    super::ftp_sync::enable_copy_conflicts(&mut rows, 0);
+                    Ok(Outcome::Sync(Box::new(SyncReview {
+                        plan: ReviewPlan::FtpRelay(plan),
+                        rows,
+                        labels,
+                        visible: Vec::new(),
+                        archives: [None, None],
+                        copy_only: true,
+                    })))
+                },
+            );
+            return Ok(());
+        }
+        let CopyDestination::Local {
+            root,
+            endpoint,
+            profile,
+            upload,
+        } = destination
+        else {
+            unreachable!()
+        };
+        let endpoint = settings.endpoint(presets, &endpoint, Some(&root))?;
+        self.start_job("Bereite FTP-Kopie vor …", false, move |job| {
             let remote_ignored = ftp_ignores(ignore.as_deref(), &endpoint.1, profile.as_deref());
             let ignored = |path: &Path, directory| {
                 remote_ignored(path, directory)
@@ -526,6 +736,7 @@ impl App {
                 copy_only: true,
             })))
         });
+        Ok(())
     }
 
     fn begin_sync(&mut self, setup: SyncSetup) {
@@ -540,6 +751,7 @@ impl App {
             [Some(_), Some(_)] => 2,
         };
         let ftp = matches!(setup.source, SyncSource::Ftp { .. });
+        self.prepare_job_transfer_form(ftp);
         ui.set_sync_ftp(ftp);
         ui.set_sync_archive_side(archive_side);
         ui.set_sync_archive_writable(matches!(archives, [Some(archive), None] | [None, Some(archive)] if archive.catalog.can_sync_write()));
@@ -691,9 +903,37 @@ impl App {
             ui.set_sync_notice("Markiere zuerst Dateien oder Ordner in einem Dateifenster.".into());
             return;
         }
+        let network = match &setup.source {
+            SyncSource::Ftp {
+                local, endpoint, ..
+            } => Some((local.clone(), endpoint.clone())),
+            SyncSource::Disk { .. } => None,
+        };
+        let configured = if let Some((local, endpoint)) = network {
+            match self.job_transfer_options().and_then(|settings| {
+                settings.endpoint(
+                    &self.profile.network_transfer_presets,
+                    &endpoint,
+                    Some(&local),
+                )
+            }) {
+                Ok(endpoint) => Some(endpoint),
+                Err(error) => {
+                    ui.set_sync_notice(crate::locale::message(&error.to_string()).as_ref().into());
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let Some(Pending::SyncSetup(mut setup)) = self.pending.take() else {
             return;
         };
+        if let Some(configured) = configured
+            && let SyncSource::Ftp { endpoint, .. } = &mut setup.source
+        {
+            *endpoint = configured;
+        }
         if let Some(fixed) = setup.fixed_roots.take()
             && let SyncSource::Disk { roots, .. } = &mut setup.source
         {
@@ -711,7 +951,6 @@ impl App {
             (!password.is_empty() && has_archive).then(|| Zeroizing::new(password.to_owned()))
         });
         let ignore = self.ignore_list();
-        let presets = self.profile.network_transfer_presets.clone();
         self.close_dialog();
         let description = super::JobDescription::new(
             crate::OperationKind::Sync,
@@ -734,17 +973,12 @@ impl App {
                         local,
                         endpoint,
                         profile,
+                        selected_remote,
                     } = setup.source
                     else {
                         unreachable!()
                     };
                     let mut last = Instant::now() - Duration::from_secs(1);
-                    let endpoint = arco_app::network_transfer::endpoint(
-                        &presets,
-                        &endpoint,
-                        Some(&local),
-                        None,
-                    )?;
                     let remote_ignored =
                         ftp_ignores(ignore.as_deref(), &endpoint.1, profile.as_deref());
                     let ignored = |path: &Path, directory| {
@@ -753,11 +987,11 @@ impl App {
                                 .as_ref()
                                 .is_some_and(|ignore| ignore.local(&local.join(path), directory))
                     };
-                    let mut plan = FtpPlan::compare(
+                    let mut plan = FtpPlan::compare_selection(
                         &local,
                         endpoint.clone(),
                         &options,
-                        &setup.selected,
+                        [&setup.selected, &selected_remote],
                         &ignored,
                         &job.cancel,
                         |path| {
@@ -890,14 +1124,7 @@ impl App {
         let rows = review
             .visible
             .iter()
-            .map(|&index| {
-                row_data(
-                    index,
-                    &review.rows[index],
-                    review.copy_only,
-                    review.plan.timestamps_only(),
-                )
-            })
+            .map(|&index| review.row_data(index))
             .collect::<Vec<_>>();
         let summary = summary(review);
         let ui = self.ui();
@@ -922,12 +1149,7 @@ impl App {
             _ => return,
         };
         review.rows[index].toggle(action);
-        let data = row_data(
-            index,
-            &review.rows[index],
-            review.copy_only,
-            review.plan.timestamps_only(),
-        );
+        let data = review.row_data(index);
         let summary = summary(review);
         let ui = self.ui();
         let rows = ui.get_sync_rows();
@@ -961,6 +1183,11 @@ impl App {
         });
         self.close_dialog();
         let copy_only = review.copy_only;
+        let copy_label = if review.plan.is_direct_fxp() {
+            "FXP-Direktübertragung"
+        } else {
+            "FTP-Kopie"
+        };
         let timestamps_only = review.plan.timestamps_only();
         let label = if timestamps_only {
             "Änderungszeiten übernehmen"
@@ -968,8 +1195,24 @@ impl App {
             "Synchronisieren"
         };
         let total = review.rows.len();
+        let access = if copy_only {
+            match review.plan.prepare_background_copy(&review.rows, self) {
+                Ok(access) => access,
+                Err(error) => {
+                    self.error("FTP-Kopie", &error.to_string());
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let file_connections = access.as_ref().and_then(NetworkTransfer::file_connections);
         let description = super::JobDescription::new(
-            crate::OperationKind::Sync,
+            if review.plan.is_direct_fxp() {
+                crate::OperationKind::Ftp
+            } else {
+                crate::OperationKind::Sync
+            },
             review.labels[0].clone(),
             review.labels[1].clone(),
         );
@@ -985,7 +1228,11 @@ impl App {
                     last = Instant::now();
                     job.entry_progress(
                         display_path(path),
-                        started.saturating_sub(1),
+                        if file_connections.is_some() {
+                            started
+                        } else {
+                            started.saturating_sub(1)
+                        },
                         total,
                         if timestamps_only {
                             "Änderungszeiten übernehmen …"
@@ -1007,14 +1254,22 @@ impl App {
                         "Der Vergleich zweier Archive enthält keine Schreibaktionen.",
                     ));
                 }
-                (plan, _) => plan.apply(review.rows, &job, review.copy_only, progress)?,
+                (plan, _) => plan.apply(
+                    review.rows,
+                    &job,
+                    review.copy_only,
+                    file_connections.as_ref(),
+                    progress,
+                )?,
             };
             if !report.cancelled {
                 job.entry_progress(
                     String::new(),
                     total,
                     total,
-                    if timestamps_only {
+                    if copy_only {
+                        "Kopiervorgang abgeschlossen"
+                    } else if timestamps_only {
                         "Zeitstempelabgleich abgeschlossen"
                     } else {
                         "Synchronisierung abgeschlossen"
@@ -1023,7 +1278,7 @@ impl App {
             }
             Ok(Outcome::Report(
                 if review.copy_only {
-                    "FTP-Kopie".into()
+                    copy_label.into()
                 } else if timestamps_only {
                     "Zeitstempelabgleich".into()
                 } else {
@@ -1032,8 +1287,14 @@ impl App {
                 report,
             ))
         };
-        if copy_only {
-            self.enqueue_virtual_operation("FTP-Kopie", true, description, work);
+        if let Some(access) = access {
+            if let Err(error) =
+                self.enqueue_network_transfer(copy_label, true, description, access, work)
+            {
+                self.error(copy_label, &error.to_string());
+            }
+        } else if copy_only {
+            self.enqueue_virtual_operation(copy_label, true, description, work);
         } else {
             self.start_operation_job(label, true, description, work);
         }
@@ -1265,10 +1526,12 @@ fn describe(meta: Option<EntryInfo>) -> String {
     let Some(meta) = meta else {
         return "—".into();
     };
-    let Some(size) = meta.size else {
+    if meta.is_dir() {
         return "Ordner".into();
-    };
-    let mut text = human_size(size);
+    }
+    let mut text = meta
+        .size
+        .map_or_else(|| "Größe unbekannt".into(), human_size);
     if let Some(time) = meta.modified {
         let time = DateTime::<Local>::from(time);
         text.push_str(&format!(" · {}", time.format("%d.%m.%y %H:%M")));

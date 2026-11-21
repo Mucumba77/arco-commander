@@ -3,6 +3,7 @@ import { Colors, Button, ActionButton, NavButton, CheckBox } from "dialog-theme.
 
 // A structural type is used here so the shared card stays independent of main.
 export struct PackSelection { paths: bool, recursive: bool, separate: bool, omit-base: bool, move-sources: bool }
+export struct JobTransferForm { preset: int, speed: string }
 
 export component DialogHeading {
     in property <image> icon;
@@ -46,6 +47,40 @@ component Note inherits Text {
     color: Colors.muted;
     font-size: 12px;
     wrap: word-wrap;
+}
+
+export component JobTransferFields inherits VerticalLayout {
+    in property <[string]> presets;
+    in-out property <JobTransferForm> form;
+    in property <bool> initial-focus;
+    in property <int> focus-cycle;
+    spacing: 7px;
+    HorizontalLayout {
+        spacing: 10px;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 4px;
+            FieldLabel { text: @tr("Transfervorgabe"); }
+            preset := ComboBox {
+                model: root.presets;
+                current-index <=> root.form.preset;
+                accessible-label: @tr("Transfervorgabe");
+                init => { if (root.initial-focus) { self.focus(); } }
+            }
+        }
+        VerticalLayout {
+            width: 160px;
+            spacing: 4px;
+            FieldLabel { text: @tr("Durchsatzlimit (KiB/s)"); }
+            speed := LineEdit {
+                text <=> root.form.speed;
+                placeholder-text: @tr("Aus Vorgabe");
+                accessible-label: @tr("Durchsatzlimit (KiB/s)");
+            }
+        }
+    }
+    Text { text: @tr("Leer übernimmt das Limit der Vorgabe. 0 bedeutet unbegrenzt."); color: Colors.muted; wrap: word-wrap; }
+    changed focus-cycle => { if (root.initial-focus && root.focus-cycle > 0) { preset.focus(); } }
 }
 
 export component FormSection inherits Rectangle {
@@ -698,19 +733,36 @@ export component ImagePane inherits Rectangle {
     }
 }
 
+export struct NetworkTransferRow {
+    action: int,
+    limit-action: int,
+    title: string,
+    detail: string,
+    target: string,
+    metrics: JobMetrics,
+    fraction: float,
+    cancelling: bool,
+}
+
+export struct WaitingTransferRow {
+    action: int,
+    title: string,
+}
+
 export struct TransferManagerData {
     active: string,
     pausable: bool,
     paused: bool,
-    waiting: [string],
+    waiting: [WaitingTransferRow],
     retry: bool,
     descriptions: bool,
 }
 
 export component TransferManagerCard inherits Rectangle {
     in property <int> focus-cycle;
-    changed focus-cycle => { if (root.focus-cycle < 0) { close-button.focus(); } else if (root.cancelling || (root.data.active == "" && root.data.waiting.length == 0)) { descriptions-button.focus(); } }
+    changed focus-cycle => { if (root.focus-cycle < 0) { close-button.focus(); } else if (root.cancelling || (root.data.active == "" && root.data.waiting.length == 0 && root.network.length == 0)) { descriptions-button.focus(); } }
     in property <TransferManagerData> data;
+    in property <[NetworkTransferRow]> network;
     in property <bool> cancelling;
     callback choose(int);
     callback dismiss();
@@ -727,7 +779,7 @@ export component TransferManagerCard inherits Rectangle {
             icon: @image-url("icons/move.svg");
             title: @tr("Transfermanager");
         }
-        Rectangle {
+        if root.data.active != "" || root.network.length == 0 : Rectangle {
             background: Colors.surface;
             border-radius: 8px;
             VerticalLayout {
@@ -758,23 +810,58 @@ export component TransferManagerCard inherits Rectangle {
                 }
             }
         }
-        FieldLabel { text: @tr("Wartende Aufträge") + "  ·  \{root.data.waiting.length}"; }
-        if root.data.waiting.length == 0 : Note { text: @tr("Keine Transfers vorgemerkt."); }
-        if root.data.waiting.length > 0 : ScrollView {
+        ScrollView {
             vertical-stretch: 1;
             viewport-width: self.visible-width;
             VerticalLayout {
                 width: parent.visible-width;
-                spacing: 4px;
+                spacing: 6px;
+                if root.network.length > 0 : FieldLabel { text: @tr("Netzwerktransfers") + "  ·  \{root.network.length}"; }
+                for entry[i] in root.network : Rectangle {
+                    background: Colors.surface;
+                    border-radius: 8px;
+                    VerticalLayout {
+                        padding: 10px;
+                        spacing: 5px;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            FieldLabel { text: entry.title; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
+                            if entry.limit-action != 0 : Button {
+                                text: @tr("Durchsatzlimit");
+                                enabled: !entry.cancelling;
+                                clicked => { root.choose(entry.limit-action); }
+                            }
+                            Button {
+                                property <int> cycle: root.focus-cycle;
+                                changed cycle => { if (self.cycle > 0 && i == 0 && root.data.active == "" && self.enabled) { self.focus(); } }
+                                text: @tr("Abbrechen");
+                                enabled: !entry.cancelling;
+                                clicked => { root.choose(entry.action); }
+                            }
+                        }
+                        if entry.target != "" : Text { text: entry.target; color: Colors.text; overflow: elide; }
+                        if entry.detail != "" : Text { text: entry.detail; color: Colors.muted; overflow: elide; }
+                        ProgressRail { height: 5px; progress: entry.fraction; indeterminate: entry.fraction < 0; paused: entry.cancelling; }
+                        if entry.metrics.bytes != "" || entry.metrics.items != "" : HorizontalLayout {
+                            spacing: 8px;
+                            if entry.metrics.items != "" : Text { text: entry.metrics.items; color: Colors.muted; }
+                            if entry.metrics.bytes != "" : Text { text: entry.metrics.bytes; color: Colors.muted; }
+                            Rectangle { horizontal-stretch: 1; }
+                            if entry.metrics.speed != "" && entry.metrics.speed != "—" : Text { text: entry.metrics.speed; color: Colors.text; }
+                            if entry.metrics.finish != "" : Text { text: @tr("Restzeit (geschätzt)") + " " + entry.metrics.remaining; color: Colors.muted; }
+                        }
+                    }
+                }
+                FieldLabel { text: @tr("Wartende Aufträge") + "  ·  \{root.data.waiting.length}"; }
+                if root.data.waiting.length == 0 : Note { text: @tr("Keine Transfers vorgemerkt."); }
                 for entry[i] in root.data.waiting : Button {
                     property <int> cycle: root.focus-cycle;
-                    changed cycle => { if (self.cycle > 0 && i == 0 && root.data.active == "") { self.focus(); } }
-                    text: "\{i + 1}.  \{entry}";
-                    clicked => { root.choose(6 + i); }
+                    changed cycle => { if (self.cycle > 0 && i == 0 && root.data.active == "" && root.network.length == 0) { self.focus(); } }
+                    text: "\{i + 1}.  \{entry.title}";
+                    clicked => { root.choose(entry.action); }
                 }
             }
         }
-        if root.data.waiting.length == 0 : Rectangle { vertical-stretch: 1; }
         Rectangle { height: 1px; background: Colors.edge; }
         HorizontalLayout {
             spacing: 6px;
@@ -821,6 +908,8 @@ export component CompactDialogCard inherits Rectangle {
     in property <bool> secret;
     in property <bool> secondary-secret;
     in property <[string]> options;
+    in property <[string]> transfer-presets;
+    in-out property <JobTransferForm> transfer-form;
     property <string> first: root.value;
     property <string> second: root.secondary-value;
     property <int> choice;
@@ -849,7 +938,7 @@ export component CompactDialogCard inherits Rectangle {
             DialogHeading { icon: root.input ? @image-url("icons/edit.svg") : @image-url("icons/check.svg"); title: root.title; }
             scroll := ScrollView {
                 vertical-stretch: 1;
-                preferred-height: min(340px, fields.preferred-height);
+                preferred-height: min(root.transfer-presets.length > 0 ? 400px : 340px, fields.preferred-height);
                 fields := VerticalLayout {
                     padding: 0px; spacing: 10px;
                     if root.notice != "" : TextEdit { text: root.notice; read-only: true; height: 80px; wrap: word-wrap; accessible-label: @tr("Fehlerdetails"); }
@@ -883,6 +972,12 @@ export component CompactDialogCard inherits Rectangle {
                             init => { if (!root.input) { self.focus(); } }
                         }
                     }
+                    if root.transfer-presets.length > 0 : JobTransferFields {
+                        presets: root.transfer-presets;
+                        form <=> root.transfer-form;
+                        initial-focus: !root.input && root.options.length == 0;
+                        focus-cycle: root.focus-cycle;
+                    }
                 }
             }
             Rectangle { height: 1px; background: Colors.edge; }
@@ -890,9 +985,9 @@ export component CompactDialogCard inherits Rectangle {
                 spacing: 8px; Rectangle { horizontal-stretch: 1; }
                 Button {
                     property <int> cycle: root.focus-cycle;
-                    changed cycle => { if (self.cycle > 0 && !root.input && root.options.length == 0) { self.focus(); } }
+                    changed cycle => { if (self.cycle > 0 && !root.input && root.options.length == 0 && root.transfer-presets.length == 0) { self.focus(); } }
                     text: @tr("Abbrechen"); clicked => { root.dismiss(); }
-                    init => { if (!root.input && root.options.length == 0) { self.focus(); } }
+                    init => { if (!root.input && root.options.length == 0 && root.transfer-presets.length == 0) { self.focus(); } }
                 }
                 Button {
                     property <int> cycle: root.focus-cycle;

@@ -610,22 +610,8 @@ impl App {
                     }
                 }
             }
-            VirtualTab::Ftp { profile, url } => {
-                let mut sessions = self
-                    .panels
-                    .iter()
-                    .flat_map(|panel| &panel.tabs)
-                    .filter_map(|tab| tab.ftp.as_ref())
-                    .filter(|ftp| ftp.location.profile.as_deref() == Some(profile.as_str()));
-                let location = sessions.find_map(|ftp| {
-                    let session = &ftp.location.session;
-                    let directory = session.restore_directory(url.as_deref()).ok()?;
-                    Some(Location::Ftp(FtpLocation {
-                        session: session.clone(),
-                        directory,
-                        profile: Some(profile.clone()),
-                    }))
-                });
+            ref saved @ VirtualTab::Ftp { ref profile, .. } => {
+                let location = self.deferred_ftp_location(saved);
                 if location.is_none() && side == self.active {
                     self.status(format!(
                         "FTP-Tab · Mit Enter das Profil „{profile}“ verbinden."
@@ -646,6 +632,26 @@ impl App {
             self.publish(side);
         }
         true
+    }
+
+    pub(super) fn deferred_ftp_location(&self, saved: &VirtualTab) -> Option<Location> {
+        let VirtualTab::Ftp { profile, url } = saved else {
+            return None;
+        };
+        self.panels
+            .iter()
+            .flat_map(|panel| &panel.tabs)
+            .filter_map(|tab| tab.ftp.as_ref())
+            .filter(|ftp| ftp.location.profile.as_deref() == Some(profile.as_str()))
+            .find_map(|ftp| {
+                let session = &ftp.location.session;
+                let directory = session.restore_directory(url.as_deref()).ok()?;
+                Some(Location::Ftp(FtpLocation {
+                    session: session.clone(),
+                    directory,
+                    profile: Some(profile.clone()),
+                }))
+            })
     }
 
     pub(super) fn open_deferred_tab(&mut self) -> bool {
@@ -822,6 +828,7 @@ impl App {
         tab.archive = source.archive.clone();
         tab.ftp = source.ftp.as_ref().map(|ftp| FtpTab {
             location: ftp.location.clone(),
+            name_aliases: Default::default(),
             listing: Listing {
                 entries: Vec::new(),
                 format: ftp.listing.format,

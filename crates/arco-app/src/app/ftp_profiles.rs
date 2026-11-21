@@ -5,7 +5,7 @@ use crate::network_profile::{connection, connection_settings, jump_profiles, sav
 use crate::panel::{FtpLocation, Location};
 use arco_core::network_import::{self, KnownHosts};
 use arco_core::profile::{
-    self, FtpAddressFamily, FtpListing, FtpProfile, FtpSecurity, SshAgent, TcFtpSite,
+    self, FtpAddressFamily, FtpGateway, FtpListing, FtpProfile, FtpSecurity, SshAgent, TcFtpSite,
 };
 use arco_core::session_url::{self, SessionLink};
 use arco_windows::ftp::{Connection, Url};
@@ -62,6 +62,7 @@ pub(crate) struct SshProfileLogin {
     connection: Connection,
     jumps: Vec<JumpLogin>,
     mode: FtpConnectMode,
+    supplied_password: Option<Zeroizing<String>>,
 }
 
 pub enum FtpConnectMode {
@@ -100,6 +101,61 @@ fn validate_name(name: &str) -> io::Result<()> {
         return Err(invalid("Gib einen Profilnamen mit 1 bis 120 Zeichen ein."));
     }
     Ok(())
+}
+
+pub(super) fn connection_folder(value: &str) -> io::Result<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(String::new());
+    }
+    let parts = value.split('/').map(str::trim).collect::<Vec<_>>();
+    if value.chars().count() > 240
+        || value.chars().any(char::is_control)
+        || parts.len() > 16
+        || parts
+            .iter()
+            .any(|part| matches!(*part, "" | "." | "..") || part.contains('\\'))
+    {
+        return Err(invalid(
+            "Gib einen Verbindungsordner wie Projekte/Atlas ein.",
+        ));
+    }
+    Ok(parts.join("/"))
+}
+
+fn connection_folders(profiles: &BTreeMap<String, FtpProfile>) -> Vec<String> {
+    let mut folders = BTreeMap::new();
+    for profile in profiles
+        .values()
+        .filter(|profile| !profile.folder.is_empty())
+    {
+        let path = &profile.folder;
+        for prefix in path
+            .match_indices('/')
+            .map(|(index, _)| &path[..index])
+            .chain([path.as_str()])
+        {
+            folders
+                .entry(prefix.to_lowercase())
+                .or_insert_with(|| prefix.to_owned());
+        }
+    }
+    folders.into_values().collect()
+}
+
+fn folder_visible(filter: Option<&str>, folder: &str) -> bool {
+    match filter {
+        None => true,
+        Some("") => folder.is_empty(),
+        Some(filter) => {
+            let folder = folder.to_lowercase();
+            let filter = filter.to_lowercase();
+            folder == filter
+                || folder
+                    .strip_prefix(&filter)
+                    .is_some_and(|tail| tail.starts_with('/'))
+        }
+    }
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -392,7 +448,7 @@ impl App {
             self.close_dialog();
         }
         let ui = self.ui();
-        if !ui.get_dialog_kind().is_empty()
+        if (!ui.get_dialog_kind().is_empty() && ui.get_dialog_kind() != "transfer-manager")
             || ui.get_settings_open()
             || ui.get_drive_side() >= 0
             || self.context_menu_open
@@ -435,20 +491,7 @@ impl App {
     pub(crate) fn open_ftp_profiles(&mut self, selection: Option<&str>) {
         self.pending = None;
         let ui = self.ui();
-        let index = selection
-            .and_then(|name| {
-                self.profile
-                    .ftp_profiles
-                    .keys()
-                    .position(|item| item == name)
-            })
-            .map_or(i32::from(!self.profile.ftp_profiles.is_empty()), |index| {
-                index as i32 + 1
-            });
-        ui.set_ftp_profile_names(strings(
-            std::iter::once("Neues Profil")
-                .chain(self.profile.ftp_profiles.keys().map(String::as_str)),
-        ));
+        self.update_ftp_profile_list(selection);
         ui.set_ftp_jump_profiles(strings(
             std::iter::once(crate::locale::tr("Direkte SSH-Verbindung"))
                 .chain(jump_names(&self.profile.ftp_profiles)),
@@ -461,8 +504,65 @@ impl App {
                     .map(|preset| preset.name.as_str()),
             ),
         ));
-        self.update_ftp_profile(index);
         ui.set_dialog_kind("ftp-profiles".into());
+    }
+
+    fn update_ftp_profile_list(&mut self, selection: Option<&str>) {
+        let folders = connection_folders(&self.profile.ftp_profiles);
+        if let Some(profile) = selection.and_then(|name| self.profile.ftp_profiles.get(name))
+            && !folder_visible(self.ftp_folder_filter.as_deref(), &profile.folder)
+        {
+            self.ftp_folder_filter = Some(profile.folder.clone());
+        }
+        let ui = self.ui();
+        ui.set_ftp_folder_names(strings(
+            [
+                crate::locale::tr("Alle Verbindungen"),
+                crate::locale::tr("Ohne Verbindungsordner"),
+            ]
+            .into_iter()
+            .chain(folders.iter().map(String::as_str)),
+        ));
+        let folder_index = match self.ftp_folder_filter.as_deref() {
+            None => 0,
+            Some("") => 1,
+            Some(folder) => {
+                let folder = folder.to_lowercase();
+                match folders
+                    .iter()
+                    .position(|name| name.to_lowercase() == folder)
+                {
+                    Some(index) => index as i32 + 2,
+                    None => {
+                        self.ftp_folder_filter = None;
+                        0
+                    }
+                }
+            }
+        };
+        ui.set_ftp_folder_index(folder_index);
+        let names: Vec<_> = self.visible_ftp_profiles().map(|(name, _)| name).collect();
+        let index = selection
+            .and_then(|name| names.iter().position(|item| *item == name))
+            .map_or(i32::from(!names.is_empty()), |index| index as i32 + 1);
+        ui.set_ftp_profile_names(strings(
+            std::iter::once(crate::locale::tr("Neues Profil")).chain(names),
+        ));
+        self.update_ftp_profile(index);
+    }
+
+    pub(super) fn select_ftp_folder(&mut self, index: i32) {
+        if self.ui().get_dialog_kind() == "ftp-profiles" {
+            self.ftp_folder_filter = match index {
+                0 => None,
+                1 => Some(String::new()),
+                2.. => connection_folders(&self.profile.ftp_profiles)
+                    .into_iter()
+                    .nth(index as usize - 2),
+                _ => return,
+            };
+            self.update_ftp_profile_list(None);
+        }
     }
 
     pub(super) fn select_ftp_profile(&mut self, index: i32) {
@@ -474,124 +574,142 @@ impl App {
     fn update_ftp_profile(&self, index: i32) {
         let ui = self.ui();
         let index = index.clamp(0, self.profile.ftp_profiles.len() as i32);
-        let draft =
-            self.ftp_profile_at(index)
-                .map_or_else(FtpProfileData::default, |(name, profile)| FtpProfileData {
-                    name: name.into(),
-                    address: profile.address.as_str().into(),
-                    user: profile.user.as_str().into(),
-                    proxy: profile.proxy.as_str().into(),
-                    local_directory: profile
-                        .local_directory
-                        .as_ref()
-                        .map_or_else(Default::default, |path| crate::display_path(path).into()),
-                    security: match profile.security {
-                        FtpSecurity::ExplicitTls => 0,
-                        FtpSecurity::ImplicitTls => 1,
-                        FtpSecurity::Plain => 2,
-                        FtpSecurity::Sftp => 3,
-                        FtpSecurity::Scp => 4,
-                        FtpSecurity::WebDav => 5,
-                        FtpSecurity::S3 => 6,
-                    },
-                    active: profile.active,
-                    recycle_remote: profile.recycle_remote,
-                    recycle_overwrites: profile.recycle_overwrites,
-                    transfer_mode: match profile.transfer.mode {
-                        arco_core::profile::FtpTransferMode::Binary => 0,
-                        arco_core::profile::FtpTransferMode::Text => 1,
-                        arco_core::profile::FtpTransferMode::Automatic => 2,
-                    },
-                    transfer_speed: profile
-                        .transfer
-                        .speed_kib
-                        .map(|rate| rate.to_string())
-                        .unwrap_or_default()
-                        .into(),
-                    transfer_time: match profile.transfer.preserve_time {
-                        None => 0,
-                        Some(true) => 1,
-                        Some(false) => 2,
-                    },
-                    transfer_mask: profile.transfer.masks.as_str().into(),
-                    transfer_preset: self
-                        .profile
-                        .network_transfer_presets
-                        .iter()
-                        .position(|preset| {
-                            profile.transfer_preset.as_deref() == Some(preset.name.as_str())
-                        })
-                        .map_or(0, |index| index as i32 + 1),
-                    listing: match profile.listing {
-                        FtpListing::Automatic => 0,
-                        FtpListing::Mlsd => 1,
-                        FtpListing::List => 2,
-                    },
-                    remember: profile.credential.is_some(),
-                    address_family: match profile.address_family {
-                        FtpAddressFamily::Automatic => 0,
-                        FtpAddressFamily::Ipv4 => 1,
-                        FtpAddressFamily::Ipv6 => 2,
-                    },
-                    charset: profile.charset.as_str().into(),
-                    list_pattern: profile.list_pattern.as_str().into(),
-                    show_hidden: profile.show_hidden,
-                    ca_bundle: profile
-                        .ca_bundle
-                        .as_ref()
-                        .map_or_else(Default::default, |path| crate::display_path(path).into()),
-                    client_certificate: profile
-                        .client_certificate
-                        .as_deref()
-                        .unwrap_or_default()
-                        .into(),
-                    mode_z: profile.mode_z,
-                    otp: profile.otp,
-                    ssh_fingerprint: profile.ssh_fingerprint.as_str().into(),
-                    ssh_private_key: profile
-                        .ssh_private_key
-                        .as_ref()
-                        .map_or_else(Default::default, |path| crate::display_path(path).into()),
-                    ssh_agent: match profile.ssh_agent {
-                        None => {
-                            if profile.ssh_kerberos.is_some() {
-                                3
-                            } else {
-                                0
-                            }
+        let draft = self.ftp_profile_at(index).map_or_else(
+            || FtpProfileData {
+                folder: self.ftp_folder_filter.as_deref().unwrap_or_default().into(),
+                ..Default::default()
+            },
+            |(name, profile)| FtpProfileData {
+                name: name.into(),
+                folder: profile.folder.as_str().into(),
+                address: profile.address.as_str().into(),
+                user: profile.user.as_str().into(),
+                proxy: profile.proxy.as_str().into(),
+                telnet_proxy_command: profile.telnet_proxy_command.as_str().into(),
+                local_proxy_command: profile.local_proxy_command.as_str().into(),
+                ssh_proxy_dns_locally: profile.ssh_proxy_dns_locally,
+                ftp_gateway: profile.ftp_gateway.index(),
+                local_directory: profile
+                    .local_directory
+                    .as_ref()
+                    .map_or_else(Default::default, |path| crate::display_path(path).into()),
+                security: match profile.security {
+                    FtpSecurity::ExplicitTls => 0,
+                    FtpSecurity::ImplicitTls => 1,
+                    FtpSecurity::Plain => 2,
+                    FtpSecurity::Sftp => 3,
+                    FtpSecurity::Scp => 4,
+                    FtpSecurity::WebDav => 5,
+                    FtpSecurity::S3 => 6,
+                },
+                active: profile.active,
+                recycle_remote: profile.recycle_remote,
+                recycle_overwrites: profile.recycle_overwrites,
+                synchronize_browsing: profile.synchronize_browsing,
+                transfer_mode: match profile.transfer.mode {
+                    arco_core::profile::FtpTransferMode::Binary => 0,
+                    arco_core::profile::FtpTransferMode::Text => 1,
+                    arco_core::profile::FtpTransferMode::Automatic => 2,
+                },
+                transfer_speed: profile
+                    .transfer
+                    .speed_kib
+                    .map(|rate| rate.to_string())
+                    .unwrap_or_default()
+                    .into(),
+                transfer_time: match profile.transfer.preserve_time {
+                    None => 0,
+                    Some(true) => 1,
+                    Some(false) => 2,
+                },
+                transfer_mask: profile.transfer.masks.as_str().into(),
+                transfer_name_case: profile.transfer.names.case.index(),
+                transfer_windows_names: profile.transfer.names.windows,
+                transfer_preset: self
+                    .profile
+                    .network_transfer_presets
+                    .iter()
+                    .position(|preset| {
+                        profile.transfer_preset.as_deref() == Some(preset.name.as_str())
+                    })
+                    .map_or(0, |index| index as i32 + 1),
+                listing: match profile.listing {
+                    FtpListing::Automatic => 0,
+                    FtpListing::Mlsd => 1,
+                    FtpListing::List => 2,
+                },
+                remember: profile.credential.is_some(),
+                address_family: match profile.address_family {
+                    FtpAddressFamily::Automatic => 0,
+                    FtpAddressFamily::Ipv4 => 1,
+                    FtpAddressFamily::Ipv6 => 2,
+                },
+                charset: profile.charset.as_str().into(),
+                list_pattern: profile.list_pattern.as_str().into(),
+                show_hidden: profile.show_hidden,
+                ca_bundle: profile
+                    .ca_bundle
+                    .as_ref()
+                    .map_or_else(Default::default, |path| crate::display_path(path).into()),
+                client_certificate: profile
+                    .client_certificate
+                    .as_deref()
+                    .unwrap_or_default()
+                    .into(),
+                mode_z: profile.mode_z,
+                http_forward: profile.http_forward,
+                otp: profile.otp,
+                webdav_liberal_escaping: profile.webdav_liberal_escaping,
+                webdav_windows_auth: profile.webdav_windows_auth,
+                webdav_cross_domain_redirects: profile.webdav_cross_domain_redirects,
+                webdav_unencrypted_redirects: profile.webdav_unencrypted_redirects,
+                ssh_fingerprint: profile.ssh_fingerprint.as_str().into(),
+                ssh_private_key: profile
+                    .ssh_private_key
+                    .as_ref()
+                    .map_or_else(Default::default, |path| crate::display_path(path).into()),
+                ssh_agent: match profile.ssh_agent {
+                    None => {
+                        if profile.ssh_kerberos.is_some() {
+                            3
+                        } else {
+                            0
                         }
-                        Some(SshAgent::OpenSsh) => 1,
-                        Some(SshAgent::Pageant) => 2,
-                    },
-                    ssh_kerberos_principal: profile
-                        .ssh_kerberos
-                        .as_deref()
-                        .unwrap_or_default()
-                        .into(),
-                    ssh_kerberos_delegate: profile.ssh_kerberos_delegate,
-                    ssh_kerberos_kex: profile.ssh_kerberos_kex,
-                    ssh_interactive: profile.ssh_interactive,
-                    ssh_jump: profile
-                        .ssh_jump
-                        .as_deref()
-                        .and_then(|jump| {
-                            jump_names(&self.profile.ftp_profiles).position(|name| name == jump)
-                        })
-                        .map_or(0, |index| index as i32 + 1),
-                    ssh_timeout: profile
-                        .ssh_timeout
-                        .map(|time| time.to_string())
-                        .unwrap_or_default()
-                        .into(),
-                    ssh_keepalive: profile
-                        .ssh_keepalive
-                        .map(|time| time.to_string())
-                        .unwrap_or_default()
-                        .into(),
-                    s3_region: profile.s3_region.as_str().into(),
-                    s3_aws_enabled: profile.s3_aws_profile.is_some(),
-                    s3_aws_profile: profile.s3_aws_profile.as_deref().unwrap_or_default().into(),
-                });
+                    }
+                    Some(SshAgent::OpenSsh) => 1,
+                    Some(SshAgent::Pageant) => 2,
+                },
+                ssh_kerberos_principal: profile.ssh_kerberos.as_deref().unwrap_or_default().into(),
+                ssh_kerberos_delegate: profile.ssh_kerberos_delegate,
+                ssh_kerberos_kex: profile.ssh_kerberos_kex,
+                ssh_interactive: profile.ssh_interactive,
+                ssh_jump: profile
+                    .ssh_jump
+                    .as_deref()
+                    .and_then(|jump| {
+                        jump_names(&self.profile.ftp_profiles).position(|name| name == jump)
+                    })
+                    .map_or(0, |index| index as i32 + 1),
+                ssh_timeout: profile
+                    .ssh_timeout
+                    .map(|time| time.to_string())
+                    .unwrap_or_default()
+                    .into(),
+                ssh_keepalive: profile
+                    .ssh_keepalive
+                    .map(|time| time.to_string())
+                    .unwrap_or_default()
+                    .into(),
+                s3_region: profile.s3_region.as_str().into(),
+                s3_aws_enabled: profile.s3_aws_profile.is_some(),
+                s3_aws_profile: profile.s3_aws_profile.as_deref().unwrap_or_default().into(),
+                s3_role_arn: profile.s3_role_arn.as_str().into(),
+                s3_temporary: profile.s3_temporary,
+                s3_token_saved: profile.s3_token_credential.is_some(),
+                s3_virtual_host: profile.s3_virtual_host,
+                s3_requester_pays: profile.s3_requester_pays,
+            },
+        );
         ui.set_ftp_profile_index(index);
         ui.set_ftp_profile_data(draft);
         ui.set_ftp_profile_notice("".into());
@@ -600,11 +718,97 @@ impl App {
 
     fn ftp_profile_at(&self, index: i32) -> Option<(&str, &FtpProfile)> {
         let index = usize::try_from(index).ok()?.checked_sub(1)?;
+        self.visible_ftp_profiles().nth(index)
+    }
+
+    fn visible_ftp_profiles(&self) -> impl Iterator<Item = (&str, &FtpProfile)> {
         self.profile
             .ftp_profiles
             .iter()
-            .nth(index)
+            .filter(|(_, profile)| {
+                folder_visible(self.ftp_folder_filter.as_deref(), &profile.folder)
+            })
             .map(|(name, profile)| (name.as_str(), profile))
+    }
+
+    pub(super) fn detect_ftp_proxy(&mut self, address: String, security: i32) {
+        let ui = self.ui();
+        if ui.get_dialog_kind() != "ftp-profiles" || self.job.is_some() {
+            return;
+        }
+        #[cfg(windows)]
+        {
+            use arco_windows::ftp::{Security, detect_http_proxy};
+            let mode = match security {
+                0 => Security::ExplicitTls,
+                1 => Security::ImplicitTls,
+                2 => Security::Plain,
+                3 => Security::Sftp,
+                4 => Security::Scp,
+                5 => Security::WebDav,
+                6 => Security::S3,
+                _ => return,
+            };
+            let selection = ui.get_ftp_profile_revision();
+            ui.set_ftp_profile_notice("".into());
+            self.start_job("Windows-Proxy ermitteln", false, move |job| {
+                let result = detect_http_proxy(&address, mode, &job.cancel).map_err(|error| {
+                    if error.kind() == io::ErrorKind::Interrupted {
+                        "Auftrag abgebrochen.".into()
+                    } else {
+                        error.to_string()
+                    }
+                });
+                Ok(Outcome::FtpProxyDetected {
+                    selection,
+                    address,
+                    security,
+                    result,
+                })
+            });
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (address, security);
+            ui.set_ftp_profile_notice(
+                crate::locale::tr("Diese Proxy-Erkennung benötigt Windows.").into(),
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    pub(super) fn show_ftp_proxy_offer(
+        &mut self,
+        selection: i32,
+        address: String,
+        security: i32,
+        result: Result<arco_windows::ftp::HttpProxy, String>,
+    ) {
+        use arco_windows::ftp::HttpProxy;
+        let ui = self.ui();
+        if ui.get_dialog_kind() != "ftp-profiles" || ui.get_ftp_profile_revision() != selection {
+            return;
+        }
+        let notice = match result {
+            Ok(HttpProxy::Address(proxy)) => {
+                ui.set_ftp_proxy_offer(crate::FtpProxyOffer {
+                    address: address.into(),
+                    security,
+                    proxy: proxy.to_string().into(),
+                    revision: ui.get_ftp_proxy_offer().revision.wrapping_add(1),
+                });
+                crate::locale::tr(
+                    "Windows-Proxy vorgeschlagen. Speichere das Profil zur Übernahme.",
+                )
+                .to_owned()
+            }
+            Ok(HttpProxy::Direct) => {
+                crate::locale::tr("Windows meldet für dieses Ziel eine Direktverbindung.")
+                    .to_owned()
+            }
+            Err(error) => error,
+        };
+        ui.set_ftp_profile_notice(crate::locale::message(&notice).as_ref().into());
     }
 
     pub(super) fn operate_ftp_profile(
@@ -612,6 +816,7 @@ impl App {
         operation: &str,
         data: FtpProfileData,
         password: &str,
+        token: &str,
     ) {
         let ui = self.ui();
         if ui.get_dialog_kind() != "ftp-profiles" {
@@ -621,27 +826,34 @@ impl App {
             .ftp_profile_at(ui.get_ftp_profile_index())
             .map(|(name, profile)| (name.to_owned(), profile.clone()));
         let result = match (operation, selected) {
-            ("save", selected) => self.save_ftp_profile(selected, data, password),
+            ("save", selected) => self.save_ftp_profile(selected, data, password, token),
             ("save-connect", selected) => {
                 if self.job.is_some() {
                     Err(invalid("Ein Auftrag läuft bereits."))
                 } else {
                     let name = data.name.trim().to_owned();
-                    self.save_ftp_profile(selected, data, password)
-                        .and_then(|()| self.connect_deferred_ftp(&name))
+                    self.save_ftp_profile(selected, data, password, token)
+                        .and_then(|()| {
+                            self.connect_named_ftp_profile(&name, Some((password, token)))
+                        })
                 }
             }
             ("connect", Some((name, profile))) => {
                 self.connect_ftp_profile(name, profile, FtpConnectMode::Panel)
             }
             ("proxy-login", Some((name, profile))) if !profile.proxy.is_empty() => {
+                let user_id_only = proxy_uses_user_id_only(&profile);
                 self.dialog("input", Pending::FtpProxyLogin(name), Dialog {
                     title: "Proxy-Anmeldung",
-                    description: "Hinterlege die Zugangsdaten für den Proxy dieses Profils im Windows-Anmeldeinformationsspeicher.",
+                    description: if user_id_only {
+                        "Gib die Benutzerkennung für den Proxy ein."
+                    } else {
+                        "Hinterlege die Zugangsdaten für den Proxy dieses Profils im Windows-Anmeldeinformationsspeicher."
+                    },
                     value: &profile.proxy_user,
                     placeholder: "Proxy-Benutzername",
-                    second_placeholder: "Proxy-Passwort",
-                    second_secret: true,
+                    second_placeholder: if user_id_only { "" } else { "Proxy-Passwort" },
+                    second_secret: !user_id_only,
                     options: &[crate::locale::tr("Speichern"), crate::locale::tr("Proxy-Anmeldung entfernen")],
                     confirm_label: "Anwenden",
                     ..Dialog::default()
@@ -686,6 +898,7 @@ impl App {
         selected: Option<(String, FtpProfile)>,
         data: FtpProfileData,
         password: &str,
+        token: &str,
     ) -> io::Result<()> {
         let name = data.name.trim();
         validate_name(name)?;
@@ -701,9 +914,18 @@ impl App {
         }
         let local = data.local_directory.trim();
         let mut profile = FtpProfile {
+            folder: connection_folder(&data.folder)?,
             address: data.address.trim().into(),
             user: data.user.trim().into(),
             proxy: data.proxy.trim().into(),
+            telnet_proxy_command: data.telnet_proxy_command.into(),
+            local_proxy_command: data.local_proxy_command.trim().into(),
+            ssh_proxy_dns_locally: data.ssh_proxy_dns_locally,
+            ftp_gateway: if Url::parse(data.proxy.trim()).is_ok_and(|url| url.scheme() == "ftp") {
+                FtpGateway::from_index(data.ftp_gateway)
+            } else {
+                FtpGateway::default()
+            },
             proxy_user: String::new(),
             proxy_credential: None,
             security: match data.security {
@@ -718,6 +940,7 @@ impl App {
             active: data.active,
             recycle_remote: data.recycle_remote && data.security != 6,
             recycle_overwrites: data.recycle_overwrites && data.security == 3,
+            synchronize_browsing: data.synchronize_browsing,
             transfer: arco_core::profile::FtpTransfer {
                 mode: match data.transfer_mode {
                     1 => arco_core::profile::FtpTransferMode::Text,
@@ -740,6 +963,10 @@ impl App {
                     _ => None,
                 },
                 masks: data.transfer_mask.trim().to_owned(),
+                names: arco_core::transfer_names::NameRules {
+                    case: arco_core::transfer_names::NameCase::from_index(data.transfer_name_case),
+                    windows: data.transfer_windows_names,
+                },
             },
             transfer_preset: if data.transfer_preset > 0 {
                 Some(
@@ -771,7 +998,12 @@ impl App {
             client_certificate: (!data.client_certificate.trim().is_empty())
                 .then(|| data.client_certificate.trim().to_owned()),
             mode_z: data.mode_z,
+            http_forward: data.http_forward,
             otp: data.otp,
+            webdav_liberal_escaping: data.security == 5 && data.webdav_liberal_escaping,
+            webdav_windows_auth: data.security == 5 && data.webdav_windows_auth,
+            webdav_cross_domain_redirects: data.security == 5 && data.webdav_cross_domain_redirects,
+            webdav_unencrypted_redirects: data.security == 5 && data.webdav_unencrypted_redirects,
             ssh_fingerprint: data.ssh_fingerprint.trim().into(),
             ssh_private_key: (!data.ssh_private_key.trim().is_empty())
                 .then(|| PathBuf::from(data.ssh_private_key.trim())),
@@ -798,14 +1030,22 @@ impl App {
             ssh_timeout: ssh_number(&data.ssh_timeout)?,
             ssh_keepalive: ssh_number(&data.ssh_keepalive)?,
             s3_region: data.s3_region.trim().into(),
+            s3_virtual_host: data.s3_virtual_host,
+            s3_requester_pays: data.s3_requester_pays,
             s3_aws_profile: data
                 .s3_aws_enabled
                 .then(|| data.s3_aws_profile.trim().to_owned()),
+            s3_role_arn: data.s3_role_arn.trim().into(),
+            s3_temporary: data.s3_temporary,
+            s3_token_credential: None,
             local_directory: (!local.is_empty()).then(|| PathBuf::from(local)),
             credential: None,
         };
         if let Some((_, old)) = &selected
             && old.proxy == profile.proxy
+            && old.local_proxy_command.trim() == profile.local_proxy_command
+            && (Url::parse(&profile.proxy).is_ok_and(|url| url.scheme() != "ftp")
+                || profile.ftp_gateway.supports_proxy_login())
         {
             profile.proxy_user.clone_from(&old.proxy_user);
             profile.proxy_credential.clone_from(&old.proxy_credential);
@@ -819,7 +1059,22 @@ impl App {
                 "Gib einen absoluten Pfad zum lokalen Startordner ein.",
             ));
         }
+        if profile.security.is_ssh() && !profile.ssh_fingerprint.is_empty() {
+            profile.ssh_fingerprint =
+                arco_core::ssh_host_keys::HostKeyPins::parse(&profile.ssh_fingerprint)?.to_string();
+        }
         let new_connection = connection_settings(&profile)?;
+        if !token.is_empty() {
+            if !profile.s3_temporary {
+                return Err(invalid(
+                    "Aktiviere temporäre S3-Zugangsdaten für das Sitzungstoken.",
+                ));
+            }
+            new_connection.check_s3_session_token(token)?;
+        }
+        if new_connection.proxy_uses_user_id_only() {
+            profile.proxy_credential = None;
+        }
         if let Some((old, _)) = &selected
             && old != name
         {
@@ -841,10 +1096,25 @@ impl App {
         let previous = selected
             .as_ref()
             .and_then(|(_, previous)| previous.credential.as_ref().map(|id| (previous, id)));
+        let old_profile = selected.as_ref().map(|(_, old)| old);
+        if data.remember
+            && profile.s3_temporary
+            && token.is_empty()
+            && let Some(old) = old_profile
+            && let Some(id) = &old.s3_token_credential
+        {
+            if !new_connection.same_s3_token_scope(&connection_settings(old)?) {
+                return Err(invalid(
+                    "Gib für die geänderte Verbindung das S3-Sitzungstoken erneut ein.",
+                ));
+            }
+            profile.s3_token_credential = Some(id.clone());
+        }
         let mut staged = None;
         if data.remember
             && profile.ssh_agent.is_none()
             && profile.ssh_kerberos.is_none()
+            && !profile.webdav_windows_auth
             && !(profile.security == FtpSecurity::S3 && profile.user.is_empty())
         {
             if password.is_empty() {
@@ -865,13 +1135,26 @@ impl App {
                 staged = Some(id);
             }
         }
-        profiles.insert(name.to_owned(), profile);
-        if let Err(error) = self.commit_ftp_profiles(profiles) {
-            if let Some(id) = staged
-                && let Err(cleanup) = new_connection.delete_password(&id)
-            {
+        let mut staged_token = None;
+        let saved = (|| {
+            if data.remember && profile.s3_temporary && !token.is_empty() {
+                let id = new_connection.store_s3_session_token(token)?;
+                profile.s3_token_credential = Some(id.clone());
+                staged_token = Some(id);
+            }
+            profiles.insert(name.to_owned(), profile);
+            self.commit_ftp_profiles(profiles)
+        })();
+        if let Err(error) = saved {
+            let password_cleanup = staged
+                .as_deref()
+                .map_or(Ok(()), |id| new_connection.delete_password(id));
+            let token_cleanup = staged_token
+                .as_deref()
+                .map_or(Ok(()), |id| new_connection.delete_s3_session_token(id));
+            if let Err(cleanup) = password_cleanup.and(token_cleanup) {
                 return Err(io::Error::other(format!(
-                    "{error}. Windows-Passwort konnte nicht entfernt werden: {cleanup}"
+                    "{error}. Die vorbereiteten Windows-Zugangsdaten konnten nicht bereinigt werden. {cleanup}"
                 )));
             }
             return Err(error);
@@ -879,11 +1162,15 @@ impl App {
         self.open_ftp_profiles(Some(name));
         let proxy_cleanup =
             self.remove_unused_proxy_password(selected.as_ref().map(|(_, old)| old));
-        let cleanup = self.remove_unused_password(previous).and(proxy_cleanup);
+        let token_cleanup = self.remove_unused_s3_token(old_profile);
+        let cleanup = self
+            .remove_unused_password(previous)
+            .and(proxy_cleanup)
+            .and(token_cleanup);
         self.ui().set_ftp_profile_notice(match cleanup {
             Ok(()) => "Profil gespeichert.".into(),
             Err(error) => format!(
-                "Profil gespeichert. Bisheriges Passwort konnte nicht entfernt werden: {error}"
+                "Profil gespeichert. Bisherige Windows-Zugangsdaten konnten nicht entfernt werden. {error}"
             )
             .into(),
         });
@@ -909,7 +1196,13 @@ impl App {
             profile.proxy_credential = None;
         } else {
             profile.proxy_user = user.trim().into();
-            if profile.proxy_user != previous.proxy_user
+            if proxy_uses_user_id_only(profile) {
+                if !password.is_empty() {
+                    return Err(invalid("Der gewählte Proxy benötigt kein Passwort."));
+                }
+                profile.proxy_credential = None;
+                connection_settings(profile)?;
+            } else if profile.proxy_user != previous.proxy_user
                 || profile.proxy_credential.is_none()
                 || !password.is_empty()
             {
@@ -942,6 +1235,16 @@ impl App {
         profile: FtpProfile,
         mode: FtpConnectMode,
     ) -> io::Result<()> {
+        self.connect_ftp_profile_with_input(name, profile, mode, None)
+    }
+
+    fn connect_ftp_profile_with_input(
+        &mut self,
+        name: String,
+        profile: FtpProfile,
+        mode: FtpConnectMode,
+        supplied: Option<(&str, &str)>,
+    ) -> io::Result<()> {
         if self.job.is_some() || self.panels[self.active].loading {
             return Err(invalid(
                 "Warte, bis der laufende Auftrag und das Dateifenster fertig sind.",
@@ -960,14 +1263,28 @@ impl App {
                 })
             })
             .collect::<io::Result<Vec<_>>>()?;
+        let mut target = connection(&profile)?;
+        let mut supplied_password = None;
+        if profile.security == FtpSecurity::S3
+            && !profile.user.is_empty()
+            && let Some((password, token)) = supplied
+        {
+            if !token.is_empty() {
+                target = target.with_s3_session_token(Zeroizing::new(token.to_owned()))?;
+            }
+            if !password.is_empty() {
+                supplied_password = Some(Zeroizing::new(password.to_owned()));
+            }
+        }
         self.continue_ssh_profile(
             SshProfileLogin {
                 side: self.active,
                 name,
-                connection: connection(&profile)?,
+                connection: target,
                 profile,
                 jumps,
                 mode,
+                supplied_password,
             },
             None,
         )
@@ -1014,6 +1331,7 @@ impl App {
             connection,
             jumps,
             mode,
+            supplied_password,
         } = login;
         let connection = if jumps.is_empty() {
             connection
@@ -1030,8 +1348,13 @@ impl App {
                     .collect(),
             )?
         };
-        let password = saved_secret(&profile, &connection)?;
+        let password = match supplied_password {
+            Some(password) => Some(password),
+            None => saved_secret(&profile, &connection)?,
+        };
+        let needs_token = profile.s3_temporary && !connection.has_s3_session_token();
         if profile.security != FtpSecurity::Plain
+            && !needs_token
             && let Some(password) = password
         {
             self.close_dialog();
@@ -1044,7 +1367,7 @@ impl App {
                 mode,
             );
         }
-        self.dialog("input", Pending::FtpProfilePassword(side, connection, profile.local_directory, name, mode), Dialog {
+        self.dialog("input", Pending::FtpProfilePassword(side, connection, profile.local_directory, name, mode, needs_token), Dialog {
             title: match profile.security {
                 FtpSecurity::Sftp | FtpSecurity::Scp => "SSH-Anmeldung",
                 FtpSecurity::WebDav => "WebDAV-Anmeldung",
@@ -1055,6 +1378,8 @@ impl App {
                 "Gib die Passphrase der SSH-Schlüsseldatei ein. Ist sie unverschlüsselt, lass das Feld leer."
             } else if profile.security.is_ssh() {
                 "Gib das Passwort für diese SSH-Verbindung ein."
+            } else if needs_token {
+                "Gib den geheimen S3-Zugriffsschlüssel und das Sitzungstoken ein."
             } else if profile.security == FtpSecurity::S3 {
                 "Gib den geheimen S3-Zugriffsschlüssel ein."
             } else if profile.otp {
@@ -1067,6 +1392,8 @@ impl App {
                 "Gib das Passwort für diese Verbindung ein. Bei anonymen Servern kann es leer bleiben."
             },
             placeholder: if profile.security == FtpSecurity::S3 { "Geheimer Zugriffsschlüssel" } else { "Passwort" },
+            second_placeholder: if needs_token { "S3-Sitzungstoken" } else { "" },
+            second_secret: needs_token,
             value: password.as_deref().map_or("", String::as_str),
             secret: true,
             ..Dialog::default()
@@ -1075,6 +1402,14 @@ impl App {
     }
 
     pub(super) fn connect_deferred_ftp(&mut self, name: &str) -> io::Result<()> {
+        self.connect_named_ftp_profile(name, None)
+    }
+
+    fn connect_named_ftp_profile(
+        &mut self,
+        name: &str,
+        input: Option<(&str, &str)>,
+    ) -> io::Result<()> {
         let profile = self
             .profile
             .ftp_profiles
@@ -1085,7 +1420,7 @@ impl App {
                     "FTP-Profil „{name}“ fehlt. Lege es an oder importiere es zuerst."
                 ))
             })?;
-        self.connect_ftp_profile(name.to_owned(), profile, FtpConnectMode::Panel)
+        self.connect_ftp_profile_with_input(name.to_owned(), profile, FtpConnectMode::Panel, input)
     }
 
     pub(crate) fn connect_ftp_secret(
@@ -1210,6 +1545,10 @@ impl App {
         let session = Arc::new(self.ssh_challenges(connection).authenticate(password)?);
         let job_title = format!("{}-Verbindung herstellen", session.security().label());
         let deferred = self.panels[side].current().deferred.as_ref();
+        let link_navigation = profile
+            .as_ref()
+            .and_then(|name| self.profile.ftp_profiles.get(name))
+            .is_some_and(|profile| profile.synchronize_browsing);
         let (directory, navigation) = match deferred {
             Some(arco_core::profile::VirtualTab::Ftp {
                 profile: saved,
@@ -1222,13 +1561,15 @@ impl App {
                     Navigation::Refresh,
                 )
             }
-            _ => (
+            _ if local.is_some() || link_navigation => (
                 session.initial_directory(),
-                local.map_or(Navigation::Jump, |local| Navigation::FtpProfile {
+                Navigation::FtpProfile {
                     local,
                     opposite_request: self.panels[1 - side].request,
-                }),
+                    link_navigation,
+                },
             ),
+            _ => (session.initial_directory(), Navigation::Jump),
         };
         let location = Location::Ftp(FtpLocation {
             session,
@@ -1298,11 +1639,12 @@ impl App {
             .as_ref()
             .and_then(|profile| profile.credential.as_ref().map(|id| (profile, id)));
         let proxy_cleanup = self.remove_unused_proxy_password(previous.as_ref());
+        let token_cleanup = self.remove_unused_s3_token(previous.as_ref());
         self.ui().set_ftp_profile_notice(
-            match self.remove_unused_password(credential).and(proxy_cleanup) {
+            match self.remove_unused_password(credential).and(proxy_cleanup).and(token_cleanup) {
                 Ok(()) => "Profil gelöscht.".into(),
                 Err(error) => format!(
-                    "Profil gelöscht. Windows-Passwort konnte nicht entfernt werden: {error}"
+                    "Profil gelöscht. Hinterlegte Windows-Zugangsdaten konnten nicht entfernt werden. {error}"
                 )
                 .into(),
             },
@@ -1333,6 +1675,20 @@ impl App {
                 .any(|profile| profile.proxy_credential.as_ref() == Some(id))
         {
             connection_settings(old)?.delete_proxy_password(id)?;
+        }
+        Ok(())
+    }
+
+    fn remove_unused_s3_token(&self, previous: Option<&FtpProfile>) -> io::Result<()> {
+        if let Some(old) = previous
+            && let Some(id) = &old.s3_token_credential
+            && !self
+                .profile
+                .ftp_profiles
+                .values()
+                .any(|profile| profile.s3_token_credential.as_ref() == Some(id))
+        {
+            connection_settings(old)?.delete_s3_session_token(id)?;
         }
         Ok(())
     }
@@ -1634,7 +1990,13 @@ impl App {
         for (name, imported) in sites {
             let imported = validate_name(&name).and(imported);
             match imported {
-                Ok(profile) if names.insert(name.to_lowercase()) => {
+                Ok(mut profile) if names.insert(name.to_lowercase()) => {
+                    if profile.folder.is_empty()
+                        && let Some((prefix, _)) = name.rsplit_once('/')
+                        && let Ok(folder) = connection_folder(prefix)
+                    {
+                        profile.folder = folder;
+                    }
                     let mode = match profile.security {
                         FtpSecurity::ExplicitTls => "Explizites FTPS",
                         FtpSecurity::ImplicitTls => "Implizites FTPS",
@@ -1732,8 +2094,48 @@ impl App {
     }
 }
 
+fn proxy_uses_user_id_only(profile: &FtpProfile) -> bool {
+    connection_settings(profile).is_ok_and(|connection| connection.proxy_uses_user_id_only())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn profile_folder_filter_includes_nested_folders_and_preserves_profile_names() {
+        use super::*;
+        let profiles = BTreeMap::from([
+            (
+                "Stable Name".into(),
+                FtpProfile {
+                    folder: connection_folder(" Projekte / Übersicht ").unwrap(),
+                    ..Default::default()
+                },
+            ),
+            (
+                "Other Name".into(),
+                FtpProfile {
+                    folder: "projekte/Atlas".into(),
+                    ..Default::default()
+                },
+            ),
+            ("Ungrouped".into(), FtpProfile::default()),
+        ]);
+        assert_eq!(connection_folders(&profiles).len(), 3);
+        assert!(folder_visible(
+            Some("PROJEKTE"),
+            &profiles["Stable Name"].folder
+        ));
+        assert!(folder_visible(
+            Some("projekte/übersicht"),
+            &profiles["Stable Name"].folder
+        ));
+        assert!(!folder_visible(
+            Some("projekt"),
+            &profiles["Stable Name"].folder
+        ));
+        assert!(folder_visible(Some(""), &profiles["Ungrouped"].folder));
+        assert!(connection_folder("Projekte/../Atlas").is_err());
+    }
     use super::*;
     use std::io::Write;
 

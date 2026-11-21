@@ -337,6 +337,31 @@ pub enum VirtualTab {
 }
 
 impl VirtualTab {
+    pub fn for_restore(self) -> Option<Self> {
+        if let Self::Ftp { profile, url } = self {
+            if profile.trim().is_empty() || !clean_tab_text(&profile) {
+                return None;
+            }
+            let url = match url {
+                Some(address) => Some(clean_network_tab_url(&address)?),
+                None => None,
+            };
+            return Some(Self::Ftp { profile, url });
+        }
+        self.tc_path()?;
+        Some(self)
+    }
+
+    pub fn saved_label(&self) -> Option<String> {
+        match self {
+            Self::Ftp {
+                profile,
+                url: Some(url),
+            } => clean_network_tab_url(url).map(|url| format!("{url} · {profile}")),
+            _ => self.tc_path().map(|path| path.replace('\t', " · ")),
+        }
+    }
+
     pub fn tc_path(&self) -> Option<String> {
         match self {
             Self::Archive { file, folder }
@@ -403,11 +428,21 @@ fn valid_wfx_directory(directory: &str) -> bool {
 }
 
 fn clean_ftp_url(value: &str) -> Option<String> {
+    let clean = clean_network_tab_url(value)?;
+    (clean.starts_with("ftp://") || clean.starts_with("ftps://")).then_some(clean)
+}
+
+fn clean_network_tab_url(value: &str) -> Option<String> {
     if !clean_tab_text(value) {
         return None;
     }
     let mut url = url::Url::parse(value).ok()?;
-    if !matches!(url.scheme(), "ftp" | "ftps") || url.query().is_some() || url.fragment().is_some()
+    if !matches!(
+        url.scheme(),
+        "ftp" | "ftps" | "sftp" | "scp" | "http" | "https"
+    ) || url.query().is_some()
+        || url.fragment().is_some()
+        || url.port() == Some(0)
     {
         return None;
     }
@@ -2191,6 +2226,121 @@ pub struct SavedPanel {
     pub tab_options: Vec<SavedTab>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SavedWorkspace {
+    pub panels: [SavedPanel; 2],
+    pub active_panel: usize,
+    pub stacked: bool,
+    pub split_ratio: f32,
+    pub separate_tree_mode: u8,
+    #[serde(default)]
+    pub linked_navigation: bool,
+    #[serde(default)]
+    pub auto_save: bool,
+}
+
+impl SavedWorkspace {
+    pub fn validate(&self) -> io::Result<()> {
+        if self.active_panel >= self.panels.len()
+            || !(0.37..=0.63).contains(&self.split_ratio)
+            || self.separate_tree_mode > 2
+            || self.panels.iter().any(|panel| {
+                panel.active_tab >= panel.tabs.len()
+                    || panel.tabs.iter().any(|path| !path.is_absolute())
+                    || panel.tab_options.len() > panel.tabs.len()
+                    || panel.tab_options.iter().any(|tab| {
+                        tab.virtual_tab
+                            .as_ref()
+                            .is_some_and(|saved| saved.clone().for_restore().is_none())
+                    })
+            })
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Der Arbeitsbereich enthält ungültige Tabs oder Ansichtsoptionen.",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(test, windows))]
+mod workspace_tests {
+    use super::*;
+
+    #[test]
+    fn workspace_round_trip_preserves_layout_and_native_network_target() {
+        let mut profile = Profile::default();
+        let target = VirtualTab::Ftp {
+            profile: "Projekte".into(),
+            url: Some("sftp://alice:fixture-secret@example.test/projekte/%C3%9Cbersicht/".into()),
+        };
+        assert!(target.tc_path().is_none());
+        let target = target.for_restore().unwrap();
+        let workspace = SavedWorkspace {
+            panels: [
+                SavedPanel {
+                    tabs: vec![PathBuf::from(r"C:\links")],
+                    ..Default::default()
+                },
+                SavedPanel {
+                    tabs: vec![PathBuf::from(r"D:\rechts")],
+                    tab_options: vec![SavedTab {
+                        virtual_tab: Some(target.clone()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            ],
+            active_panel: 1,
+            stacked: true,
+            split_ratio: 0.57,
+            separate_tree_mode: 2,
+            linked_navigation: true,
+            auto_save: true,
+        };
+        workspace.validate().unwrap();
+        profile.workspaces.insert("Übersicht".into(), workspace);
+        let serialized = serde_json::to_string(&profile).unwrap();
+        assert!(!serialized.contains("fixture-secret") && !serialized.contains("alice"));
+        let restored = serde_json::from_str::<Profile>(&serialized).unwrap();
+        let workspace = restored.workspaces.get("Übersicht").unwrap();
+        assert_eq!(workspace.active_panel, 1);
+        assert!(workspace.linked_navigation && workspace.stacked);
+        assert!(workspace.auto_save);
+        assert_eq!(workspace.split_ratio, 0.57);
+        assert_eq!(workspace.separate_tree_mode, 2);
+        assert_eq!(workspace.panels[1].tab_options[0].virtual_tab, Some(target));
+    }
+
+    #[test]
+    fn workspace_rejects_unsafe_network_url_and_invalid_active_panel() {
+        let panel = SavedPanel {
+            tabs: vec![PathBuf::from(r"C:\links")],
+            ..Default::default()
+        };
+        let mut workspace = SavedWorkspace {
+            panels: [panel.clone(), panel],
+            active_panel: 2,
+            stacked: false,
+            split_ratio: 0.5,
+            separate_tree_mode: 0,
+            linked_navigation: false,
+            auto_save: false,
+        };
+        assert!(workspace.validate().is_err());
+        workspace.active_panel = 1;
+        workspace.panels[1].tab_options.push(SavedTab {
+            virtual_tab: Some(VirtualTab::Ftp {
+                profile: "Projekte".into(),
+                url: Some("https://example.test/path/?secret=fixture".into()),
+            }),
+            ..Default::default()
+        });
+        assert!(workspace.validate().is_err());
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SavedTab {
@@ -2365,6 +2515,13 @@ pub struct Profile {
     pub buttonbar_templates: BTreeMap<String, ButtonbarTemplate>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub tab_groups: BTreeMap<String, [SavedPanel; 2]>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub workspaces: BTreeMap<String, SavedWorkspace>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_workspace: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recent_workspaces: Vec<String>,
+    pub workspace_jump_list: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<crate::plugin::Registration>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -2382,6 +2539,9 @@ pub struct Profile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub everything_cli: Option<PathBuf>,
     pub transfer_rate_kib: u32,
+    pub parallel_network_transfers: u8,
+    pub parallel_network_files: bool,
+    pub parallel_sftp_minimum_kib: u32,
     pub transfer_ntfs: crate::files::NtfsCopyOptions,
     pub transfer_descriptions: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2397,6 +2557,8 @@ pub struct Profile {
     pub ftp_profiles: BTreeMap<String, FtpProfile>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub network_transfer_presets: Vec<crate::transfer_presets::TransferPreset>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub network_command_templates: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub packer_profiles: BTreeMap<String, crate::packer_profile::PackerProfile>,
     pub archives: crate::archive_settings::Settings,
@@ -2482,6 +2644,10 @@ impl Default for Profile {
             starter: Vec::new(),
             buttonbar_templates: BTreeMap::new(),
             tab_groups: BTreeMap::new(),
+            workspaces: BTreeMap::new(),
+            active_workspace: None,
+            recent_workspaces: Vec::new(),
+            workspace_jump_list: false,
             plugins: Vec::new(),
             wdx_columns: Vec::new(),
             views: Default::default(),
@@ -2492,6 +2658,9 @@ impl Default for Profile {
             search_profiles: BTreeMap::new(),
             everything_cli: None,
             transfer_rate_kib: 0,
+            parallel_network_transfers: 2,
+            parallel_network_files: false,
+            parallel_sftp_minimum_kib: 0,
             transfer_ntfs: Default::default(),
             transfer_descriptions: true,
             transfer_log: None,
@@ -2502,6 +2671,7 @@ impl Default for Profile {
             sync_profiles: BTreeMap::new(),
             ftp_profiles: BTreeMap::new(),
             network_transfer_presets: Vec::new(),
+            network_command_templates: BTreeMap::new(),
             packer_profiles: BTreeMap::new(),
             archives: Default::default(),
             editor: None,
@@ -2657,6 +2827,56 @@ pub enum FtpListing {
     List,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FtpGateway {
+    #[default]
+    UserAtHost,
+    Site,
+    ProxyThenUserAtHost,
+    Open,
+    ProxyThenUser,
+    ProxyAtHostThenUser,
+    UserAtHostAndProxy,
+    UserAtProxyAtHost,
+}
+
+impl FtpGateway {
+    pub const ALL: [Self; 8] = [
+        Self::UserAtHost,
+        Self::Site,
+        Self::ProxyThenUserAtHost,
+        Self::Open,
+        Self::ProxyThenUser,
+        Self::ProxyAtHostThenUser,
+        Self::UserAtHostAndProxy,
+        Self::UserAtProxyAtHost,
+    ];
+
+    pub fn from_index(index: i32) -> Self {
+        Self::ALL.get(index as usize).copied().unwrap_or_default()
+    }
+
+    pub fn index(self) -> i32 {
+        Self::ALL
+            .iter()
+            .position(|item| *item == self)
+            .expect("FTP gateway mode") as i32
+    }
+
+    pub fn supports_proxy_login(self) -> bool {
+        self != Self::UserAtHost
+    }
+
+    pub fn requires_proxy_login(self) -> bool {
+        !matches!(self, Self::UserAtHost | Self::Site | Self::Open)
+    }
+
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SshAgent {
@@ -2680,6 +2900,8 @@ pub struct FtpTransfer {
     pub speed_kib: Option<u32>,
     pub preserve_time: Option<bool>,
     pub masks: String,
+    #[serde(skip_serializing_if = "crate::transfer_names::NameRules::is_default")]
+    pub names: crate::transfer_names::NameRules,
 }
 
 impl FtpTransfer {
@@ -2691,12 +2913,20 @@ impl FtpTransfer {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FtpProfile {
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub folder: String,
     pub address: String,
     pub user: String,
     pub recycle_remote: bool,
     pub recycle_overwrites: bool,
+    pub synchronize_browsing: bool,
     pub security: FtpSecurity,
     pub proxy: String,
+    pub telnet_proxy_command: String,
+    pub local_proxy_command: String,
+    pub ssh_proxy_dns_locally: bool,
+    #[serde(skip_serializing_if = "FtpGateway::is_default")]
+    pub ftp_gateway: FtpGateway,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub proxy_user: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2714,6 +2944,7 @@ pub struct FtpProfile {
     pub ca_bundle: Option<PathBuf>,
     pub client_certificate: Option<String>,
     pub mode_z: bool,
+    pub http_forward: bool,
     pub otp: bool,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub ssh_fingerprint: String,
@@ -2732,10 +2963,21 @@ pub struct FtpProfile {
     pub ssh_timeout: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ssh_keepalive: Option<u64>,
+    pub webdav_liberal_escaping: bool,
+    pub webdav_windows_auth: bool,
+    pub webdav_cross_domain_redirects: bool,
+    pub webdav_unencrypted_redirects: bool,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub s3_region: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub s3_aws_profile: Option<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub s3_role_arn: String,
+    pub s3_temporary: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub s3_token_credential: Option<String>,
+    pub s3_virtual_host: bool,
+    pub s3_requester_pays: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_directory: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]

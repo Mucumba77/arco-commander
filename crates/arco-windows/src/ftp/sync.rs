@@ -17,10 +17,53 @@ pub struct SyncUpload<'a> {
 }
 
 #[derive(Clone, Copy)]
+pub(super) struct Publication<'a> {
+    pub name: &'a str,
+    pub expected: Option<&'a Entry>,
+    pub size: u64,
+    pub modified_utc: Option<&'a str>,
+}
+
+#[derive(Clone, Copy)]
 pub struct SyncChecksum {
     command: &'static str,
     algorithm: &'static str,
     hex_len: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UnixMetadata {
+    pub mode: Option<u16>,
+    pub owner: Option<u32>,
+    pub group: Option<u32>,
+}
+
+impl UnixMetadata {
+    pub fn validate(self, security: Security) -> io::Result<()> {
+        if self.mode.is_some_and(|mode| mode > 0o7777)
+            || self.owner == Some(u32::MAX)
+            || self.group == Some(u32::MAX)
+            || (self.mode.is_none() && self.owner.is_none() && self.group.is_none())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Gib gültige Rechte, eine UID oder eine GID ein.",
+            ));
+        }
+        if !security.is_ssh() && (self.owner.is_some() || self.group.is_some()) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Besitzer und Gruppe benötigen SFTP oder SCP.",
+            ));
+        }
+        if !security.is_ssh() && !security.is_ftp() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Der Server stellt hier keine Unix-Rechte bereit.",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Session {
@@ -150,7 +193,23 @@ impl Session {
         Ok(url)
     }
 
+    pub fn child_directory(&self, base: &Url, name: &str) -> io::Result<Url> {
+        self.validate(base)?;
+        check_segment(name)?;
+        let mut child = base.clone();
+        child
+            .path_segments_mut()
+            .map_err(|_| super::invalid_input("Ungültiger Serverordner."))?
+            .pop_if_empty()
+            .push(name)
+            .push("");
+        Ok(child)
+    }
+
     pub fn list_sync(&self, directory: &Url, cancel: &AtomicBool) -> io::Result<Listing> {
+        if self.is_http_forward_ftp() {
+            return self.list(directory, cancel);
+        }
         if self.is_sftp() {
             return self.list_sftp(directory, true, cancel);
         }
@@ -194,35 +253,37 @@ impl Session {
         cancel: &AtomicBool,
         mut progress: impl FnMut(super::DownloadProgress),
     ) -> io::Result<()> {
-        let size = expected
-            .size
-            .filter(|_| expected.directory == Some(false))
-            .ok_or_else(|| {
-                io::Error::other("Für den Download fehlt die erwartete FTP-Dateigröße.")
-            })?;
+        if expected.directory != Some(false)
+            || expected.size.is_none() && !self.is_http_forward_ftp()
+        {
+            return Err(io::Error::other(
+                "Für den Download fehlt eine reguläre FTP-Datei mit erwarteter Größe.",
+            ));
+        }
+        let size = expected.size;
         self.verify_sync_entry(directory, expected, cancel)?;
         let url = self.file(directory, &expected.name)?;
-        self.receive_file(
-            &url,
-            output,
-            TransferMode::Binary,
-            Some(size),
-            cancel,
-            || {
-                progress(super::DownloadProgress {
+        self.receive_file(&url, output, TransferMode::Binary, size, cancel, |update| {
+            let update = if let Some(update) = update {
+                update
+            } else {
+                super::DownloadProgress {
                     received: output.metadata()?.len(),
-                    total: Some(size),
+                    total: size,
                     phase: super::DownloadPhase::Receiving,
-                });
-                Ok(())
-            },
-        )?;
+                }
+            };
+            progress(update);
+            Ok(())
+        })?;
         progress(super::DownloadProgress {
             received: output.metadata()?.len(),
-            total: Some(size),
+            total: size,
             phase: super::DownloadPhase::Verifying,
         });
-        if output.metadata()?.len() != size {
+        if let Some(size) = size
+            && output.metadata()?.len() != size
+        {
             return Err(io::Error::other(
                 "Die heruntergeladene Größe weicht vom FTP-Vergleich ab.",
             ));
@@ -304,13 +365,22 @@ impl Session {
         directory: &Url,
         cancel: &AtomicBool,
     ) -> io::Result<Option<SyncChecksum>> {
+        self.sync_checksum_method_for(directory, None, cancel)
+    }
+
+    pub(super) fn sync_checksum_method_for(
+        &self,
+        directory: &Url,
+        algorithm: Option<&str>,
+        cancel: &AtomicBool,
+    ) -> io::Result<Option<SyncChecksum>> {
         if !self.security().is_ftp() {
             return Ok(None);
         }
         Ok(self
             .checksum_replies(directory, &["FEAT"], cancel)?
             .as_deref()
-            .and_then(checksum_method))
+            .and_then(|replies| checksum_method(replies, algorithm)))
     }
 
     pub fn sync_checksum(
@@ -372,7 +442,7 @@ impl Session {
         name: &str,
         cancel: &AtomicBool,
     ) -> io::Result<()> {
-        check_quote_name(name)?;
+        self.check_write_name(name)?;
         expect_entry(&self.list_sync(parent, cancel)?, name, None)?;
         let url = self.file(parent, name)?;
         match self.security() {
@@ -400,7 +470,7 @@ impl Session {
         name: &str,
         cancel: &AtomicBool,
     ) -> io::Result<()> {
-        check_quote_name(name)?;
+        self.check_write_name(name)?;
         if before.name == name {
             return Ok(());
         }
@@ -438,7 +508,7 @@ impl Session {
         before: &Entry,
         cancel: &AtomicBool,
     ) -> io::Result<()> {
-        check_quote_name(&before.name)?;
+        self.check_write_name(&before.name)?;
         let listing = self.list_sync(parent, cancel)?;
         let verb = if before.directory == Some(true) {
             let current = find_entry(&listing, &before.name)?;
@@ -460,6 +530,9 @@ impl Session {
             "RMD"
         } else {
             expect_entry(&listing, &before.name, Some(before))?;
+            if before.symlink {
+                return self.remove_remote_link(parent, &before.name, cancel);
+            }
             "DELE"
         };
         match self.security() {
@@ -478,41 +551,71 @@ impl Session {
         permissions: u16,
         cancel: &AtomicBool,
     ) -> io::Result<()> {
-        if permissions > 0o7777 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Ungültige FTP-Dateirechte.",
-            ));
-        }
-        check_quote_name(&before.name)?;
-        self.verify_sync_entry(parent, before, cancel)?;
-        if self.is_sftp() {
-            return self.sftp_set_metadata(
-                &self.file(parent, &before.name)?,
-                Some(permissions),
-                None,
-                cancel,
-            );
-        }
-        if self.security() == Security::Scp {
-            return self.scp_metadata(
-                &self.file(parent, &before.name)?,
-                Some(permissions),
-                None,
-                cancel,
-            );
-        }
-        if !self.security().is_ftp() {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Der Server stellt hier keine Unix-Rechte bereit.",
-            ));
-        }
-        self.quote_in_directory(
+        self.set_unix_metadata(
             parent,
-            &[&format!("+SITE CHMOD {permissions:03o} {}", before.name)],
+            before,
+            UnixMetadata {
+                mode: Some(permissions),
+                ..Default::default()
+            },
             cancel,
         )
+    }
+
+    pub fn unix_metadata(
+        &self,
+        parent: &Url,
+        entry: &Entry,
+        cancel: &AtomicBool,
+    ) -> io::Result<UnixMetadata> {
+        let target = self.file(parent, &entry.name)?;
+        match self.security() {
+            Security::Sftp => self.sftp_unix_metadata(&target, cancel),
+            Security::Scp => self.scp_unix_metadata(&target, cancel),
+            _ => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Der Server stellt hier keine Unix-Rechte bereit.",
+            )),
+        }
+    }
+
+    pub fn set_unix_metadata(
+        &self,
+        parent: &Url,
+        before: &Entry,
+        edit: UnixMetadata,
+        cancel: &AtomicBool,
+    ) -> io::Result<()> {
+        edit.validate(self.security())?;
+        if before.directory.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Server-Rechte lassen sich nur für reguläre Dateien und Ordner ändern.",
+            ));
+        }
+        if self.security() == Security::Sftp {
+            return self.sftp_set_unix_metadata(
+                &self.file(parent, &before.name)?,
+                before,
+                edit,
+                cancel,
+            );
+        }
+        self.verify_sync_entry(parent, before, cancel)?;
+        match self.security() {
+            Security::Scp => {
+                self.scp_set_unix_metadata(&self.file(parent, &before.name)?, before, edit, cancel)
+            }
+            _ => {
+                check_quote_name(&before.name)?;
+                let mode = edit.mode.expect("FTP permissions validated");
+                self.quote_in_directory(
+                    parent,
+                    &[&format!("+SITE CHMOD {mode:03o} {}", before.name)],
+                    cancel,
+                )
+            }
+        }
     }
 
     pub fn upload_sync(
@@ -522,12 +625,13 @@ impl Session {
         verify_source: impl FnOnce() -> io::Result<()>,
         cancel: &AtomicBool,
     ) -> io::Result<Entry> {
-        check_quote_name(upload.name)?;
-        if upload.modified_utc.is_some_and(|value| {
-            value.len() != 14 || !value.bytes().all(|byte| byte.is_ascii_digit())
-        }) {
-            return Err(io::Error::other("Ungültiger UTC-Zeitstempel für FTP."));
-        }
+        let publication = Publication {
+            name: upload.name,
+            expected: upload.expected,
+            size: upload.size,
+            modified_utc: upload.modified_utc,
+        };
+        self.validate_publication(publication)?;
         if matches!(self.security(), Security::WebDav | Security::S3) {
             expect_entry(
                 &self.list_sync(parent, cancel)?,
@@ -607,50 +711,7 @@ impl Session {
                 )?;
             }
             verify_source()?;
-            if let Some(time) = upload.modified_utc {
-                let result = if self.is_sftp() {
-                    self.sftp_set_metadata(&self.file(parent, temporary)?, None, Some(time), cancel)
-                } else if self.security() == Security::Scp {
-                    self.scp_metadata(&self.file(parent, temporary)?, None, Some(time), cancel)
-                } else {
-                    self.quote_in_directory(parent, &[&format!("+MFMT {time} {temporary}")], cancel)
-                };
-                match result {
-                    Err(error) if error.kind() == io::ErrorKind::Unsupported => (),
-                    result => result?,
-                }
-            }
-            let listing = self.list_sync(parent, cancel)?;
-            expect_entry(&listing, upload.name, upload.expected)?;
-            let staged = find_entry(&listing, temporary)?
-                .filter(|entry| {
-                    entry.name == temporary
-                        && entry.directory == Some(false)
-                        && entry.size == Some(upload.size)
-                })
-                .ok_or_else(|| {
-                    io::Error::other(
-                        "Der Server hat die Größe der temporären Datei nicht bestätigt.",
-                    )
-                })?;
-            if let Some(previous) = upload.expected
-                && self.connection.recycle_overwrites
-                && !self.in_recycle_directory(parent)
-            {
-                return self.replace_recycling_previous(parent, staged, previous, cancel);
-            }
-            let publication = self.rename_in_directory(parent, temporary, upload.name, cancel);
-            match (publication, upload.expected) {
-                (Err(error), Some(previous))
-                    if error.kind() == io::ErrorKind::Unsupported
-                        || (self.security().is_ssh()
-                            && error.kind() == io::ErrorKind::AlreadyExists) =>
-                {
-                    self.replace_with_backup(parent, staged, previous, cancel)
-                }
-                (Ok(()), _) => self.verify_published(parent, staged, upload.name, cancel),
-                (Err(error), _) => Err(error),
-            }
+            self.publish_sync_stage(parent, temporary, publication, cancel)
         })();
         result.map_err(|error| {
             if !temporary_created {
@@ -675,6 +736,67 @@ impl Session {
             }
             error
         })
+    }
+
+    pub(super) fn publish_sync_stage(
+        &self,
+        parent: &Url,
+        temporary: &str,
+        publication: Publication<'_>,
+        cancel: &AtomicBool,
+    ) -> io::Result<Entry> {
+        if let Some(time) = publication.modified_utc {
+            let result = if self.is_sftp() {
+                self.sftp_set_metadata(&self.file(parent, temporary)?, None, Some(time), cancel)
+            } else if self.security() == Security::Scp {
+                self.scp_metadata(&self.file(parent, temporary)?, None, Some(time), cancel)
+            } else {
+                self.quote_in_directory(parent, &[&format!("+MFMT {time} {temporary}")], cancel)
+            };
+            match result {
+                Err(error) if error.kind() == io::ErrorKind::Unsupported => (),
+                result => result?,
+            }
+        }
+        let listing = self.list_sync(parent, cancel)?;
+        expect_entry(&listing, publication.name, publication.expected)?;
+        let staged = find_entry(&listing, temporary)?
+            .filter(|entry| {
+                entry.name == temporary
+                    && entry.directory == Some(false)
+                    && entry.size == Some(publication.size)
+            })
+            .ok_or_else(|| {
+                io::Error::other("Der Server hat die Größe der temporären Datei nicht bestätigt.")
+            })?;
+        if let Some(previous) = publication.expected
+            && self.connection.recycle_overwrites
+            && !self.in_recycle_directory(parent)
+        {
+            return self.replace_recycling_previous(parent, staged, previous, cancel);
+        }
+        let renamed = self.rename_in_directory(parent, temporary, publication.name, cancel);
+        match (renamed, publication.expected) {
+            (Err(error), Some(previous))
+                if error.kind() == io::ErrorKind::Unsupported
+                    || (self.security().is_ssh()
+                        && error.kind() == io::ErrorKind::AlreadyExists) =>
+            {
+                self.replace_with_backup(parent, staged, previous, cancel)
+            }
+            (Ok(()), _) => self.verify_published(parent, staged, publication.name, cancel),
+            (Err(error), _) => Err(error),
+        }
+    }
+
+    pub(super) fn validate_publication(&self, publication: Publication<'_>) -> io::Result<()> {
+        self.check_write_name(publication.name)?;
+        if publication.modified_utc.is_some_and(|value| {
+            value.len() != 14 || !value.bytes().all(|byte| byte.is_ascii_digit())
+        }) {
+            return Err(io::Error::other("Ungültiger UTC-Zeitstempel für FTP."));
+        }
+        Ok(())
     }
 
     fn replace_with_backup(
@@ -753,8 +875,8 @@ impl Session {
         to: &str,
         cancel: &AtomicBool,
     ) -> io::Result<()> {
-        check_quote_name(from)?;
-        check_quote_name(to)?;
+        self.check_write_name(from)?;
+        self.check_write_name(to)?;
         if self.is_sftp() {
             return self.sftp_rename(&self.file(parent, from)?, &self.file(parent, to)?, cancel);
         }
@@ -766,6 +888,14 @@ impl Session {
             &[&format!("+RNFR {from}"), &format!("+RNTO {to}")],
             cancel,
         )
+    }
+
+    pub(super) fn check_write_name(&self, name: &str) -> io::Result<()> {
+        if self.security().is_ftp() {
+            check_quote_name(name)
+        } else {
+            check_segment(name)
+        }
     }
 
     fn remove_in_directory(
@@ -817,7 +947,7 @@ impl Session {
     }
 }
 
-fn checksum_method(replies: &[u8]) -> Option<SyncChecksum> {
+fn checksum_method(replies: &[u8], requested: Option<&str>) -> Option<SyncChecksum> {
     let replies = String::from_utf8_lossy(replies);
     let mut lines = replies.lines();
     lines.by_ref().find(|line| line.starts_with("211-"))?;
@@ -836,13 +966,17 @@ fn checksum_method(replies: &[u8]) -> Option<SyncChecksum> {
     let advertised: Vec<_> = hash.map(|name| name.trim().trim_end_matches('*')).collect();
     for (algorithm, hex_len) in [
         ("SHA-512", 128),
+        ("SHA-384", 96),
         ("SHA-256", 64),
+        ("SHA-224", 56),
         ("SHA-1", 40),
         ("MD5", 32),
+        ("CRC32", 8),
     ] {
-        if advertised
-            .iter()
-            .any(|name| name.eq_ignore_ascii_case(algorithm))
+        if requested.is_none_or(|requested| requested == algorithm)
+            && advertised
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(algorithm))
         {
             return Some(SyncChecksum {
                 command: "HASH",
@@ -857,9 +991,10 @@ fn checksum_method(replies: &[u8]) -> Option<SyncChecksum> {
         ("MD5", "MD5", 32),
         ("XCRC", "CRC32", 8),
     ] {
-        if features
-            .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case(command))
+        if requested.is_none_or(|requested| requested == algorithm)
+            && features
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(command))
         {
             return Some(SyncChecksum {
                 command,
@@ -987,7 +1122,11 @@ fn find_entry<'a>(listing: &'a Listing, name: &str) -> io::Result<Option<&'a Ent
     Ok(first)
 }
 
-fn expect_entry(listing: &Listing, name: &str, expected: Option<&Entry>) -> io::Result<()> {
+pub(super) fn expect_entry(
+    listing: &Listing,
+    name: &str,
+    expected: Option<&Entry>,
+) -> io::Result<()> {
     if find_entry(listing, name)? == expected {
         Ok(())
     } else {
@@ -1007,6 +1146,7 @@ mod tests {
     fn ftp_checksum_negotiation_validates_algorithm_digest_and_filename() {
         let method = checksum_method(
             b"220 Ready\r\n211-Features:\r\n XCRC\r\n HASH SHA-256;SHA-1*\r\n211 End\r\n",
+            None,
         )
         .unwrap();
         assert_eq!(method.command, "HASH");
@@ -1030,8 +1170,14 @@ mod tests {
             )
             .is_none()
         );
-        let legacy =
-            checksum_method(b"211-Features:\r\n XCRC filename;start;end\r\n211 End\r\n").unwrap();
+        let features =
+            b"211-Features:\r\n XCRC filename;start;end\r\n HASH SHA-256;SHA-1*\r\n211 End\r\n";
+        let legacy = checksum_method(features, Some("CRC32")).unwrap();
+        assert_eq!(
+            checksum_method(features, Some("SHA-1")).unwrap().algorithm,
+            "SHA-1"
+        );
+        assert!(checksum_method(features, Some("MD5")).is_none());
         for response in [
             format!("213 SHA-256 0-5 {hash} {name}\r\n"),
             format!("213-Computing\r\n213 SHA-256 0-5 {hash} {name}\r\n"),
@@ -1076,7 +1222,7 @@ mod tests {
             Some("A10F2245")
         );
         assert!(checksum_reply(b"250 A10F224G\r\n", legacy, name, None).is_none());
-        assert!(checksum_method(b"500 Unknown command\r\n").is_none());
+        assert!(checksum_method(b"500 Unknown command\r\n", None).is_none());
     }
 
     #[test]

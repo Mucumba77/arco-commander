@@ -376,6 +376,13 @@ Pausieren	Pause
 Transfer abbrechen	Cancel transfer
 Wartende Aufträge	Queued jobs
 Keine Transfers vorgemerkt.	No transfers queued.
+Netzwerktransfers	Network transfers
+Parallele Netzwerktransfers	Concurrent network transfers
+Dateien innerhalb eines Netzwerkauftrags parallel übertragen	Transfer files in parallel within a network job
+Parallele SFTP-Downloads ab (KiB)	Parallel SFTP downloads from (KiB)
+0 lädt jede SFTP-Datei über eine Verbindung.	0 downloads each SFTP file over one connection.
+Gib die SFTP-Mindestgröße in KiB als ganze Zahl ein.	Enter the SFTP size threshold in KiB as a whole number.
+Gib 1 bis 8 parallele Netzwerktransfers ein.	Enter a limit from 1 to 8 concurrent network transfers.
 Dateikommentare mitführen	Preserve file comments
 Letzte Kopie erneut versuchen	Retry last copy
 Geschwindigkeit und Protokoll	Speed and log
@@ -1282,17 +1289,52 @@ HTTP-, SOCKS- oder FTP-Proxy	HTTP, SOCKS or FTP proxy
 IP-Version	IP version
 Serverzeichensatz	Server character encoding
 Dateitransfers mit MODE Z komprimieren	Compress file transfers using MODE Z
+FTP über HTTP-Forward-Proxy (nur Lesen)	FTP through HTTP forward proxy (read only)
+Telnet-Proxy-Kommando (optional)	Telnet proxy command (optional)
+Lokales Proxy-Programm verwenden	Use a local proxy program
+Lokales Proxy-Kommando	Local proxy command
+SSH-Zielnamen lokal auflösen	Resolve SSH destination names locally
+Windows-Proxy ermitteln	Detect Windows proxy
+Windows-Proxy vorgeschlagen. Speichere das Profil zur Übernahme.	Windows proxy suggested. Save the profile to apply it.
+Windows meldet für dieses Ziel eine Direktverbindung.	Windows reports a direct connection for this destination.
+Diese Proxy-Erkennung benötigt Windows.	This proxy discovery requires Windows.
+Gib die Benutzerkennung für den Proxy ein.	Enter the proxy user ID.
+Der gewählte Proxy benötigt kein Passwort.	The selected proxy requires no password.
+FTP über HTTP-Forward kann nur als Quelle dienen.	FTP through an HTTP forward proxy can only be used as a source.
+Größe unbekannt	Size unknown
 Versteckte Dateien mit LIST -a anfordern	Request hidden files with LIST -a
 Eigenes LIST-Format (regulärer Ausdruck)	Custom LIST format (regular expression)
 Benannte Gruppen: name, kind und optional size. Ein eigenes Format verwendet LIST.	Named groups: name, kind and optional size. Custom formats use LIST.
 FTPS-Zertifikate	FTPS certificates
 CA-Datei (PEM, optional)	CA file (PEM, optional)
 Clientzertifikat (Windows-Fingerabdruck, optional)	Client certificate (Windows thumbprint, optional)
-Einmalpasswort nach RFC 2289 (OTP)	RFC 2289 one-time password (OTP)
+Einmalpasswort (OTP / S/KEY)	One-time password (OTP / S/KEY)
+FTP-Gateway (ftp://)	FTP gateway (ftp://)
+USER Benutzer@Server	USER user@host
+SITE Server	SITE host
+Proxy-Login → USER Benutzer@Server	Proxy login → USER user@host
+OPEN Server	OPEN host
+Proxy-Login → USER Benutzer	Proxy login → USER user
+USER Proxy@Server → USER Benutzer	USER proxy@host → USER user
+USER Benutzer@Server Proxy	USER user@host proxy
+USER Benutzer@Proxy@Server	USER user@proxy@host
 FTP-Downloadliste …	FTP download list…
 FTP-Downloadliste	FTP download list
 FTP-Serverbefehl …	FTP server command…
 FTP-Serverbefehl	FTP server command
+Serverbefehl …	Server command…
+Serverantwort	Server response
+SSH-Serverbefehl	SSH server command
+SSH-Befehlsvorlagen …	SSH command templates…
+SSH-Befehlsvorlagen	SSH command templates
+SSH-Befehlsvorlage	SSH command template
+SSH-Befehlsvorlage entfernen	Remove SSH command template
+Neue Befehlsvorlage	New command template
+Name der Vorlage	Template name
+Programm und Argumente	Program and arguments
+Direkter Befehl	Direct command
+Befehlsvorlage	Command template
+Vorlagen verwenden ! für einen Eintrag, !& für die Auswahl und !/ für den Serverordner. Sitzungsdaten liefern !@, !U, !#, !N und !S.	Templates use ! for one item, !& for the selection, and !/ for the remote directory. Use !@, !U, !#, !N, and !S for session details.
 FTP-Serverantwort	FTP server response
 FTP-Verbindungsdetails	FTP connection details
 FTP-Rohliste	Raw FTP listing
@@ -1316,6 +1358,7 @@ Protokoll	Protocol
 SFTP verwendet SSH. Der Hostschlüssel muss beim Serverbetreiber geprüft werden.	SFTP uses SSH. Verify the host key with the server operator.
 SSH-Server und Schlüssel	SSH server and keys
 SSH-Hostschlüssel (SHA256)	SSH host key (SHA256)
+Mehrere verifizierte Fingerabdrücke durch Semikolon trennen.	Separate multiple verified fingerprints with semicolons.
 Private SSH-Schlüsseldatei (optional)	SSH private key file (optional)
 Schlüsselpassphrase	Key passphrase
 SFTP-Anmeldung	SFTP sign-in
@@ -1443,6 +1486,139 @@ Wähle eine Dateiversion zum Herunterladen.	Select a file version to download.
 Wähle eine S3-Dateiversion.	Select an S3 file version.
 S3-Version herunterladen	Download S3 version
 S3-Version heruntergeladen	S3 version downloaded
+S3-Version wiederherstellen	Restore S3 version
+S3-Version wiederhergestellt	S3 version restored
+IAM-Rollen-ARN (optional)	IAM role ARN (optional)
+Temporäre S3-Zugangsdaten	Temporary S3 credentials
+S3-Sitzungstoken	S3 session token
+Neues Sitzungstoken (optional)	New session token (optional)
+Beim Verbinden eingeben	Enter when connecting
+Schlüssel und Token in Windows-Anmeldeinformationen speichern	Save key and token in Windows Credential Manager
+Gib den geheimen S3-Zugriffsschlüssel und das Sitzungstoken ein.	Enter the S3 secret access key and session token.
+Bucketname als Teil des Hostnamens	Include the bucket name in the hostname
+Requester Pays akzeptieren	Accept Requester Pays
+Das verwendete AWS-Konto übernimmt die anfallenden Anfrage- und Transferkosten.	The AWS account in use pays the applicable request and transfer charges.
+S3-Version löschen	Delete S3 version
+Wähle eine Dateiversion oder Löschmarkierung mit unveränderlicher Versions-ID.	Select a file version or a delete marker with an immutable version ID.
+Das löscht genau diese aktuelle Version dauerhaft. Eine frühere Version kann dadurch sichtbar werden.	This permanently deletes this specific current version. An earlier version may become visible.
+Das löscht die gewählte Version dauerhaft aus der S3-Historie.	This permanently deletes the selected version from the S3 history.
+S3-Löschmarkierung entfernt	S3 delete marker removed
+S3-Dateiversion gelöscht	S3 file version deleted
+S3-Versionierung lesen	Read S3 versioning
+S3-Bucket-Versionierung	S3 bucket versioning
+Versionierung	Versioning
+Versionierung aktivieren	Enable versioning
+Versionierung aussetzen	Suspend versioning
+S3-Versionierung aktiviert	S3 versioning enabled
+S3-Versionierung ausgesetzt	S3 versioning suspended
+Noch nie aktiviert	Never enabled
+Ausgesetzt	Suspended
+Neue Uploads erhalten eine eigene Versions-ID.	New uploads receive a unique version ID.
+Neue Uploads erhalten die Versions-ID null. Weitere Uploads können diese Version überschreiben.	New uploads receive a null version ID. Later uploads can overwrite that version.
+Fortsetzbare Multipart-Uploads behalten bestätigte Teile nach einem Abbruch.	Resumable multipart uploads keep confirmed parts after cancellation.
+Fortsetzbaren S3-Upload verwerfen	Discard resumable S3 upload
+Gib den Zielnamen des begonnenen Uploads ein.	Enter the destination name of the pending upload.
+Arco verwirft die übertragenen Teile dieses begonnenen Uploads.	Arco discards the uploaded parts of this pending upload.
+Upload verwerfen	Discard upload
+S3-Upload verworfen.	S3 upload discarded.
+Kein gespeicherter S3-Upload für dieses Ziel.	No saved S3 upload for this destination.
+Keine ältere Dateiversion gefunden.	No older file version found.
+Wähle die Version, die als neuer Stand veröffentlicht werden soll.	Choose the version to publish as the new current version.
+Arco erstellt auf dem Server aus diesem Stand eine neue aktuelle Dateiversion.	Arco creates a new current file version from this revision on the server.
+Dateiversion auf dem Server kopieren …	Copying the file version on the server …
+S3-Version prüfen …	Verifying S3 version …
+Nicht kodierte Sonderzeichen in Serverlisten zulassen	Allow unescaped special characters in server listings
+Mit dem aktuellen Windows-Konto anmelden (Negotiate)	Sign in with the current Windows account (Negotiate)
+Weiterleitungen auf andere Hosts oder Ports zulassen	Allow redirects to other hosts or ports
+Weiterleitungen von HTTPS auf HTTP zulassen	Allow redirects from HTTPS to HTTP
+Ungültiges Ziel der WebDAV-Weiterleitung.	Invalid WebDAV redirect target.
+Die WebDAV-Weiterleitung auf unverschlüsseltes HTTP ist deaktiviert.	WebDAV redirects to unencrypted HTTP are disabled.
+Die WebDAV-Weiterleitung auf einen anderen Host oder Port ist deaktiviert.	WebDAV redirects to other hosts or ports are disabled.
+Die WebDAV-Weiterleitung führt aus dem geöffneten Stammordner.	The WebDAV redirect leads outside the open root folder.
+Der WebDAV-Schreibauftrag wurde zu einer anderen Ressource umgeleitet.	The WebDAV write operation was redirected to a different resource.
+Die WebDAV-Ordneradresse hat sich geändert. Lade den Ordner neu.	The WebDAV folder address has changed. Reload the folder.
+Zu viele WebDAV-Ordnerweiterleitungen in dieser Verbindung.	Too many WebDAV folder redirects in this connection.
+Der WebDAV-Weiterleitungsstatus ist nicht verfügbar.	The WebDAV redirect state is unavailable.
+Die WebDAV-Zwischenantwort ist zu groß.	The intermediate WebDAV response is too large.
+Die WebDAV-Weiterleitung bildet eine Schleife oder ist zu lang.	The WebDAV redirect loops or has too many hops.
+Die weitergeleitete Ressource stimmt nicht mit der WebDAV-Sperre überein.	The redirected resource does not match the WebDAV lock.
+Die WebDAV-Dateioperation benötigt Quelle und Ziel auf demselben Server.	The WebDAV file operation requires the source and destination to be on the same server.
+Serverdatei bearbeiten	Edit server file
+Serverdatei im Texteditor bearbeiten	Edit server file in the text editor
+Serverdatei im Texteditor bearbeiten …	Edit server file in the text editor …
+Serverlink anlegen	Create server link
+Serverlink anlegen …	Create server link …
+Symbolischen Serverlink bearbeiten	Edit symbolic server link
+Symbolischen Serverlink bearbeiten …	Edit symbolic server link …
+Name des neuen Links	New link name
+Linkziel auf dem Server	Target on the server
+Linktyp	Link type
+Symbolischer Link	Symbolic link
+Harter Link	Hard link
+Linkziel lesen …	Reading link target …
+Linkziel öffnen …	Opening link target …
+Ansicht hat sich während des Öffnens geändert.	The panel changed while opening the link.
+Der Link verweist auf einen Ordner. Öffne ihn mit der Eingabetaste oder per Doppelklick.	The link points to a folder. Press Enter or double-click to open it.
+Linkziel ändern	Change link target
+Serverlink angelegt	Server link created
+Linkziel gespeichert	Link target saved
+Öffne zuerst ein verbundenes Server-Dateifenster.	Open a connected server file panel first.
+Symbolische Serverlinks können mit SFTP oder SCP bearbeitet werden.	Editing symbolic server links requires SFTP or SCP.
+Serverlinks benötigen SFTP, SCP oder FTP mit SITE SYMLINK.	Server links require SFTP, SCP or FTP with SITE SYMLINK.
+Wähle einen symbolischen Serverlink aus.	Select a symbolic server link.
+Offene Serverbearbeitungen	Open server edits
+Offene Serverbearbeitungen …	Open server edits …
+Keine offenen Serverbearbeitungen	No open server edits
+Server-Arbeitskopie laden	Download server working copy
+Server-Arbeitskopie löschen	Delete server working copy
+Server-Arbeitskopie gelöscht.	Server working copy deleted.
+Server-Arbeitskopie unverändert	Server working copy unchanged
+Server-Arbeitskopie geöffnet	Server working copy opened
+Serveränderungen hochladen	Upload server edits
+Serveränderungen hochgeladen	Server edits uploaded
+Serveränderungen prüfen und zurückübertragen …	Checking and uploading server edits …
+Warte, bis das Serververzeichnis und der laufende Auftrag fertig sind.	Wait until the server folder and current job are ready.
+Wähle eine reguläre Serverdatei.	Select a regular server file.
+Wähle eine Serverdatei mit bekannter Größe von höchstens 64 MiB.	Select a server file with a known size of up to 64 MiB.
+Diese Verbindung erlaubt nur Lesezugriffe.	This connection is read-only.
+Server-Arbeitskopien dürfen höchstens 64 MiB groß sein.	Server working copies may be up to 64 MiB.
+Die Server-Arbeitskopie muss eine reguläre lokale Datei sein.	The server working copy must be a regular local file.
+Texteditor konnte nicht geöffnet werden	Could not open the text editor
+Änderungen werden in der lokalen Server-Arbeitskopie gespeichert.	Changes are saved to the local working copy.
+Die Arbeitskopie wurde außerhalb des Texteditors geändert.	The working copy was changed outside the text editor.
+Der integrierte Texteditor unterstützt Dateien bis 4 MiB.	The built-in text editor supports files up to 4 MiB.
+Der integrierte Texteditor benötigt UTF-8 oder UTF-16 mit BOM.	The built-in text editor requires UTF-8 or UTF-16 with a BOM.
+Im externen Editor öffnen	Open in external editor
+Im Texteditor öffnen	Open in text editor
+Rückübertragung	Upload changes
+Die automatische Rückübertragung wurde nach einem Fehler oder Abbruch angehalten.	Automatic uploads were paused after an error or cancellation.
+Gespeicherte Änderungen werden nach der Prüfung automatisch hochgeladen.	Saved changes are checked and uploaded automatically.
+Speichere im Editor und lade die Änderungen über diesen Dialog hoch.	Save in the editor and use this dialog to upload changes.
+Automatik ausschalten	Turn off automatic uploads
+Automatik fortsetzen	Resume automatic uploads
+Automatisch hochladen	Upload automatically
+Ungültige WebDAV-Ressourcenadresse.	Invalid WebDAV resource URL.
+Die WebDAV-Liste enthält nicht kodierte Sonderzeichen. Aktiviere bei Bedarf den Kompatibilitätsmodus im Profil.	The WebDAV listing contains unescaped special characters. Enable compatibility mode in the profile if needed.
+MFA Delete aktivieren	Enable MFA Delete
+MFA Delete deaktivieren	Disable MFA Delete
+Versionierung und MFA Delete aktivieren	Enable versioning and MFA Delete
+MFA Delete aktiviert	MFA Delete enabled
+MFA Delete deaktiviert	MFA Delete disabled
+Der MFA-Schutzstatus des Buckets konnte nicht gelesen werden.	The bucket's MFA Delete setting could not be read.
+Standardlöschung	Standard deletion
+Löschen mit MFA-Code	Delete with an MFA code
+Autorisierung	Authorization
+Änderung	Change
+Inaktiv	Inactive
+MFA-Gerät (Seriennummer oder ARN)	MFA device (serial number or ARN)
+Sechsstelliger MFA-Code	Six-digit MFA code
+Dauerhafte Versionslöschungen benötigen anschließend keinen MFA-Code mehr.	Permanent version deletions will no longer require an MFA code.
+Das dauerhafte Löschen von Versionen und Änderungen der Versionierung benötigen anschließend einen MFA-Code.	Permanently deleting versions and changing versioning will require an MFA code.
+Gib die Seriennummer oder ARN des MFA-Geräts ein.	Enter the serial number or ARN of the MFA device.
+Gib den sechsstelligen MFA-Code ein.	Enter the six-digit MFA code.
+S3 MFA Delete benötigt eine HTTPS-Verbindung.	S3 MFA Delete requires an HTTPS connection.
+Die Änderung benötigt einen S3-MFA-Code.	This change requires an S3 MFA code.
+Ungültige S3-Aktion.	Invalid S3 action.
 Kerberos-Tickets an diesen Server delegieren	Delegate Kerberos tickets to this server
 WinSCP-Profile importieren	Import WinSCP profiles
 WinSCP-Profile importieren …	Import WinSCP profiles…
@@ -1465,6 +1641,8 @@ Kein passender Hostschlüssel	No matching host key
 Arco ergänzt fehlende Fingerabdrücke in gespeicherten SSH-Profilen.	Arco adds missing fingerprints to saved SSH profiles.
 SSH-Hostschlüssel übernommen	SSH host keys imported
 Proxy-Anmeldung	Proxy authentication
+SOCKS4-Benutzerkennung	SOCKS4 user ID
+Gib die Benutzerkennung für den SOCKS4-Proxy ein.	Enter the user ID for the SOCKS4 proxy.
 Proxy-Anmeldung …	Proxy authentication…
 Proxy-Benutzername	Proxy username
 Proxy-Passwort	Proxy password
@@ -1536,6 +1714,10 @@ Transfervorgaben	Transfer defaults
 Übertragungsmodus	Transfer mode
 Text (ASCII)	Text (ASCII)
 Durchsatzlimit (KiB/s)	Speed limit (KiB/s)
+Durchsatzlimit	Speed limit
+Durchsatzlimit für den Auftrag	Speed limit for this transfer
+Leeres Feld übernimmt die Transfervorgabe. 0 bedeutet unbegrenzt. Bei manchen Uploads und FTP-Textdownloads gilt der Wert ab dem nächsten Dateitransfer.	Leave blank to use the preset. Enter 0 for unlimited. Some uploads and FTP text downloads apply the limit from the next file transfer.
+Der Netzwerkauftrag ist nicht mehr aktiv.	The network transfer is no longer active.
 Unbegrenzt	Unlimited
 Änderungszeiten	Modification times
 Je nach Aktion	By operation
@@ -1550,6 +1732,26 @@ Mit Profilvorgabe herunterladen	Download using the profile default
 Binär herunterladen	Download in binary mode
 Transfervorgaben verwalten …	Manage transfer presets…
 Transfervorgabe	Transfer preset
+Profil und automatische Regeln	Profile and automatic rules
+Aus Vorgabe	From preset
+Leer übernimmt das Limit der Vorgabe. 0 bedeutet unbegrenzt.	Leave blank to inherit the preset limit. Enter 0 for unlimited.
+Gib ein Durchsatzlimit von 0 bis 1048576 KiB/s ein.	Enter a speed limit from 0 to 1048576 KiB/s.
+Wähle eine verfügbare Transfervorgabe.	Select an available transfer preset.
+Netzwerkkopie vorbereiten	Prepare network copy
+Kopiervorschau	Review copy
+Übertragungsweg	Transfer route
+Über diesen PC	Via this PC
+Direkt zwischen den Servern (FXP)	Directly between servers (FXP)
+FXP-Direktübertragung	Direct FXP transfer
+Kopiervorgang abgeschlossen	Copy complete
+FXP benötigt zwei direkt verbundene Klartext-FTP-Server mit einer gemeinsamen IP-Version.	FXP requires two direct plaintext FTP servers with a common IP version.
+Bei FXP bestimmen die Server den Durchsatz.	In FXP, the servers control the transfer rate.
+Bei FXP bestimmen die Server den Durchsatz. Setze das Limit für diesen Auftrag auf 0 KiB/s.	In FXP, the servers control the transfer rate. Set the limit for this transfer to 0 KiB/s.
+ausgewählte Einträge	selected entries
+Dateiliste	File list
+Strg+S: herunterladen · Esc: abbrechen	Ctrl+S: download · Esc: cancel
+Entfernter Dateiname (leer übernimmt den Namen nach Vorgabe)	Remote filename (leave blank to use the preset name rules)
+Wähle die Regel für vorhandene Dateien.	Choose how to handle existing files.
 Automatische Auswahl	Automatic selection
 Einstellungen ohne passende Vorgabe	Settings when no preset matches
 Neue Vorgabe	New preset
@@ -1645,3 +1847,91 @@ Verschlüsselt hochgeladen	Uploaded encrypted
 Entschlüsselt gespeichert	Saved decrypted
 Beim Systemstart	At system startup
 Der Systemstart benötigt eine Registrierung mit Administratorrechten und das Passwort des Windows-Kontos.	A startup task must be registered by an administrator and requires your Windows account password.
+Arbeitsbereiche	Workspaces
+Arbeitsbereiche verwalten	Manage workspaces
+Arbeitsbereiche verwalten …	Manage workspaces…
+Aktuellen Arbeitsbereich speichern	Save current workspace
+Aktuellen Arbeitsbereich speichern …	Save current workspace…
+Arbeitsbereiche merken sich die Tabs und Anordnung beider Dateifenster.	Workspaces remember the tabs and layout of both file panels.
+Arbeitsbereich speichern	Save workspace
+Name des Arbeitsbereichs	Workspace name
+Arbeitsbereich öffnen	Open workspace
+Arbeitsbereich öffnen …	Open workspace…
+Mit aktuellem Stand überschreiben …	Replace with current workspace…
+Arbeitsbereich-Verknüpfung speichern	Save workspace shortcut
+Arbeitsbereich-Verknüpfung speichern …	Save workspace shortcut…
+Arbeitsbereich entfernen …	Remove workspace…
+Offene Tabs durch den Arbeitsbereich ersetzen?	Replace open tabs with the workspace?
+Gespeicherten Arbeitsbereich überschreiben?	Overwrite saved workspace?
+Gespeicherten Arbeitsbereich entfernen?	Remove saved workspace?
+Arbeitsbereich entfernt.	Workspace removed.
+Arbeitsbereich gespeichert.	Workspace saved.
+Der Arbeitsbereich fehlt.	The workspace is missing.
+Arbeitsbereich geöffnet.	Workspace opened.
+Arbeitsbereich geöffnet. Server-Tabs lassen sich mit Eingabe verbinden.	Workspace opened. Press Enter in a server tab to connect it.
+Arbeitsbereich-Verknüpfung gespeichert.	Workspace shortcut saved.
+Warte, bis beide Dateifenster geladen sind.	Wait for both file panels to finish loading.
+Gib einen Arbeitsbereichsnamen mit 1 bis 120 Zeichen ein.	Enter a workspace name of 1 to 120 characters.
+Speichere die geöffneten Netzwerkverbindungen als Profile, bevor du den Arbeitsbereich speicherst.	Save open network connections as profiles before saving the workspace.
+Der Arbeitsbereich enthält ungültige Tabs oder Ansichtsoptionen.	The workspace contains invalid tabs or layout settings.
+Verwende die Dateiendung .lnk.	Use the .lnk file extension.
+Navigation nach dem Verbindungsaufbau koppeln	Link navigation after connecting
+Automatisch speichern deaktivieren	Disable automatic workspace saving
+Automatisch speichern und wieder öffnen	Save and reopen automatically
+Arbeitsbereich-Einstellung gespeichert.	Workspace setting saved.
+WinSCP-Arbeitsbereiche importieren …	Import WinSCP workspaces…
+WinSCP-Arbeitsbereiche importieren	Import WinSCP workspaces
+WinSCP-INI-Datei …	WinSCP INI file…
+WinSCP-INI-Datei wählen	Choose a WinSCP INI file
+WinSCP-Registrierung	WinSCP registry
+Wähle einen Arbeitsbereich. Arco legt seine Tabs und Serverprofile unter freien Namen an.	Choose a workspace. Arco will add its tabs and create server profiles with unique names.
+WinSCP-Arbeitsbereich importiert.	WinSCP workspace imported.
+Windows-Sprungliste	Windows Jump List
+Windows-Sprungliste aktivieren	Enable Windows Jump List
+Windows-Sprungliste deaktivieren	Disable Windows Jump List
+Windows-Sprungliste aktiviert.	Windows Jump List enabled.
+Windows-Sprungliste deaktiviert.	Windows Jump List disabled.
+Windows hat die Sprungliste gesperrt.	Windows has blocked the Jump List.
+Server-Prüfsummen berechnen …	Calculate remote checksums…
+Server-Prüfsummen	Remote checksums
+Wähle Dateien im FTP-, FTPS- oder SFTP-Dateifenster.	Select files in an FTP, FTPS, or SFTP panel.
+Wähle mindestens eine Serverdatei.	Select at least one remote file.
+Arco fragt die Prüfsumme beim SFTP-Server ab und berechnet sie bei Bedarf aus den Dateidaten.	Arco requests the checksum from the SFTP server and calculates it from the file data if needed.
+Der FTP-Server berechnet die Prüfsumme mit einem von ihm angebotenen Verfahren.	The FTP server calculates the checksum using one of its supported algorithms.
+Prüfsummen berechnen …	Calculating checksums…
+Die gewählte Prüfsumme ist für diese Serververbindung nicht verfügbar.	The selected checksum algorithm is unavailable for this connection.
+Alle Verbindungen	All connections
+Ohne Verbindungsordner	Unfiled connections
+Verbindungen nach Ordner filtern	Filter connections by folder
+Verbindungsordner	Connection folder
+Projekte/Atlas	Projects/Atlas
+Gib einen Verbindungsordner wie Projekte/Atlas ein.	Enter a connection folder such as Projects/Atlas.
+Server-Rechte und Besitzer ändern …	Change remote permissions and ownership…
+Server-Rechte und Besitzer ändern	Change remote permissions and ownership
+Server-Rechte ändern	Change remote permissions
+Der Server muss SITE CHMOD unterstützen.	The server must support SITE CHMOD.
+Lasse das Modusfeld für reine Besitzer- oder Gruppenänderungen leer.	Leave the mode field blank to change only the owner or group.
+Besitzer und Gruppe	Owner and group
+Leere Felder behalten die aktuelle UID oder GID bei.	Blank fields keep the current UID or GID.
+Besitzer-ID (UID)	Owner ID (UID)
+Gruppen-ID (GID)	Group ID (GID)
+Dateien und Unterordner einbeziehen	Include files and subfolders
+Bei Abbruch bleiben bereits angewendete Änderungen bestehen.	Changes already applied are kept if you cancel.
+Gib gültige Rechte, eine UID oder eine GID ein.	Enter valid permissions, a UID or a GID.
+Besitzer und Gruppe benötigen SFTP oder SCP.	Changing the owner or group requires SFTP or SCP.
+Server-Rechte lassen sich nur für reguläre Dateien und Ordner ändern.	Remote permissions can be changed for regular files and directories.
+Ordnerstruktur ermitteln …	Scanning the folder structure…
+Gib UID und GID als Dezimalzahl zwischen 0 und 4294967294 ein.	Enter UID and GID as decimal numbers from 0 to 4294967294.
+Der SFTP-Server meldet weder UID noch GID für diesen Eintrag.	The SFTP server returned neither a UID nor a GID for this item.
+Der Server hat die neuen Rechte oder Besitzdaten nicht bestätigt.	The server did not confirm the new permissions or ownership.
+Der Servereintrag hat sich seit dem Anzeigen geändert.	The remote item has changed since it was displayed.
+Schreibweise beibehalten	Keep capitalization
+Kleinbuchstaben	Lowercase
+Großbuchstaben	Uppercase
+Ersten Buchstaben großschreiben	Capitalize first letter
+DOS-8.3-Uploads kleinschreiben	Lowercase DOS 8.3 uploads
+Schreibweise des Zielnamens	Destination filename case
+Zielnamen	Destination names
+Windows-Dateinamen umwandeln	Convert Windows filenames
+Wähle Dateien im FTP-, FTPS-, SFTP- oder SCP-Dateifenster.	Select files in an FTP, FTPS, SFTP, or SCP panel.
+Der SCP-Server berechnet die Prüfsumme mit einem GNU-Prüfprogramm.	The SCP server calculates the checksum with a GNU checksum utility.

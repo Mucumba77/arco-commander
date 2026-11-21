@@ -88,13 +88,17 @@ fn site(fields: &BTreeMap<String, &str>, default_proxy: bool) -> io::Result<FtpP
         .port()
         .map(|port| port.to_string())
         .unwrap_or_default();
+    // The older plug-in writes MD5 fingerprints, which cannot pin an Arco session.
+    let pins = crate::ssh_host_keys::HostKeyPins::parse(value("fingerprint"))
+        .map(|pins| pins.to_string())
+        .unwrap_or_default();
     let data = [
         ("hostname", address.host_str().unwrap_or_default()),
         ("portnumber", &port),
         ("username", value("user")),
         ("remotedirectory", &remote),
         ("publickeyfile", value("privkeyfile")),
-        ("sshhostkey", value("fingerprint")),
+        ("sshhostkey", &pins),
         (
             "fsprotocol",
             if value("scponly") == "1" { "0" } else { "1" },

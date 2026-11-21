@@ -9,9 +9,9 @@ Arco Commander ist ein Zwei-Fenster-Dateimanager für Windows, geschrieben in Ru
 
 ## Download
 
-[**Arco Commander 1.7.0 für Windows x64 herunterladen**](https://github.com/Mucumba77/arco-commander/releases/download/v1.7.0/arco-commander-v1.7.0-windows-x64.zip)
+[**Arco Commander 1.8.0 für Windows x64 herunterladen**](https://github.com/Mucumba77/arco-commander/releases/download/v1.8.0/arco-commander-v1.8.0-windows-x64.zip)
 
-Das portable ZIP ist für Windows 10 22H2 und Windows 11 vorgesehen. Entpacke es vollständig und starte `arco-commander.exe`. Das Paket enthält beide Plugin-Hosts, das ZIP-SFX-Modul, den 7-Zip-Konsolenadapter, `arco-net.exe`, die .NET-/COM-Bibliothek, die Kurzanleitung und Drittanbieterhinweise. Es ist unsigniert. [Release-Hinweise und SHA-256-Prüfsumme](https://github.com/Mucumba77/arco-commander/releases/tag/v1.7.0)
+Das portable ZIP ist für Windows 10 22H2 und Windows 11 vorgesehen. Entpacke es vollständig und starte `arco-commander.exe`. Das Paket enthält beide Plugin-Hosts, das ZIP-SFX-Modul, den 7-Zip-Konsolenadapter, `arco-net.exe`, die .NET-/COM-Bibliothek, die Kurzanleitung und Drittanbieterhinweise. Es ist unsigniert. [Release-Hinweise und SHA-256-Prüfsumme](https://github.com/Mucumba77/arco-commander/releases/tag/v1.8.0)
 
 Für ein Update entpacke die neue Version in einen eigenen Ordner. Arco verwendet das bisherige Standardprofil weiter. Bei Verwendung von `--portable` übernimm zusätzlich die Profildatei `arco-commander.json` aus dem bisherigen Programmordner.
 
@@ -42,7 +42,11 @@ Mit **Eigenes Fenster** öffnest du die Dateivorschau im separaten Lister. Dort 
 
 ![Arco Lister mit der Projektübersicht aus den Beispieldateien](docs/screenshots/lister.jpg)
 
-## Neu in Version 1.7.0
+## Neu in Version 1.8.0
+
+Bei FTP-Kopien über **F5** kannst du den direkten FXP-Datenweg über IPv4 oder IPv6 wählen. Der Transfermanager verarbeitet unabhängige Netzwerkaufträge parallel und SFTP kann unterbrochene Downloads in mehreren gespeicherten Teilbereichen fortsetzen. Arbeitsbereiche speichern beide Tab-Leisten. Server-Prüfsummen, rekursive Rechte, weitere Proxy- und Anmeldeoptionen sowie S3-Versionierung und fortsetzbare Multipart-Uploads sind integriert. [FTP-Anleitung](docs/FTP.md) · [Netzwerk-Anleitung](docs/SFTP.md) · [Änderungshistorie](CHANGELOG.md)
+
+### Stand bis Version 1.7.0
 
 Arco verbindet sich direkt mit SFTP-, SCP-, WebDAV- und S3-Servern. SSH-Profile unterstützen moderne Schlüssel, Agenten, Sprungserver und mehrstufige Anmeldung. SFTP sichert auf Wunsch die vorherige Version beim Überschreiben. Zwei Dateifenster können Ordnerwechsel koppeln, einzelne Dateien können mit verschlüsseltem Namen und Inhalt übertragen werden. Ordnerüberwachung, Transfers und Serverauflistung sind über die Oberfläche oder `arco-net.exe` erreichbar. [Netzwerk-Anleitung](docs/SFTP.md) · [Automatisierung](docs/AUTOMATISIERUNG.md) · [Änderungshistorie](CHANGELOG.md)
 
@@ -239,7 +243,7 @@ Im Binärvergleich blätterst du durch die Byteabweichungen. Beide Seiten zeigen
 **Datei teilen** bietet einen Total-Commander-Modus mit nummerierten Teilen und `.crc`-Begleitdatei. **Dateien verbinden** erkennt den Satz anhand der Begleitdatei oder eines nummerierten Teils im selben Ordner. Arco schlägt den Originalnamen vor und prüft Größe und CRC32 vor dem Speichern. [Total-Commander-Änderungsübersicht](https://www.ghisler.ch/wiki/index.php?title=List_of_changes_%28version_7.04a_-_7.50%29)
 
 - **Archive.** ZIP und 7z lassen sich direkt in Arco öffnen, prüfen, erstellen und bearbeiten. Der mitgelieferte 7-Zip-26.06-Konsolenadapter erstellt TAR/TGZ, GZIP und selbstentpackende 7z-Archive und liest weitere Formate. GZIP akzeptiert eine einzelne Datei. Bei eigenen Entwicklungsbuilds wird 7-Zip 26.05 oder neuer benötigt. Arco sucht zuerst am absoluten Pfad in `ARCO_7ZIP_PATH`, dann unter `7zip\7z.exe` neben Arco und schließlich unter `%ProgramFiles%\7-Zip\7z.exe`. [7-Zip-Download](https://www.7-zip.org/download.html)
-- **FTP und FTPS.** Verbindungen öffnen sich im aktiven Dateifenster und nutzen für gewöhnliche Transfers das mit Windows gelieferte `curl.exe`. Downloads können ein geprüftes Teilstück fortsetzen, sofern der Server die benötigten Angaben und Bytebereiche liefert. Direkter FXP-Transfer ist zwischen geeigneten Klartext-FTP-Servern über IPv4 verfügbar. Der Zielserver kann nach einem Abbruch eine temporär benannte Teildatei behalten. Die [FTP-Anleitung](docs/FTP.md) beschreibt die Profil- und Transferoptionen.
+- **FTP und FTPS.** Verbindungen öffnen sich im aktiven Dateifenster und nutzen für gewöhnliche Transfers das mit Windows gelieferte `curl.exe`. Downloads können ein geprüftes Teilstück fortsetzen, sofern der Server die benötigten Angaben und Bytebereiche liefert. Direkter FXP-Transfer ist zwischen geeigneten Klartext-FTP-Servern über IPv4 und IPv6 verfügbar. Der Zielserver kann nach einem Abbruch eine temporär benannte Teildatei behalten. Die [FTP-Anleitung](docs/FTP.md) beschreibt die Profil- und Transferoptionen.
 - **Eingebaute Netzwerkdateifenster.** Unter **Netz → Netzwerkprofile …** stehen FTP-/FTPS- und SSH-Profile sowie im Entwicklungsstand WebDAV und S3 bereit. SSH unterstützt Hostschlüsselprüfung, Schlüssel, Agenten, Sprungserver, Keyboard-Interactive und Windows-Kerberos. WebDAV bietet manuelle Schreibsperren. S3 unterstützt die AWS-Anmeldekette und den Download älterer Objektversionen. [Netzwerkprofile einrichten](docs/SFTP.md)
 - **Netzwerkautomatisierung.** `arco-net.exe` führt skriptgesteuerte Transfers aus. Die Automatisierungsbibliothek stellt dieselben Befehle für .NET und x64-COM bereit. [Automatisierung einrichten](docs/AUTOMATISIERUNG.md)
 - **Total-Commander-Plugins.** Unter **Konfigurieren → Plugin-Verwaltung** kannst du WCX-, WFX-, WDX- und WLX-DLLs registrieren, ZIP-Pakete mit `pluginst.inf` installieren oder Registrierungen aus `wincmd.ini` importieren. Dort kannst du Plugins aktivieren, deaktivieren, umordnen, umbenennen, per Dateimaske eingrenzen, prüfen und entfernen. Neue Registrierungen sind zunächst deaktiviert. Die Architektur liest Arco aus der DLL. Beim Prüfen und Ausführen lädt der passende Host die DLL mit deinen Windows-Rechten. [Ghisler-Plugin-SDKs](https://www.ghisler.com/plugins.htm), [Format für Plugin-Installationspakete](https://www.ghisler.ch/wiki/index.php/Plugins_Automated_Installation)
@@ -336,11 +340,13 @@ FTP verwendet dieselbe Pfadleiste, Tabs, Sortierung, Auswahl und Navigation wie 
 
 `F5` bereitet die Kopiervorschau für Dateien und Ordner zwischen lokal und FTP sowie zwischen zwei FTP-Ordnern vor. Für vorhandene Zieldateien fragt Arco beim Ausführen nach der Konfliktentscheidung. Du kannst einen automatisch gewählten freien Zielnamen übernehmen oder einen eigenen Dateinamen eingeben. Für FTP-Dateien bis 64 KiB kann der Dialog eine Text- oder Hexvorschau laden. Beim Kopieren zwischen FTP-Ordnern verwendet Arco je Datei eine temporäre lokale Kopie. **Netz → FTP-Verzeichnis anzeigen** öffnet die separate FTP-Ansicht mit dem Einzeldownload. **Netz → FTP trennen** schließt die betreffende Sitzung in allen Tabs und entfernt sie aus dem Verlauf. Tabs aus benannten FTP-Profilen lassen sich speichern und später wieder verbinden.
 
-### FTP-Dateien bearbeiten
+### Serverdateien bearbeiten
 
-Drücke im FTP-Dateifenster `F4`, um eine Datei mit MLSD-Metadaten bis 64 MiB im eingestellten Editor zu öffnen. Speichere dort und wähle im Arco-Dialog **Änderungen hochladen**. Der Auftrag erscheint im Transfermanager und kann dort umsortiert oder abgebrochen werden. Pro Arbeitskopie ist ein Upload gleichzeitig möglich. Nach einem Abbruch oder Fehler bleibt die Arbeitskopie für einen erneuten Versuch verfügbar. **Netz → Offene FTP-Bearbeitungen** öffnet den Dialog erneut.
+`F4` öffnet eine Serverdatei bis 64 MiB als lokale Arbeitskopie im eingestellten Editor. Unter **Netz → Serverdatei im Texteditor bearbeiten** kannst du UTF‑8- und UTF‑16-Dateien bis 4 MiB direkt in Arco bearbeiten. Für UTF‑16 benötigt Arco eine BOM. `Strg+S` speichert im integrierten Editor die lokale Arbeitskopie. Bei FTP und FTPS muss der Server MLSD-Metadaten liefern. Die gleiche Bearbeitung steht für SFTP, SCP, WebDAV und S3 zur Verfügung.
 
-Arco lädt die neue Fassung unter einem temporären Namen hoch und prüft die bisherige Serverdatei anhand ihrer Metadaten und ihres Inhalts vor dem Ersetzen. Ein Konflikt erhält die Arbeitskopie und die fremde Serverfassung. FTP stellt zwischen der Prüfung und dem Umbenennen keine gemeinsame Sperre bereit. Die neuen Dateirechte richten sich nach dem Server und der bereitgestellten Datei.
+Wähle **Änderungen hochladen** für eine einzelne Rückübertragung oder aktiviere **Automatisch hochladen** für diese Arbeitskopie. Arco wartet auf zwei übereinstimmende Dateistände und stellt höchstens einen Auftrag pro Arbeitskopie in den Transfermanager. Bei Konflikten, Fehlern oder Abbruch hält Arco die automatische Rückübertragung an. **Netz → Offene Serverbearbeitungen** öffnet den Dialog erneut.
+
+Arco prüft die bisherige Serverdatei anhand ihrer Metadaten und ihres Inhalts vor dem Ersetzen. Rückübertragungen an dieselbe Serveradresse und denselben Pfad laufen in derselben Windows-Anmeldesitzung nacheinander, auch wenn mehrere Arco-Prozesse offen sind. Bei einem Konflikt bleiben die lokale Arbeitskopie und die bereits veröffentlichte Serverfassung erhalten. Andere Schreibvorgänge können bei FTP, FTPS, SFTP oder SCP weiterhin zwischen Inhaltsprüfung und Veröffentlichung eingreifen. Die neuen Dateirechte richten sich nach dem Server und der bereitgestellten Datei.
 
 Die Arbeitskopien liegen unter `%LOCALAPPDATA%\Arco Commander\ftp-edits` und bleiben beim Trennen oder Beenden erhalten. Das Löschen einer Arbeitskopie verlangt eine Bestätigung.
 

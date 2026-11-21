@@ -1,8 +1,9 @@
-use super::ftp_sync::{MAX_DEPTH, MAX_ENTRIES, ftp_ignores, modified, scan};
+use super::ftp_sync::{MAX_DEPTH, MAX_ENTRIES, ftp_ignores, modified};
 use super::{App, FtpEndpoint, LoadedDirectory, Navigation, Outcome, StagedPreview};
 use crate::commands::{Dialog, Pending};
 use crate::panel::{FtpLocation, FtpTab, Location};
 use crate::{display_path, preview};
+use arco_app::network_sync::{copy_names, scan_for_delete};
 use arco_core::archive_view::MAX_PREVIEW;
 use arco_core::files::{self, Directory, Kind, TransferReport};
 use arco_core::profile::TabLock;
@@ -19,7 +20,6 @@ pub(crate) enum FtpEdit {
     Create,
     Rename(ftp::Entry),
     Delete(Vec<ftp::Entry>, bool),
-    Permissions(Vec<ftp::Entry>),
     Modified(Vec<ftp::Entry>),
 }
 
@@ -33,6 +33,40 @@ pub(crate) struct S3History {
     endpoint: FtpEndpoint,
     name: String,
     versions: Vec<ftp::S3Version>,
+    action: S3HistoryAction,
+    mfa_delete: Option<bool>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum S3DeleteMode {
+    Standard,
+    Choose,
+    Mfa,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum S3HistoryAction {
+    Download,
+    Restore,
+    Delete,
+}
+
+impl S3HistoryAction {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Download => "S3-Versionshistorie",
+            Self::Restore => "S3-Version wiederherstellen",
+            Self::Delete => "S3-Version löschen",
+        }
+    }
+
+    fn can_select(self, version: &ftp::S3Version) -> bool {
+        match self {
+            Self::Download => version.size.is_some(),
+            Self::Restore => !version.latest && version.size.is_some(),
+            Self::Delete => version.can_delete(),
+        }
+    }
 }
 
 pub(super) fn search_remote(
@@ -111,29 +145,59 @@ pub(super) fn read_panel(
         entries: Vec::new(),
         errors: Vec::new(),
     };
-    let mut names = BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    let mut reserved = listing
+        .entries
+        .iter()
+        .filter(|entry| files::leaf_name(OsStr::new(&entry.name)).is_ok())
+        .map(|entry| entry.name.to_lowercase())
+        .collect::<BTreeSet<_>>();
+    let mut name_aliases = std::collections::BTreeMap::new();
+    let windows_names = arco_core::transfer_names::NameRules {
+        windows: true,
+        ..Default::default()
+    };
     for entry in &listing.entries {
+        if !seen.insert(&entry.name) {
+            directory.errors.push(format!(
+                "Ungültiger oder doppelter FTP-Name: {}",
+                entry.name
+            ));
+            continue;
+        }
         let path = match files::leaf_name(OsStr::new(&entry.name)) {
-            Ok(name) if names.insert(name) => PathBuf::from(name),
-            _ => {
-                directory.errors.push(format!(
-                    "Ungültiger oder doppelter FTP-Name: {}",
-                    entry.name
-                ));
-                continue;
+            Ok(name) => PathBuf::from(name),
+            Err(_) => {
+                let Ok(encoded) = windows_names.download(&entry.name) else {
+                    directory.errors.push(format!(
+                        "Ungültiger oder doppelter FTP-Name: {}",
+                        entry.name
+                    ));
+                    continue;
+                };
+                let mut alias = encoded;
+                while !reserved.insert(alias.to_lowercase()) {
+                    alias.push_str("%00");
+                }
+                let path = PathBuf::from(alias);
+                name_aliases.insert(path.clone(), entry.name.clone());
+                path
             }
         };
-        let kind = match entry.directory {
-            Some(true) => Kind::Directory,
-            Some(false) => Kind::File,
-            None => Kind::Other,
+        let kind = match (entry.directory, entry.symlink) {
+            (_, true) => Kind::Link,
+            (Some(true), false) => Kind::Directory,
+            (Some(false), false) => Kind::File,
+            (None, false) => Kind::Other,
         };
-        directory.entries.push(files::Entry::from_remote(
+        let mut row = files::Entry::from_remote(
             path,
             kind,
             entry.size.filter(|_| kind == Kind::File),
             modified(entry).ok().flatten(),
-        ));
+        );
+        row.name = entry.name.as_str().into();
+        directory.entries.push(row);
     }
     Ok(LoadedDirectory {
         directory,
@@ -142,6 +206,7 @@ pub(super) fn read_panel(
         ftp: Some(FtpTab {
             location: location.clone(),
             listing,
+            name_aliases,
         }),
         shell: Default::default(),
     })
@@ -234,7 +299,7 @@ impl App {
         );
         Ok(())
     }
-    pub(crate) fn open_s3_history(&mut self) {
+    pub(crate) fn open_s3_history(&mut self, action: S3HistoryAction) {
         let tab = self.current();
         let Some(remote) = tab
             .ftp
@@ -255,9 +320,9 @@ impl App {
         );
         self.dialog(
             "input",
-            Pending::S3History(endpoint),
+            Pending::S3History(endpoint, action),
             Dialog {
-                title: "S3-Versionshistorie",
+                title: action.title(),
                 value: &name,
                 placeholder: "Exakter Objektname",
                 confirm_label: "Versionen anzeigen",
@@ -266,7 +331,12 @@ impl App {
         );
     }
 
-    pub(crate) fn read_s3_history(&mut self, endpoint: FtpEndpoint, name: &str) -> io::Result<()> {
+    pub(crate) fn read_s3_history(
+        &mut self,
+        endpoint: FtpEndpoint,
+        action: S3HistoryAction,
+        name: &str,
+    ) -> io::Result<()> {
         files::leaf_name(OsStr::new(name))?;
         let name = name.to_owned();
         let description = super::JobDescription::new(
@@ -275,13 +345,28 @@ impl App {
             String::new(),
         );
         self.start_operation_job("S3-Versionen lesen", false, description, move |job| {
-            let versions = endpoint
+            let mut versions = endpoint
                 .0
                 .list_s3_versions(&endpoint.1, &name, &job.cancel)?;
+            if action == S3HistoryAction::Restore {
+                versions.retain(|version| !version.latest && version.size.is_some());
+            }
+            // Some roles may list and delete versions without reading bucket settings.
+            let mfa_delete = if action == S3HistoryAction::Delete {
+                endpoint
+                    .0
+                    .s3_bucket_versioning_details(&endpoint.1, &job.cancel)
+                    .ok()
+                    .map(|(_, config)| config.mfa_delete)
+            } else {
+                None
+            };
             Ok(Outcome::S3History(Box::new(S3History {
                 endpoint,
                 name,
                 versions,
+                action,
+                mfa_delete,
             })))
         });
         Ok(())
@@ -314,33 +399,47 @@ impl App {
                 }
             })
             .collect();
+        let action = history.action;
         self.management_review(
             crate::OperationKind::Ftp,
             rows,
             ["Stand", "Versions-ID"],
-            "Version herunterladen",
+            match action {
+                S3HistoryAction::Download => "Version herunterladen",
+                _ => "Weiter",
+            },
         );
         let local = self.panels[1 - self.active].current().is_local();
         self.ui().set_review_can_confirm(
-            local
+            (local || action != S3HistoryAction::Download)
                 && history
                     .versions
                     .iter()
-                    .any(|version| version.size.is_some()),
+                    .any(|version| action.can_select(version)),
         );
-        let status = if history.versions.is_empty() {
-            tr("Keine Objektversionen gefunden.")
-        } else if !local {
-            tr("Öffne im anderen Dateifenster einen lokalen Zielordner zum Herunterladen.")
-        } else {
-            tr("Wähle eine Dateiversion zum Herunterladen.")
-        };
+        let status = tr(match action {
+            S3HistoryAction::Restore if history.versions.is_empty() => {
+                "Keine ältere Dateiversion gefunden."
+            }
+            _ if history.versions.is_empty() => "Keine Objektversionen gefunden.",
+            S3HistoryAction::Restore => {
+                "Wähle die Version, die als neuer Stand veröffentlicht werden soll."
+            }
+            S3HistoryAction::Delete => {
+                "Wähle eine Dateiversion oder Löschmarkierung mit unveränderlicher Versions-ID."
+            }
+            S3HistoryAction::Download if !local => {
+                "Öffne im anderen Dateifenster einen lokalen Zielordner zum Herunterladen."
+            }
+            S3HistoryAction::Download => "Wähle eine Dateiversion zum Herunterladen.",
+        });
         let description = format!("{} · {status}", history.name);
+        let title = history.action.title();
         self.dialog(
             "management-review",
             Pending::S3VersionSelect(history),
             Dialog {
-                title: "S3-Versionshistorie",
+                title,
                 description: &description,
                 ..Default::default()
             },
@@ -355,12 +454,49 @@ impl App {
         if !history
             .versions
             .get(index)
-            .is_some_and(|version| version.size.is_some())
+            .is_some_and(|version| history.action.can_select(version))
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "Wähle eine S3-Dateiversion.",
+                if history.action == S3HistoryAction::Delete {
+                    "Wähle eine unveränderliche S3-Versions-ID."
+                } else {
+                    "Wähle eine S3-Dateiversion."
+                },
             ));
+        }
+        let version = history.versions.remove(index);
+        if history.action == S3HistoryAction::Delete {
+            let mode = match history.mfa_delete {
+                Some(true) => S3DeleteMode::Mfa,
+                Some(false) => S3DeleteMode::Standard,
+                None => S3DeleteMode::Choose,
+            };
+            self.confirm_s3_delete((history.endpoint, history.name, version), mode)?;
+            return Ok(());
+        }
+        if history.action == S3HistoryAction::Restore {
+            let document = (history.endpoint, history.name, version);
+            let description = format!(
+                "{}\n{} · {}\n\n{}",
+                document.1,
+                document.2.modified,
+                document.2.id,
+                crate::locale::tr(
+                    "Arco erstellt auf dem Server aus diesem Stand eine neue aktuelle Dateiversion."
+                ),
+            );
+            self.dialog(
+                "confirm",
+                Pending::S3VersionRestore(Box::new(document)),
+                Dialog {
+                    title: history.action.title(),
+                    description: &description,
+                    confirm_label: "Wiederherstellen",
+                    ..Default::default()
+                },
+            );
+            return Ok(());
         }
         let target = self.panels[1 - self.active].current();
         if !target.is_local() {
@@ -369,7 +505,6 @@ impl App {
                 "Öffne im anderen Dateifenster einen lokalen Zielordner zum Herunterladen.",
             ));
         }
-        let version = history.versions.remove(index);
         let description = format!("{} · {}", version.modified, display_path(&target.path));
         let name = history.name.clone();
         self.dialog(
@@ -390,6 +525,393 @@ impl App {
             },
         );
         Ok(())
+    }
+
+    pub(crate) fn restore_s3_version(
+        &mut self,
+        ((session, directory), name, version): (FtpEndpoint, String, ftp::S3Version),
+    ) {
+        let description = super::JobDescription::new(
+            crate::OperationKind::Ftp,
+            format!("{name} · {}", version.modified),
+            format!("{directory}{name}"),
+        );
+        self.enqueue_virtual_operation(
+            "S3-Version wiederherstellen",
+            true,
+            description,
+            move |job| {
+                job.phase("Dateiversion auf dem Server kopieren …");
+                session.restore_s3_version_with_progress(
+                    &directory,
+                    &name,
+                    &version,
+                    &job.cancel,
+                    job.ftp_progress(
+                        name.clone(),
+                        version.size,
+                        "Dateiversion auf dem Server kopieren …",
+                        "S3-Version prüfen …",
+                    ),
+                )?;
+                Ok(Outcome::Report(
+                    "S3-Version wiederhergestellt".into(),
+                    TransferReport {
+                        completed: 1,
+                        ..Default::default()
+                    },
+                ))
+            },
+        );
+    }
+
+    pub(crate) fn confirm_s3_delete(
+        &mut self,
+        document: (FtpEndpoint, String, ftp::S3Version),
+        mode: S3DeleteMode,
+    ) -> io::Result<()> {
+        use crate::locale::tr;
+        let effect = if document.2.latest {
+            "Das löscht genau diese aktuelle Version dauerhaft. Eine frühere Version kann dadurch sichtbar werden."
+        } else {
+            "Das löscht die gewählte Version dauerhaft aus der S3-Historie."
+        };
+        let mut description = format!(
+            "{}\n{} · {}\n\n{}",
+            document.1,
+            document.2.modified,
+            document.2.id,
+            tr(effect)
+        );
+        let mut dialog = Dialog {
+            title: "S3-Version löschen",
+            confirm_label: "Endgültig löschen",
+            ..Default::default()
+        };
+        let kind = match mode {
+            S3DeleteMode::Standard => "confirm",
+            S3DeleteMode::Choose => {
+                description.push_str("\n\n");
+                description.push_str(tr(
+                    "Der MFA-Schutzstatus des Buckets konnte nicht gelesen werden.",
+                ));
+                dialog.options = &["Standardlöschung", "Löschen mit MFA-Code"];
+                dialog.options_label = "Autorisierung";
+                "confirm"
+            }
+            S3DeleteMode::Mfa => {
+                ftp::S3Mfa::require_https(&document.0.1)?;
+                dialog.placeholder = "MFA-Gerät (Seriennummer oder ARN)";
+                dialog.second_placeholder = "Sechsstelliger MFA-Code";
+                dialog.second_secret = true;
+                "input"
+            }
+        };
+        dialog.description = &description;
+        self.dialog(
+            kind,
+            Pending::S3VersionDelete(Box::new(document), mode),
+            dialog,
+        );
+        Ok(())
+    }
+
+    pub(crate) fn delete_s3_version(
+        &mut self,
+        ((session, directory), name, version): (FtpEndpoint, String, ftp::S3Version),
+        mfa: Option<ftp::S3Mfa>,
+    ) {
+        let description = super::JobDescription::new(
+            crate::OperationKind::Ftp,
+            format!("{directory}{name} · {}", version.id),
+            String::new(),
+        );
+        self.enqueue_virtual_operation("S3-Version löschen", true, description, move |job| {
+            session.delete_s3_version_authorized(
+                &directory,
+                &name,
+                &version,
+                mfa.as_ref(),
+                &job.cancel,
+            )?;
+            Ok(Outcome::Report(
+                if version.size.is_none() {
+                    "S3-Löschmarkierung entfernt"
+                } else {
+                    "S3-Dateiversion gelöscht"
+                }
+                .into(),
+                TransferReport {
+                    completed: 1,
+                    ..Default::default()
+                },
+            ))
+        });
+    }
+
+    pub(crate) fn open_s3_versioning(&mut self) {
+        let Some(remote) = self
+            .current()
+            .ftp
+            .as_ref()
+            .filter(|tab| tab.location.session.security() == ftp::Security::S3)
+        else {
+            self.status("Öffne ein S3-Dateifenster.");
+            return;
+        };
+        let endpoint = (
+            remote.location.session.clone(),
+            remote.location.directory.clone(),
+        );
+        let description = super::JobDescription::new(
+            crate::OperationKind::Ftp,
+            endpoint.1.to_string(),
+            String::new(),
+        );
+        self.start_operation_job("S3-Versionierung lesen", false, description, move |job| {
+            let (bucket, status) = endpoint
+                .0
+                .s3_bucket_versioning_details(&endpoint.1, &job.cancel)?;
+            Ok(Outcome::S3Versioning(endpoint, bucket, status))
+        });
+    }
+
+    pub(super) fn show_s3_versioning(
+        &mut self,
+        endpoint: FtpEndpoint,
+        bucket: String,
+        current: ftp::S3VersioningConfig,
+    ) {
+        use crate::locale::tr;
+        let (status, label) = match current.status {
+            ftp::S3Versioning::Enabled => ("Aktiv", "Versionierung aussetzen"),
+            ftp::S3Versioning::Unversioned | ftp::S3Versioning::Suspended => (
+                if current.status == ftp::S3Versioning::Unversioned {
+                    "Noch nie aktiviert"
+                } else {
+                    "Ausgesetzt"
+                },
+                "Versionierung aktivieren",
+            ),
+        };
+        let mfa_action = if current.mfa_delete {
+            "MFA Delete deaktivieren"
+        } else if current.status == ftp::S3Versioning::Unversioned {
+            "Versionierung und MFA Delete aktivieren"
+        } else {
+            "MFA Delete aktivieren"
+        };
+        let description = format!(
+            "{bucket}\n{} · {}\nMFA Delete · {}",
+            tr("Versionierung"),
+            tr(status),
+            tr(if current.mfa_delete {
+                "Aktiv"
+            } else {
+                "Inaktiv"
+            })
+        );
+        self.dialog(
+            "confirm",
+            Pending::ChooseS3Versioning(endpoint, bucket, current),
+            Dialog {
+                title: "S3-Bucket-Versionierung",
+                description: &description,
+                options: &[label, mfa_action],
+                options_label: "Änderung",
+                confirm_label: "Weiter",
+                ..Default::default()
+            },
+        );
+    }
+
+    pub(crate) fn choose_s3_versioning(
+        &mut self,
+        endpoint: FtpEndpoint,
+        bucket: String,
+        current: ftp::S3VersioningConfig,
+        option: usize,
+    ) -> io::Result<()> {
+        use crate::locale::tr;
+        use ftp::S3Versioning::*;
+        let (next, label, effect) = match option {
+            0 if current.status == Enabled => (
+                ftp::S3VersioningConfig {
+                    status: Suspended,
+                    ..current
+                },
+                "Versionierung aussetzen",
+                "Neue Uploads erhalten die Versions-ID null. Weitere Uploads können diese Version überschreiben.",
+            ),
+            0 => (
+                ftp::S3VersioningConfig {
+                    status: Enabled,
+                    ..current
+                },
+                "Versionierung aktivieren",
+                "Neue Uploads erhalten eine eigene Versions-ID.",
+            ),
+            1 => (
+                ftp::S3VersioningConfig {
+                    status: if current.status == Unversioned {
+                        Enabled
+                    } else {
+                        current.status
+                    },
+                    mfa_delete: !current.mfa_delete,
+                },
+                if current.mfa_delete {
+                    "MFA Delete deaktivieren"
+                } else if current.status == Unversioned {
+                    "Versionierung und MFA Delete aktivieren"
+                } else {
+                    "MFA Delete aktivieren"
+                },
+                if current.mfa_delete {
+                    "Dauerhafte Versionslöschungen benötigen anschließend keinen MFA-Code mehr."
+                } else {
+                    "Das dauerhafte Löschen von Versionen und Änderungen der Versionierung benötigen anschließend einen MFA-Code."
+                },
+            ),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Ungültige S3-Aktion.",
+                ));
+            }
+        };
+        let description = format!("{bucket}\n\n{}", tr(effect));
+        let protected = current.requires_mfa(next);
+        if protected {
+            ftp::S3Mfa::require_https(&endpoint.1)?;
+        }
+        self.dialog(
+            if protected { "input" } else { "confirm" },
+            Pending::SetS3Versioning(endpoint, current, next),
+            Dialog {
+                title: "S3-Bucket-Versionierung",
+                description: &description,
+                confirm_label: label,
+                placeholder: "MFA-Gerät (Seriennummer oder ARN)",
+                second_placeholder: "Sechsstelliger MFA-Code",
+                second_secret: true,
+                ..Default::default()
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn set_s3_versioning(
+        &mut self,
+        (session, directory): FtpEndpoint,
+        before: ftp::S3VersioningConfig,
+        next: ftp::S3VersioningConfig,
+        mfa: Option<ftp::S3Mfa>,
+    ) {
+        let description = super::JobDescription::new(
+            crate::OperationKind::Ftp,
+            directory.to_string(),
+            String::new(),
+        );
+        self.enqueue_virtual_operation("S3-Bucket-Versionierung", false, description, move |job| {
+            session.update_s3_bucket_versioning(
+                &directory,
+                before,
+                next,
+                mfa.as_ref(),
+                &job.cancel,
+            )?;
+            Ok(Outcome::Report(
+                if before.mfa_delete != next.mfa_delete {
+                    if next.mfa_delete {
+                        "MFA Delete aktiviert"
+                    } else {
+                        "MFA Delete deaktiviert"
+                    }
+                } else if next.status == ftp::S3Versioning::Enabled {
+                    "S3-Versionierung aktiviert"
+                } else {
+                    "S3-Versionierung ausgesetzt"
+                }
+                .into(),
+                TransferReport {
+                    completed: 1,
+                    ..Default::default()
+                },
+            ))
+        });
+    }
+
+    pub(crate) fn ask_s3_discard_upload(&mut self) {
+        let Some(remote) = self
+            .current()
+            .ftp
+            .as_ref()
+            .filter(|tab| tab.location.session.security() == ftp::Security::S3)
+        else {
+            self.status("Öffne ein S3-Dateifenster.");
+            return;
+        };
+        let endpoint = (
+            remote.location.session.clone(),
+            remote.location.directory.clone(),
+        );
+        self.dialog(
+            "input",
+            Pending::S3DiscardUpload(endpoint),
+            Dialog {
+                title: "Fortsetzbaren S3-Upload verwerfen",
+                description: "Gib den Zielnamen des begonnenen Uploads ein.",
+                placeholder: "Entfernter Dateiname",
+                confirm_label: "Weiter",
+                ..Default::default()
+            },
+        );
+    }
+
+    pub(crate) fn confirm_s3_discard_upload(
+        &mut self,
+        (session, directory): FtpEndpoint,
+        target: &str,
+    ) -> io::Result<()> {
+        let (directory, name) = session.download_location(&directory, target)?;
+        let description = format!(
+            "{}\n\n{}",
+            name,
+            crate::locale::tr("Arco verwirft die übertragenen Teile dieses begonnenen Uploads."),
+        );
+        self.dialog(
+            "confirm",
+            Pending::ConfirmS3DiscardUpload((session, directory), name),
+            Dialog {
+                title: "Fortsetzbaren S3-Upload verwerfen",
+                description: &description,
+                confirm_label: "Upload verwerfen",
+                ..Default::default()
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn discard_s3_upload(&mut self, (session, directory): FtpEndpoint, name: String) {
+        let title = "Fortsetzbaren S3-Upload verwerfen";
+        let description = super::JobDescription::new(
+            crate::OperationKind::Ftp,
+            format!("{directory}{name}"),
+            String::new(),
+        );
+        self.enqueue_virtual_operation(title, false, description, move |job| {
+            let discarded = session.discard_s3_upload(&directory, &name, &job.cancel)?;
+            let result = if discarded {
+                "S3-Upload verworfen."
+            } else {
+                "Kein gespeicherter S3-Upload für dieses Ziel."
+            };
+            Ok(Outcome::Text(
+                title.into(),
+                crate::locale::tr(result).into(),
+            ))
+        });
     }
 
     pub(crate) fn save_s3_version(
@@ -632,15 +1154,15 @@ impl App {
         Ok(())
     }
 
-    pub(crate) fn sftp_checksums(&mut self) {
-        use std::fmt::Write as _;
+    pub(crate) fn ask_remote_checksums(&mut self) {
+        use crate::commands::{Dialog, Pending};
         let tab = self.current();
-        let Some(ftp) = tab
-            .ftp
-            .as_ref()
-            .filter(|ftp| ftp.location.session.is_sftp())
-        else {
-            self.status("Wähle einen Eintrag im SFTP-Dateifenster.");
+        let Some(ftp) = tab.ftp.as_ref().filter(|ftp| {
+            ftp.location.session.security().is_ssh() || ftp.location.session.security().is_ftp()
+        }) else {
+            self.status(crate::locale::tr(
+                "Wähle Dateien im FTP-, FTPS-, SFTP- oder SCP-Dateifenster.",
+            ));
             return;
         };
         let entries: Vec<_> = tab
@@ -651,36 +1173,82 @@ impl App {
             .cloned()
             .collect();
         if entries.is_empty() {
-            self.status("Wähle mindestens eine SFTP-Datei.");
+            self.status(crate::locale::tr("Wähle mindestens eine Serverdatei."));
             return;
         }
         let location = ftp.location.clone();
+        let mut options = vec![crate::locale::tr("Automatisch")];
+        options.extend(
+            ftp::ChecksumAlgorithm::ALL
+                .into_iter()
+                .filter(|algorithm| {
+                    location.session.security() != ftp::Security::Scp
+                        || *algorithm != ftp::ChecksumAlgorithm::Crc32
+                })
+                .map(ftp::ChecksumAlgorithm::name),
+        );
+        self.dialog(
+            "confirm",
+            Pending::RemoteChecksums(location.clone(), entries),
+            Dialog {
+                title: "Server-Prüfsummen",
+                description: match location.session.security() {
+                    ftp::Security::Sftp => "Arco fragt die Prüfsumme beim SFTP-Server ab und berechnet sie bei Bedarf aus den Dateidaten.",
+                    ftp::Security::Scp => "Der SCP-Server berechnet die Prüfsumme mit einem GNU-Prüfprogramm.",
+                    _ => "Der FTP-Server berechnet die Prüfsumme mit einem von ihm angebotenen Verfahren.",
+                },
+                options: &options,
+                options_label: "Algorithmus",
+                confirm_label: "Berechnen",
+                ..Dialog::default()
+            }
+        );
+    }
+
+    pub(crate) fn remote_checksums(
+        &mut self,
+        location: FtpLocation,
+        entries: Vec<ftp::Entry>,
+        option: usize,
+    ) {
+        use std::fmt::Write as _;
+        let algorithm = option
+            .checked_sub(1)
+            .and_then(|index| ftp::ChecksumAlgorithm::ALL.get(index))
+            .copied();
         let description = super::JobDescription::new(
             crate::OperationKind::Ftp,
             location.directory.to_string(),
             String::new(),
         );
-        self.start_operation_job("SFTP-Prüfsummen", false, description, move |job| {
+        self.start_operation_job("Server-Prüfsummen", false, description, move |job| {
             let mut result = String::new();
             let total = entries.len();
+            let phase = "Prüfsummen berechnen …";
+            let method =
+                location
+                    .session
+                    .prepare_checksum(&location.directory, algorithm, &job.cancel)?;
+            let mut selected = "";
             for (index, entry) in entries.into_iter().enumerate() {
-                job.entry_progress(entry.name.clone(), index, total, "SHA-256 berechnen …");
-                let progress = job.ftp_progress(
-                    entry.name.clone(),
-                    entry.size,
-                    "SHA-256 berechnen …",
-                    "Datei prüfen …",
-                );
-                let hash = location.session.sftp_sha256(
+                job.entry_progress(entry.name.clone(), index, total, phase);
+                let progress =
+                    job.ftp_progress(entry.name.clone(), entry.size, phase, "Datei prüfen …");
+                let (algorithm, hash) = location.session.remote_checksum(
                     &location.directory,
                     &entry,
+                    method,
                     &job.cancel,
                     progress,
                 )?;
+                selected = algorithm;
                 let _ = writeln!(result, "{hash} *{}", entry.name);
-                job.entry_progress(entry.name, index + 1, total, "SHA-256 berechnen …");
+                job.entry_progress(entry.name, index + 1, total, phase);
             }
-            Ok(Outcome::Text("SFTP-Prüfsummen · SHA-256".into(), result))
+            Ok(Outcome::Text(
+                format!("{} · {selected}", crate::locale::tr("Server-Prüfsummen")),
+                result,
+            ))
         });
     }
 
@@ -835,6 +1403,7 @@ impl App {
         self.dialog("multiline", Pending::FtpDownloadList(endpoint, target.path.clone()), Dialog {
             title: "FTP-Downloadliste",
             description: "Ein FTP-Pfad oder eine URL des verbundenen Servers pro Zeile. Mit @ vor einem absoluten Pfad liest Arco die Liste aus einer Textdatei.",
+            placeholder: "Dateiliste",
             confirm_label: "Herunterladen",
             ..Default::default()
         });
@@ -852,75 +1421,92 @@ impl App {
             ));
         }
         let list = list.to_owned();
+        let job_options = self.job_transfer_options()?;
         let presets = self.profile.network_transfer_presets.clone();
         let description = super::JobDescription::new(
             crate::OperationKind::Ftp,
             directory.to_string(),
             display_path(&target),
         );
-        self.enqueue_virtual_operation("FTP-Downloadliste", true, description, move |job| {
-            let text = if let Some(path) = list.trim().strip_prefix('@')
-                && !path.contains(['\r', '\n'])
-                && Path::new(path.trim_matches('"')).is_absolute()
-            {
-                arco_core::profile::read_tc_text(Path::new(path.trim_matches('"')))?
-            } else {
-                list
-            };
-            let mut downloads = Vec::new();
-            let mut names = BTreeSet::new();
-            for line in text
-                .lines()
-                .filter(|line| !line.trim().is_empty() && !line.starts_with("# "))
-            {
-                files::check_cancel(&job.cancel)?;
-                if downloads.len() >= 1000 {
+        let mut remote_root = directory.clone();
+        remote_root.set_path("/");
+        let access = vec![
+            super::TransferAccess::local(&target, true),
+            super::TransferAccess::remote(&session, &remote_root, None, false)?,
+        ];
+        let transfer = self.new_network_transfer(access);
+        let connections = transfer.file_connections();
+        let session = Arc::new(transfer.session(&session));
+        self.enqueue_network_transfer(
+            "FTP-Downloadliste",
+            true,
+            description,
+            transfer,
+            move |job| {
+                let text = if let Some(path) = list.trim().strip_prefix('@')
+                    && !path.contains(['\r', '\n'])
+                    && Path::new(path.trim_matches('"')).is_absolute()
+                {
+                    arco_core::profile::read_tc_text(Path::new(path.trim_matches('"')))?
+                } else {
+                    list
+                };
+                let mut downloads = Vec::new();
+                let mut names = BTreeSet::new();
+                for line in text
+                    .lines()
+                    .filter(|line| !line.trim().is_empty() && !line.starts_with("# "))
+                {
+                    files::check_cancel(&job.cancel)?;
+                    if downloads.len() >= 1000 {
+                        return Err(io::Error::other(
+                            "Eine FTP-Downloadliste darf höchstens 1000 Dateien enthalten.",
+                        ));
+                    }
+                    let (parent, name) = session.download_location(&directory, line)?;
+                    let transfer =
+                        job_options.resolve(&presets, &session, &parent, Some(&target))?;
+                    arco_app::network_sync::check_transfer_mask(&transfer, &name)?;
+                    let leaf = transfer.transfer_settings().names.download(&name)?;
+                    let output = target.join(&leaf);
+                    if !names.insert(leaf.to_lowercase()) || output.try_exists()? {
+                        return Err(io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            format!("Doppeltes oder vorhandenes Downloadziel: {leaf}"),
+                        ));
+                    }
+                    downloads.push((transfer, parent, name, output));
+                }
+                if downloads.is_empty() {
                     return Err(io::Error::other(
-                        "Eine FTP-Downloadliste darf höchstens 1000 Dateien enthalten.",
+                        "Gib mindestens eine Datei für den FTP-Download an.",
                     ));
                 }
-                let (parent, name) = session.download_location(&directory, line)?;
-                let transfer = arco_app::network_transfer::resolve(
-                    &presets,
-                    &session,
-                    &parent,
-                    Some(&target),
-                    None,
-                )?;
-                arco_app::network_sync::check_transfer_mask(&transfer, &name)?;
-                let output = target.join(files::leaf_name(OsStr::new(&name))?);
-                if !names.insert(name.to_lowercase()) || output.try_exists()? {
-                    return Err(io::Error::new(
-                        io::ErrorKind::AlreadyExists,
-                        format!("Doppeltes oder vorhandenes Downloadziel: {name}"),
-                    ));
+                let total = downloads.len();
+                job.entry_progress(String::new(), 0, total, "FTP-Downloadliste");
+                let report = arco_app::network_batch::Batch {
+                    connections: connections.as_ref(),
+                    cancel: &job.cancel,
                 }
-                downloads.push((transfer, parent, name, output));
-            }
-            if downloads.is_empty() {
-                return Err(io::Error::other(
-                    "Gib mindestens eine Datei für den FTP-Download an.",
-                ));
-            }
-            let mut report = TransferReport::default();
-            let total = downloads.len();
-            for (index, (transfer, parent, name, output)) in downloads.into_iter().enumerate() {
-                files::check_cancel(&job.cancel)?;
-                job.step_progress(name.clone(), index + 1, total);
-                transfer
-                    .download_preferred(&parent, &name, &output, &job.cancel, |_| {})
-                    .map_err(|error| {
-                        io::Error::new(
-                            error.kind(),
-                            format!("{name}: {error} ({} / {total})", report.completed),
-                        )
-                    })?;
-                report.completed += 1;
-                job.entry_progress(name, report.completed, total, "FTP-Downloadliste");
-            }
-            Ok(Outcome::Report("FTP-Downloadliste".into(), report))
-        });
-        Ok(())
+                .run(
+                    &downloads,
+                    true,
+                    |index, width| session.for_file_worker(index, width),
+                    |worker, (transfer, parent, name, output)| {
+                        worker
+                            .with_transfer_snapshot(transfer.transfer_settings().clone())
+                            .download_preferred(parent, name, output, &job.cancel, |_| {})
+                            .map_err(|error| {
+                                io::Error::new(error.kind(), format!("{name}: {error}"))
+                            })
+                    },
+                    |(_, _, name, _), count| {
+                        job.entry_progress(name.clone(), count, total, "FTP-Downloadliste")
+                    },
+                );
+                Ok(Outcome::Report("FTP-Downloadliste".into(), report))
+            },
+        )
     }
 
     pub(crate) fn ftp_endpoint(&self) -> Option<FtpEndpoint> {
@@ -1011,7 +1597,7 @@ impl App {
                     name => {
                         location.directory = location
                             .session
-                            .relative_directory(&location.directory, Path::new(name))?;
+                            .child_directory(&location.directory, name)?;
                     }
                 }
             }
@@ -1032,10 +1618,12 @@ impl App {
     }
 
     pub(super) fn open_ftp_entry(&mut self, location: FtpLocation, entry: ftp::Entry) {
-        if entry.directory == Some(true) {
+        if entry.symlink {
+            self.open_ftp_link(location, entry.name, None);
+        } else if entry.directory == Some(true) {
             match location
                 .session
-                .relative_directory(&location.directory, Path::new(&entry.name))
+                .child_directory(&location.directory, &entry.name)
             {
                 Ok(directory) => self.load_location(
                     self.active,
@@ -1060,7 +1648,59 @@ impl App {
         else {
             return;
         };
-        self.preview_ftp_entry(ftp.location.clone(), entry.clone(), separate);
+        if entry.symlink {
+            self.open_ftp_link(ftp.location.clone(), entry.name.clone(), Some(separate));
+        } else {
+            self.preview_ftp_entry(ftp.location.clone(), entry.clone(), separate);
+        }
+    }
+
+    fn open_ftp_link(&mut self, location: FtpLocation, name: String, preview: Option<bool>) {
+        let side = self.active;
+        let request = self.panels[side].request;
+        let description =
+            super::JobDescription::new(crate::OperationKind::Ftp, name.clone(), String::new());
+        self.start_operation_job("Linkziel öffnen …", false, description, move |job| {
+            let target =
+                location
+                    .session
+                    .resolve_remote_link(&location.directory, &name, &job.cancel)?;
+            Ok(Outcome::RemoteLinkResolved {
+                side,
+                request,
+                location,
+                target: Box::new(target),
+                preview,
+            })
+        });
+    }
+
+    pub(super) fn complete_open_remote_link(
+        &mut self,
+        side: usize,
+        request: u64,
+        location: FtpLocation,
+        target: ftp::ResolvedLink,
+        preview: Option<bool>,
+    ) {
+        let panel = &self.panels[side];
+        let unchanged = panel.current().ftp.as_ref().is_some_and(|ftp| {
+            Arc::ptr_eq(&ftp.location.session, &location.session)
+                && ftp.location.directory == location.directory
+        });
+        if self.active != side || panel.request != request || !unchanged {
+            self.status("Ansicht hat sich während des Öffnens geändert.");
+            return;
+        }
+        match target {
+            ftp::ResolvedLink::Directory(directory) if preview.is_none() => {
+                self.load_location(side, Location::Ftp(location.at(directory)), Navigation::Jump);
+            }
+            ftp::ResolvedLink::Directory(_) => self.status("Der Link verweist auf einen Ordner. Öffne ihn mit der Eingabetaste oder per Doppelklick."),
+            ftp::ResolvedLink::File(parent, entry) => {
+                self.preview_ftp_entry(location.at(parent), entry, preview.unwrap_or(false));
+            }
+        }
     }
 
     fn preview_ftp_entry(&mut self, location: FtpLocation, entry: ftp::Entry, separate: bool) {
@@ -1079,7 +1719,7 @@ impl App {
             let storage = Arc::new(tempfile::tempdir()?);
             let path = storage
                 .path()
-                .join(files::leaf_name(OsStr::new(&entry.name))?);
+                .join(copy_names::encode_remote_name(&entry.name)?);
             location.session.download_bounded_with_progress(
                 &location.directory,
                 &entry.name,
@@ -1119,7 +1759,6 @@ impl App {
             .unwrap_or_else(|| ftp.location.directory.to_string());
         let mut sheet = super::properties::Sheet::virtual_entry("FTP-Eigenschaften", path, entry);
         sheet.field("Verzeichnisformat", format!("{:?}", ftp.listing.format));
-        sheet.field("Unix-Rechte", crate::locale::tr("Nicht ermittelt").into());
         if let Some(remote) = entry.and_then(|entry| ftp.entry(&entry.path)) {
             sheet.field(
                 "Server-Zeitstempel (UTC)",
@@ -1136,6 +1775,66 @@ impl App {
         {
             sheet.field("Ausgewählte Einträge", entries.len().to_string());
             sheet.ftp = Some((ftp.location.clone(), entries));
+        }
+        if let Some((location, entries)) = &sheet.ftp
+            && let [entry] = entries.as_slice()
+            && location.session.security().is_ssh()
+        {
+            let location = location.clone();
+            let entry = entry.clone();
+            let description = super::JobDescription::new(
+                crate::OperationKind::Metadata,
+                sheet.path.clone(),
+                String::new(),
+            );
+            self.start_operation_job("Eigenschaften lesen", false, description, move |job| {
+                use crate::locale::tr;
+                if entry.symlink {
+                    match location.session.remote_link_target(
+                        &location.directory,
+                        &entry.name,
+                        &job.cancel,
+                    ) {
+                        Ok(target) => sheet.field("Linkziel auf dem Server", target),
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                            return Err(error);
+                        }
+                        Err(error) => sheet.field(
+                            "Linkziel auf dem Server",
+                            crate::locale::message(&error.to_string()).into_owned(),
+                        ),
+                    }
+                }
+                match location
+                    .session
+                    .unix_metadata(&location.directory, &entry, &job.cancel)
+                {
+                    Ok(attrs) => {
+                        let missing = || tr("Nicht verfügbar").to_owned();
+                        sheet.field(
+                            "Unix-Rechte",
+                            attrs
+                                .mode
+                                .map_or_else(missing, |mode| format!("{mode:04o}")),
+                        );
+                        sheet.field(
+                            "Besitzer-ID (UID)",
+                            attrs.owner.map_or_else(missing, |owner| owner.to_string()),
+                        );
+                        sheet.field(
+                            "Gruppen-ID (GID)",
+                            attrs.group.map_or_else(missing, |group| group.to_string()),
+                        );
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => return Err(error),
+                    Err(error) => sheet.field(
+                        "Unix-Rechte",
+                        crate::locale::message(&error.to_string()).into_owned(),
+                    ),
+                }
+                Ok(Outcome::Properties(Box::new(sheet)))
+            });
+            return;
         }
         self.show_properties(sheet);
     }
@@ -1250,46 +1949,6 @@ impl App {
                     Ok(Outcome::MetadataEdited(title, report))
                 });
             }
-            FtpEdit::Permissions(entries) => {
-                let permissions = super::metadata_edit::parse_mode(name)?;
-                let description = super::JobDescription::new(
-                    crate::OperationKind::Metadata,
-                    location.directory.to_string(),
-                    String::new(),
-                );
-                self.start_operation_job("FTP-Dateirechte setzen", true, description, move |job| {
-                    let mut report = TransferReport::default();
-                    let total = entries.len();
-                    for (index, entry) in entries.into_iter().enumerate() {
-                        job.entry_progress(
-                            entry.name.clone(),
-                            index,
-                            total,
-                            "FTP-Dateirechte setzen …",
-                        );
-                        match location.session.set_unix_permissions(
-                            &location.directory,
-                            &entry,
-                            permissions,
-                            &job.cancel,
-                        ) {
-                            Ok(()) => report.completed += 1,
-                            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
-                                report.cancelled = true;
-                                break;
-                            }
-                            Err(error) => report.errors.push(format!("{}: {error}", entry.name)),
-                        }
-                        job.entry_progress(
-                            entry.name.clone(),
-                            index + 1,
-                            total,
-                            "FTP-Dateirechte setzen …",
-                        );
-                    }
-                    Ok(Outcome::MetadataEdited("FTP-Dateirechte", report))
-                });
-            }
             FtpEdit::Delete(entries, permanent) => {
                 let detail = format!(
                     "{} · {}",
@@ -1343,9 +2002,7 @@ impl App {
                                 &name,
                                 &job.cancel,
                             )?,
-                            FtpEdit::Delete(..)
-                            | FtpEdit::Permissions(_)
-                            | FtpEdit::Modified(_) => {
+                            FtpEdit::Delete(..) | FtpEdit::Modified(_) => {
                                 unreachable!()
                             }
                         }
@@ -1403,11 +2060,11 @@ fn delete_selection(
     }
     let paths = selected
         .iter()
-        .map(|entry| PathBuf::from(&entry.name))
-        .collect::<Vec<_>>();
+        .map(|entry| copy_names::encode_remote_name(&entry.name).map(PathBuf::from))
+        .collect::<io::Result<Vec<_>>>()?;
     let scope = Scope::new(true, &paths)?;
     let endpoint = (location.session, location.directory);
-    let (_, entries) = scan(&endpoint, &scope, true, &|_, _| false, cancel, &mut |_| {})?;
+    let entries = scan_for_delete(&endpoint, &scope, cancel)?;
     for (path, before) in paths.iter().zip(selected) {
         if entries.get(path) != Some(before) {
             return Err(io::Error::other(format!(
@@ -1422,10 +2079,9 @@ fn delete_selection(
             report.cancelled = true;
             break;
         }
-        progress(path, index, entries.len());
-        let result = endpoint
-            .0
-            .relative_directory(&endpoint.1, path.parent().expect("remote relative path"))
+        let display = copy_names::reported_path(path, true)?;
+        progress(&display, index, entries.len());
+        let result = copy_names::remote_parent(&endpoint, path, true)
             .and_then(|parent| endpoint.0.delete_sync_entry(&parent, entry, cancel));
         match result {
             Ok(()) => report.completed += 1,
@@ -1433,9 +2089,11 @@ fn delete_selection(
                 report.cancelled = true;
                 break;
             }
-            Err(error) => report.errors.push(format!("{}: {error}", path.display())),
+            Err(error) => report
+                .errors
+                .push(format!("{}: {error}", display.display())),
         }
-        progress(path, index + 1, entries.len());
+        progress(&display, index + 1, entries.len());
     }
     Ok(report)
 }
@@ -1444,6 +2102,124 @@ fn delete_selection(
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    #[ignore = "requires the dedicated SFTP link fixture"]
+    fn mounted_sftp_skips_link_targets_in_mirror_and_recursive_delete() {
+        use arco_app::network_sync::FtpPlan;
+        use arco_core::sync::{Action, Mode, Options};
+
+        let session = ftp::Connection::new(
+            &std::env::var("ARCO_SFTP_LINK_URL").unwrap(),
+            "arco",
+            ftp::Security::Sftp,
+        )
+        .unwrap()
+        .with_ssh(&std::env::var("ARCO_SFTP_LINK_FINGERPRINT").unwrap(), None)
+        .unwrap()
+        .authenticate("fixture-only")
+        .unwrap();
+        let mut settings = session.transfer_settings().clone();
+        settings.names.windows = true;
+        let session = Arc::new(session.with_transfer_snapshot(settings));
+        let cancel = AtomicBool::new(false);
+        let root = session.directory("arco-link-fixture").unwrap();
+        session
+            .create_sync_directory(&root, "panel operations", &cancel)
+            .unwrap();
+        let directory = session.child_directory(&root, "panel operations").unwrap();
+        let location = FtpLocation {
+            directory: directory.clone(),
+            session: session.clone(),
+            profile: None,
+        };
+        session
+            .create_sync_directory(&directory, "container", &cancel)
+            .unwrap();
+        let container = session.child_directory(&directory, "container").unwrap();
+        session
+            .create_remote_link(
+                &container,
+                "nested",
+                "../../target folder",
+                ftp::RemoteLinkKind::Symbolic,
+                &cancel,
+            )
+            .unwrap();
+        session
+            .create_remote_link(
+                &directory,
+                "alias?.txt",
+                "../source file.txt",
+                ftp::RemoteLinkKind::Symbolic,
+                &cancel,
+            )
+            .unwrap();
+
+        let local = tempfile::tempdir().unwrap();
+        let counterpart = local
+            .path()
+            .join(copy_names::encode_remote_name("alias?.txt").unwrap());
+        fs::write(&counterpart, b"local counterpart").unwrap();
+        let plan = FtpPlan::compare(
+            local.path(),
+            (session.clone(), directory.clone()),
+            &Options {
+                mode: Mode::Mirror,
+                ..Options::default()
+            },
+            &[],
+            &|_, _| false,
+            &cancel,
+            |_| {},
+        )
+        .unwrap();
+        assert!(
+            plan.rows
+                .iter()
+                .all(|row| row.action != Action::DeleteRight)
+        );
+        assert!(
+            plan.rows
+                .iter()
+                .all(|row| !row.relative.ends_with(counterpart.file_name().unwrap()))
+        );
+        let report = plan.apply(&cancel, |_| {});
+        assert_eq!(report.completed, 0);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+
+        let pane = read_panel(&location, &cancel).unwrap();
+        assert!(
+            pane.directory
+                .entries
+                .iter()
+                .any(|row| row.kind == Kind::Link && row.name == "alias?.txt")
+        );
+        let selected = pane.ftp.unwrap().listing.entries;
+        let report = delete_selection(location, &selected, false, &cancel, |_, _, _| {}).unwrap();
+        assert_eq!(report.completed, 3);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(
+            session
+                .list_sync(&directory, &cancel)
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+        let outside = session.child_directory(&root, "target folder").unwrap();
+        assert_eq!(
+            session.list_sync(&outside, &cancel).unwrap().entries[0].name,
+            "preserved.txt"
+        );
+        assert!(
+            session
+                .list_sync(&root, &cancel)
+                .unwrap()
+                .entries
+                .iter()
+                .any(|entry| entry.name == "source file.txt")
+        );
+    }
 
     #[test]
     #[ignore = "requires a disposable writable local FTP server"]

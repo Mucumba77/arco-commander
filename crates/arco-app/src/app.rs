@@ -35,12 +35,14 @@ mod directory_tree;
 mod favorites;
 mod folder_actions;
 mod ftp_edit;
+mod ftp_links;
 mod ftp_panel;
 mod ftp_profiles;
 pub(crate) use ftp_profiles::{KnownHostProposal, NetworkImport};
 mod ftp_sync;
 mod ignore;
 mod job_progress;
+mod network_command_templates;
 mod network_crypto;
 mod network_schedule;
 mod network_watch;
@@ -69,12 +71,14 @@ mod text_compare;
 mod thumbnails;
 mod transfer_presets;
 mod transfer_queue;
+pub(crate) use transfer_queue::{Access as TransferAccess, NetworkTransfer};
 pub(crate) mod utilities;
 mod view_setup;
 mod wdx;
 mod wfx_panel;
 mod wfx_prompts;
 mod wlx;
+mod workspaces;
 pub(crate) use administration::Setup as AdministrationSetup;
 pub(crate) use advanced_search::DuplicateSelectionState;
 pub(crate) use advanced_search::duplicate_result;
@@ -82,23 +86,24 @@ pub(crate) use advanced_search::{Review as AdvancedSearchReview, Setup as Advanc
 pub(crate) use archive_actions::{ArchiveInput, StagedPreview};
 pub(crate) use associations::Setup as AssociationSetup;
 pub(crate) use favorites::{Setup as FavoriteSetup, label as favorite_label, tc_profile};
-pub(crate) use ftp_edit::Draft as FtpDraft;
+pub(crate) use ftp_edit::{Draft as FtpDraft, DraftEditor, DraftUpload, TextEdit};
 pub(crate) use ftp_panel::FtpEdit;
-pub(crate) use ftp_panel::S3History;
 pub(crate) use ftp_panel::SearchHit as FtpSearchHit;
+pub(crate) use ftp_panel::{S3DeleteMode, S3History, S3HistoryAction};
 pub(crate) use ftp_profiles::{FtpConnectMode, SshProfileLogin};
 pub(crate) use ftp_sync::modified as ftp_modified;
 pub(crate) use linked_navigation::LinkedFolder;
 pub(crate) use lister::ViewerRequest;
 pub(crate) use plugin_files::PluginFileAction;
 pub(crate) use rename_setup::Setup as RenameSetup;
-pub(crate) use sync_actions::{SyncReview, SyncSetup};
+pub(crate) use sync_actions::{NetworkCopy, SyncReview, SyncSetup};
 pub(crate) use transfer_queue::ConflictTicket;
 pub(crate) use transfer_queue::TransferTask;
 pub(crate) use view_setup::Setup as ViewSetup;
 pub(crate) use wdx::SearchTarget as WdxSearchTarget;
 pub(crate) use wdx::{EditInput as WdxEditInput, EditTarget as WdxEditTarget};
 pub(crate) use wfx_prompts::PromptTicket;
+pub(crate) use workspaces::WorkspaceDialog;
 
 const FILE_FONT_SIZES: [u8; 4] = [12, 14, 16, 18];
 
@@ -111,8 +116,9 @@ pub enum Navigation {
     Forward,
     Linked,
     FtpProfile {
-        local: PathBuf,
+        local: Option<PathBuf>,
         opposite_request: u64,
+        link_navigation: bool,
     },
 }
 
@@ -157,6 +163,13 @@ pub enum Outcome {
         skipped: usize,
     },
     Ftp(FtpView),
+    #[cfg(windows)]
+    FtpProxyDetected {
+        selection: i32,
+        address: String,
+        security: i32,
+        result: Result<ftp::HttpProxy, String>,
+    },
     FtpRecycleBin(usize, u64, crate::panel::FtpLocation),
     LinkedFolder(Box<LinkedFolder>),
     FtpSearch {
@@ -173,15 +186,26 @@ pub enum Outcome {
         directory: Box<LoadedDirectory>,
     },
     PluginsUpdated(usize, Option<String>),
-    FtpEditReady(Box<FtpDraft>),
-    FtpEditUploaded(Box<FtpDraft>, Option<String>),
+    FtpEditReady(Box<FtpDraft>, DraftEditor),
+    FtpEditFinished(Box<FtpDraft>, DraftUpload, Option<String>),
+    FtpEditStopped(PathBuf, String, files::TransferReport),
+    RemoteLinkLoaded(FtpEndpoint, String, String),
+    RemoteLinkResolved {
+        side: usize,
+        request: u64,
+        location: FtpLocation,
+        target: Box<ftp::ResolvedLink>,
+        preview: Option<bool>,
+    },
     S3Tags(Box<(FtpLocation, ftp::Entry, ftp::S3Tags)>),
     S3History(Box<S3History>),
+    S3Versioning(FtpEndpoint, String, ftp::S3VersioningConfig),
     Imported(TcImport),
     ImportedTabs(String, Box<arco_core::profile::TcTabs>),
     TabFile(Box<arco_core::profile::TcTabs>, bool),
     ImportedFtp(Vec<(String, arco_core::profile::TcFtpSite)>),
     ImportedNetwork(Vec<arco_core::winscp::ImportedSite>),
+    ImportedWorkspaces(Vec<arco_core::winscp::ImportedWorkspace>),
     ImportedKnownHosts(Vec<KnownHostProposal>),
     ScheduledNetworkTasks(Vec<arco_windows::task_schedule::Task>),
     PluginPreview(String, arco_core::plugin::HostProcess),
@@ -631,10 +655,13 @@ pub struct App {
     quick_skip_plugin: bool,
     plugin_previews: Vec<(String, arco_core::plugin::HostProcess)>,
     pub ftp: Option<FtpView>,
+    ftp_folder_filter: Option<String>,
     pub fxp_source: Option<FtpEndpoint>,
     ftp_drafts: Vec<FtpDraft>,
+    ftp_edit_monitor: ftp_edit::Monitor,
     network_watch: Option<network_watch::Running>,
     linked_navigation: Option<linked_navigation::Pair>,
+    pending_navigation_link: Option<[u64; 2]>,
     sender: Sender<Event>,
     receiver: Receiver<Event>,
     pub job: Option<Arc<AtomicBool>>,
@@ -729,8 +756,11 @@ pub fn run(
         ftp: None,
         fxp_source: None,
         ftp_drafts: Vec::new(),
+        ftp_edit_monitor: Default::default(),
+        ftp_folder_filter: None,
         network_watch: None,
         linked_navigation: None,
+        pending_navigation_link: None,
         sender,
         receiver,
         job: None,
@@ -1173,9 +1203,14 @@ pub fn run(
         }
     });
     let weak = Rc::downgrade(&app);
-    window.on_permissions_apply(move |mode| {
+    window.on_permissions_apply(move |mode, owner, group, recursive| {
         if let Some(app) = weak.upgrade() {
-            app.borrow_mut().submit_ftp_permissions(mode.as_str());
+            app.borrow_mut().submit_ftp_permissions(
+                mode.as_str(),
+                owner.as_str(),
+                group.as_str(),
+                recursive,
+            );
         }
     });
     window.on_permission_parse(|value| {
@@ -1220,10 +1255,23 @@ pub fn run(
         }
     });
     let weak = Rc::downgrade(&app);
-    window.on_ftp_profile_operate(move |operation, data, password| {
+    window.on_ftp_folder_select(move |index| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut().select_ftp_folder(index);
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_ftp_profile_operate(move |operation, data, password, token| {
         if let Some(app) = weak.upgrade() {
             app.borrow_mut()
-                .operate_ftp_profile(&operation, data, &password);
+                .operate_ftp_profile(&operation, data, &password, &token);
+        }
+    });
+    let weak = Rc::downgrade(&app);
+    window.on_ftp_profile_detect_proxy(move |address, security| {
+        if let Some(app) = weak.upgrade() {
+            app.borrow_mut()
+                .detect_ftp_proxy(address.to_string(), security);
         }
     });
     let weak = Rc::downgrade(&app);
@@ -1305,10 +1353,14 @@ pub fn run(
     window.window().on_close_requested(move || {
         if let Some(app) = weak.upgrade() {
             let mut app = app.borrow_mut();
-            if app.job.is_some() {
+            if app.job.is_some() || app.transfers.has_network_work() {
                 app.status(
                     "Ein Auftrag läuft. Beende ihn über Abbrechen oder warte auf das Ergebnis.",
                 );
+                return slint::CloseRequestResponse::KeepWindowShown;
+            }
+            if let Err(error) = app.save_active_workspace() {
+                app.error("Arbeitsbereich speichern", &error.to_string());
                 return slint::CloseRequestResponse::KeepWindowShown;
             }
             app.save();
@@ -1494,6 +1546,9 @@ impl App {
             editor: settings::path_label(profile.editor.as_deref()).into(),
             everything: settings::path_label(profile.everything_cli.as_deref()).into(),
             transfer_rate: profile.transfer_rate_kib.to_string().into(),
+            parallel_network_transfers: profile.parallel_network_transfers.to_string().into(),
+            parallel_network_files: profile.parallel_network_files,
+            parallel_sftp_minimum: profile.parallel_sftp_minimum_kib.to_string().into(),
             transfer_log: settings::path_label(profile.transfer_log.as_deref()).into(),
             transfer_comments: profile.transfer_descriptions,
             archives: settings::archive_draft(profile.archives),
@@ -1685,6 +1740,7 @@ impl App {
             return;
         }
         panel.tab = index;
+        self.pending_navigation_link = None;
         panel.loading = false;
         panel.pending_parent = None;
         panel.request = 0;
@@ -1877,6 +1933,9 @@ impl App {
         {
             self.status("Dieses WFX-Plugin ist deaktiviert oder wurde entfernt.");
             return;
+        }
+        if !matches!(navigation, Navigation::Refresh) {
+            self.pending_navigation_link = None;
         }
         let panel = &mut self.panels[side];
         let password = password.or_else(|| match (&target, &panel.current().archive) {
@@ -2110,7 +2169,7 @@ impl App {
                 Event::SshChallenge(challenge) => self.ssh_challenges.push_back(challenge),
                 #[cfg(windows)]
                 Event::SshTerminalError(error) => self.status(error),
-                Event::TransferConflict(ticket) => self.transfers.prompt = Some(ticket),
+                Event::TransferConflict(ticket) => self.transfers.prompts.push_back(ticket),
                 Event::WdxValues(values) => self.apply_wdx_values(values),
                 Event::WfxDefaultView(path, columns) => self.apply_wfx_default_view(path, columns),
                 Event::ViewIcon(key, image) => self.apply_view_icon(key, image),
@@ -2213,10 +2272,12 @@ impl App {
                 }
             }
         }
+        self.drain_network_transfers();
         self.open_next_plugin_prompt();
         self.open_next_ssh_challenge();
         self.open_next_transfer_conflict();
         self.advance_transfers();
+        self.poll_ftp_drafts();
         self.refresh_ftp_edit_status();
         if self.job.is_some() {
             let ui = self.ui();
@@ -2614,6 +2675,7 @@ impl App {
                     focus.as_deref(),
                 );
                 self.clear_link_on_scope_change();
+                self.restore_pending_navigation_link();
                 if !directory.errors.is_empty() {
                     self.status(format!(
                         "{} Einträge konnten nicht gelesen werden.",
@@ -2623,10 +2685,17 @@ impl App {
                 if let Navigation::FtpProfile {
                     local,
                     opposite_request,
+                    link_navigation,
                 } = navigation
                     && self.panels[1 - side].request == opposite_request
                 {
-                    self.load(1 - side, local, Navigation::Jump);
+                    if let Some(local) = local {
+                        self.load(1 - side, local, Navigation::Jump);
+                    }
+                    if link_navigation {
+                        self.set_pending_navigation_link(true);
+                        self.restore_pending_navigation_link();
+                    }
                 }
                 if follow {
                     self.follow_linked_navigation(side, &target);
@@ -2788,6 +2857,15 @@ impl App {
                 self.show_folder_sizes(side, request, &root, sizes, skipped);
             }
             Outcome::Ftp(view) => self.show_ftp(view),
+            #[cfg(windows)]
+            Outcome::FtpProxyDetected {
+                selection,
+                address,
+                security,
+                result,
+            } => {
+                self.show_ftp_proxy_offer(selection, address, security, result);
+            }
             Outcome::FtpRecycleBin(side, request, location) => {
                 if self.panels[side].request == request {
                     self.load_location(side, Location::Ftp(location), Navigation::Jump);
@@ -2810,6 +2888,9 @@ impl App {
                 directory,
             } => {
                 if self.panels[side].request == request {
+                    if !matches!(navigation, Navigation::Refresh) {
+                        self.pending_navigation_link = None;
+                    }
                     let panel = &mut self.panels[side];
                     if panel.current().options.lock == TabLock::Fixed
                         && !matches!(navigation, Navigation::Refresh)
@@ -2834,15 +2915,35 @@ impl App {
                     self.ui().set_plugin_notice(notice.into());
                 }
             }
-            Outcome::FtpEditReady(draft) => self.open_downloaded_ftp_draft(*draft),
-            Outcome::FtpEditUploaded(draft, log_error) => self.finish_ftp_upload(*draft, log_error),
+            Outcome::FtpEditReady(draft, editor) => self.open_downloaded_ftp_draft(*draft, editor),
+            Outcome::FtpEditFinished(draft, result, log_error) => {
+                self.finish_ftp_upload(*draft, result, log_error)
+            }
+            Outcome::FtpEditStopped(path, label, report) => {
+                self.stop_ftp_upload(&path);
+                self.completed(Outcome::Report(label, report));
+            }
+            Outcome::RemoteLinkLoaded(endpoint, name, target) => {
+                self.show_remote_link_target(endpoint, name, target)
+            }
+            Outcome::RemoteLinkResolved {
+                side,
+                request,
+                location,
+                target,
+                preview,
+            } => self.complete_open_remote_link(side, request, location, *target, preview),
             Outcome::S3Tags(tags) => self.edit_s3_tags(tags),
             Outcome::S3History(history) => self.show_s3_history(history),
+            Outcome::S3Versioning(endpoint, bucket, status) => {
+                self.show_s3_versioning(endpoint, bucket, status)
+            }
             Outcome::Imported(import) => self.show_tc_import(import),
             Outcome::ImportedTabs(name, import) => self.review_tab_import(name, *import),
             Outcome::TabFile(import, replace) => self.apply_tab_file(*import, replace),
             Outcome::ImportedFtp(sites) => self.review_ftp_import(sites),
             Outcome::ImportedNetwork(sites) => self.review_imported_network(sites),
+            Outcome::ImportedWorkspaces(workspaces) => self.review_imported_workspaces(workspaces),
             Outcome::ImportedKnownHosts(proposals) => self.review_known_hosts(proposals),
             Outcome::ScheduledNetworkTasks(tasks) => self.review_network_schedule(tasks),
             Outcome::PluginPreview(name, host) => {

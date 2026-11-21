@@ -5,8 +5,7 @@ use super::{
     Connection, Entry, LIST_LIMIT, ListFormat, Listing, Session, SyncUpload, Url, check_cancel,
     check_segment, invalid_input,
 };
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD_NO_PAD;
+use arco_core::ssh_host_keys::HostKeyPins;
 use chrono::DateTime;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -19,7 +18,11 @@ use zeroize::Zeroizing;
 
 #[cfg(windows)]
 mod kerberos;
+mod links;
+mod parallel;
+pub use links::{RemoteLinkKind, ResolvedLink};
 mod scp;
+pub use scp::CommandOutput;
 #[cfg(windows)]
 mod terminal;
 #[cfg(windows)]
@@ -65,7 +68,7 @@ impl SshChallenge {
 type ChallengeHandler = dyn Fn(SshChallenge) -> io::Result<()> + Send + Sync;
 
 pub(super) struct Options {
-    pub fingerprint: Option<[u8; 32]>,
+    pub fingerprints: HostKeyPins,
     pub(super) kerberos_kex: bool,
     private_key: Option<PathBuf>,
     agent: Option<SshAgent>,
@@ -132,21 +135,10 @@ impl Connection {
                 "SSH-Optionen benötigen eine SFTP-Verbindung.",
             ));
         }
-        let invalid = || invalid_input("Gib den SSH-Hostschlüssel als SHA256-Fingerabdruck ein.");
-        let fingerprint = if fingerprint.trim().is_empty() && kerberos_kex {
-            None
+        let fingerprints = if fingerprint.trim().is_empty() && kerberos_kex {
+            HostKeyPins::default()
         } else {
-            let digest = fingerprint
-                .trim()
-                .strip_prefix("SHA256:")
-                .ok_or_else(invalid)?;
-            Some(
-                STANDARD_NO_PAD
-                    .decode(digest.trim_end_matches('='))
-                    .ok()
-                    .and_then(|value| value.try_into().ok())
-                    .ok_or_else(invalid)?,
-            )
+            HostKeyPins::parse(fingerprint)?
         };
         if private_key.as_ref().is_some_and(|key| !key.is_absolute()) {
             return Err(invalid_input(
@@ -154,7 +146,7 @@ impl Connection {
             ));
         }
         self.ssh = Some(Options {
-            fingerprint,
+            fingerprints,
             kerberos_kex,
             private_key,
             agent: None,
@@ -385,27 +377,82 @@ impl Session {
         directory: &Url,
         entry: &Entry,
         cancel: &AtomicBool,
+        progress: impl FnMut(super::DownloadProgress),
+    ) -> io::Result<String> {
+        self.sftp_checksum(
+            directory,
+            entry,
+            super::ChecksumAlgorithm::Sha256,
+            cancel,
+            progress,
+        )
+    }
+
+    pub(super) fn sftp_checksum(
+        &self,
+        directory: &Url,
+        entry: &Entry,
+        algorithm: super::ChecksumAlgorithm,
+        cancel: &AtomicBool,
         mut progress: impl FnMut(super::DownloadProgress),
     ) -> io::Result<String> {
-        use sha2::{Digest, Sha256};
+        use sha2::{Digest, Sha224, Sha256, Sha384, Sha512, digest::DynDigest};
         if !self.is_sftp() || entry.directory != Some(false) {
             return Err(invalid_input(
-                "Für SHA-256 wird eine reguläre SFTP-Datei benötigt.",
+                "Für die Prüfsumme wird eine reguläre SFTP-Datei benötigt.",
             ));
         }
         let url = self.file(directory, &entry.name)?;
         self.verify_sync_entry(directory, entry, cancel)?;
-        let mut digest = Sha256::new();
-        self.receive_sftp_file(&url, &mut digest, 0, entry.size, cancel, |received| {
+        let remote = path(&url)?;
+        if let Some(digest) =
+            self.sftp_operation(cancel, |wire| wire.checksum(&remote, algorithm))?
+        {
+            self.verify_sync_entry(directory, entry, cancel)?;
+            return Ok(checksum_hex(&digest));
+        }
+        let observe = |received| {
             progress(super::DownloadProgress {
                 received,
                 total: entry.size,
                 phase: super::DownloadPhase::Receiving,
             });
             Ok(())
-        })?;
+        };
+        let mut digest: Box<dyn DynDigest> = match algorithm {
+            super::ChecksumAlgorithm::Sha512 => Box::new(Sha512::new()),
+            super::ChecksumAlgorithm::Sha384 => Box::new(Sha384::new()),
+            super::ChecksumAlgorithm::Sha256 => Box::new(Sha256::new()),
+            super::ChecksumAlgorithm::Sha224 => Box::new(Sha224::new()),
+            super::ChecksumAlgorithm::Sha1 => Box::new(sha1::Sha1::new()),
+            super::ChecksumAlgorithm::Md5 => Box::new(md5::Md5::new()),
+            super::ChecksumAlgorithm::Crc32 => {
+                let mut digest = flate2::CrcWriter::new(io::sink());
+                self.receive_sftp_file(&url, &mut digest, 0, entry.size, cancel, observe)?;
+                self.verify_sync_entry(directory, entry, cancel)?;
+                return Ok(format!("{:08x}", digest.crc().sum()));
+            }
+        };
+        struct DigestWriter<'a>(&'a mut dyn DynDigest);
+        impl std::io::Write for DigestWriter<'_> {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.update(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        self.receive_sftp_file(
+            &url,
+            &mut DigestWriter(digest.as_mut()),
+            0,
+            entry.size,
+            cancel,
+            observe,
+        )?;
         self.verify_sync_entry(directory, entry, cancel)?;
-        Ok(format!("{:x}", digest.finalize()))
+        Ok(checksum_hex(&digest.finalize()))
     }
 
     pub(super) fn sftp_fingerprint(&self) -> io::Result<String> {
@@ -414,21 +461,29 @@ impl Session {
             .ssh
             .as_ref()
             .ok_or_else(|| invalid_input("SSH-Profil fehlt."))?;
-        match options.fingerprint {
-            Some(fingerprint) => Ok(format!("SHA256:{}", STANDARD_NO_PAD.encode(fingerprint))),
-            None => options
-                .kerberos_spn
-                .as_deref()
-                .filter(|_| options.kerberos_kex)
-                .map(|principal| format!("kerberos:{principal}"))
-                .ok_or_else(|| invalid_input("SSH-Serveridentität fehlt.")),
+        if !options.fingerprints.is_empty() {
+            return Ok(options.fingerprints.to_string());
         }
+        options
+            .kerberos_spn
+            .as_deref()
+            .filter(|_| options.kerberos_kex)
+            .map(|principal| format!("kerberos:{principal}"))
+            .ok_or_else(|| invalid_input("SSH-Serveridentität fehlt."))
     }
 
     fn sftp_operation<T>(
         &self,
         cancel: &AtomicBool,
         operation: impl FnOnce(&mut Wire) -> io::Result<T>,
+    ) -> io::Result<T> {
+        self.with_sftp_connection(cancel, |connection| operation(&mut connection.wire))
+    }
+
+    fn with_sftp_connection<T>(
+        &self,
+        cancel: &AtomicBool,
+        operation: impl FnOnce(&mut SftpConnection) -> io::Result<T>,
     ) -> io::Result<T> {
         let mut connection = loop {
             check_cancel(cancel)?;
@@ -444,7 +499,7 @@ impl Session {
             *connection = Some(self.open_sftp(cancel)?);
         }
         let connection_state = connection.as_mut().expect("initialized SFTP session");
-        let result = operation(&mut connection_state.wire);
+        let result = operation(connection_state);
         if !connection_state.wire.usable {
             *connection = None;
         }
@@ -501,6 +556,7 @@ impl Session {
                         entries.push(Entry {
                             name,
                             directory,
+                            symlink: metadata.is_symlink(),
                             size: metadata.size.filter(|_| directory == Some(false)),
                             modified,
                             unique: None,
@@ -517,8 +573,11 @@ impl Session {
         })
     }
 
-    pub(super) fn check_sftp_connection(&self, cancel: &AtomicBool) -> io::Result<()> {
-        self.sftp_operation(cancel, |_| Ok(()))
+    pub(super) fn connected_sftp_fingerprint(&self, cancel: &AtomicBool) -> io::Result<String> {
+        self.with_sftp_connection(cancel, |connection| match connection.peer_fingerprint() {
+            Some(fingerprint) => Ok(fingerprint.to_owned()),
+            None => self.sftp_fingerprint(),
+        })
     }
 
     pub(super) fn read_sftp_range(
@@ -572,7 +631,7 @@ impl Session {
             let result = (|| {
                 let limit = limit.into_iter().chain(expected.size).min();
                 let mut received = offset;
-                let rate = self.transfer_rate();
+                let mut rate = self.transfer_rate();
                 loop {
                     check_cancel(cancel)?;
                     let Some(data) = sftp.read(&handle, received, rate.chunk(32 * 1024) as u32)?
@@ -620,7 +679,7 @@ impl Session {
             let result = (|| {
                 let mut buffer = [0; 32 * 1024];
                 let mut offset = 0;
-                let rate = self.transfer_rate();
+                let mut rate = self.transfer_rate();
                 let limit = rate.chunk(buffer.len());
                 loop {
                     check_cancel(cancel)?;
@@ -763,12 +822,109 @@ impl Session {
             )
         })
     }
+
+    pub(super) fn sftp_unix_metadata(
+        &self,
+        url: &Url,
+        cancel: &AtomicBool,
+    ) -> io::Result<super::UnixMetadata> {
+        let path = path(url)?;
+        let attrs = self.sftp_operation(cancel, |sftp| sftp.lstat(&path))?;
+        let (owner, group) = attrs.ownership.unzip();
+        Ok(super::UnixMetadata {
+            mode: attrs.permissions.map(|mode| (mode & 0o7777) as u16),
+            owner,
+            group,
+        })
+    }
+
+    pub(super) fn sftp_set_unix_metadata(
+        &self,
+        url: &Url,
+        before: &Entry,
+        edit: super::UnixMetadata,
+        cancel: &AtomicBool,
+    ) -> io::Result<()> {
+        let path = path(url)?;
+        self.sftp_operation(cancel, |sftp| {
+            let current = sftp.lstat(&path)?;
+            let kind = current.directory().ok_or_else(|| {
+                invalid_input(
+                    "Server-Rechte lassen sich nur für reguläre Dateien und Ordner ändern.",
+                )
+            })?;
+            let stamp = current
+                .modified
+                .and_then(|secs| DateTime::from_timestamp(i64::from(secs), 0))
+                .map(|date| date.format("%Y%m%d%H%M%S").to_string());
+            if before.directory != Some(kind)
+                || (!kind && before.size != current.size)
+                || before.modified != stamp
+            {
+                return Err(io::Error::other(
+                    "Der Servereintrag hat sich seit dem Anzeigen geändert.",
+                ));
+            }
+            let ownership = if edit.owner.is_some() || edit.group.is_some() {
+                let (uid, gid) = current.ownership.unzip();
+                let wanted = edit.owner.or(uid).zip(edit.group.or(gid)).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "Der SFTP-Server meldet weder UID noch GID für diesen Eintrag.",
+                    )
+                })?;
+                if Some(wanted) != current.ownership {
+                    sftp.set_attrs(
+                        &path,
+                        Attrs {
+                            ownership: Some(wanted),
+                            ..Default::default()
+                        },
+                    )?;
+                }
+                Some(wanted)
+            } else {
+                None
+            };
+            if let Some(mode) = edit.mode {
+                sftp.set_attrs(
+                    &path,
+                    Attrs {
+                        permissions: Some(u32::from(mode)),
+                        ..Default::default()
+                    },
+                )?;
+            }
+            let after = sftp.lstat(&path)?;
+            if after.directory() != Some(kind)
+                || ownership.is_some_and(|wanted| after.ownership != Some(wanted))
+                || edit.mode.is_some_and(|mode| {
+                    after.permissions.map(|bits| bits & 0o7777) != Some(u32::from(mode))
+                })
+            {
+                return Err(io::Error::other(
+                    "Der Server hat die neuen Rechte oder Besitzdaten nicht bestätigt.",
+                ));
+            }
+            Ok(())
+        })
+    }
+}
+
+fn checksum_hex(digest: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
 }
 
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
     use crate::ftp::Security;
+    use base64::{Engine, engine::general_purpose::STANDARD_NO_PAD};
 
     #[test]
     #[ignore = "requires scripts/test-sftp-reference.py"]
@@ -994,13 +1150,19 @@ mod tests {
         let direct = std::env::var("ARCO_SFTP_TEST_URL").unwrap();
         let fingerprint = std::env::var("ARCO_SFTP_TEST_FINGERPRINT").unwrap();
         let cancel = AtomicBool::new(false);
+        let named = direct.replace("127.0.0.1", "ssh.invalid");
         for (kind, address) in [
-            ("HTTP", direct.clone()),
-            ("SOCKS", direct.replace("127.0.0.1", "ssh.invalid")),
+            ("HTTP", &direct),
+            ("HTTP_BASIC", &direct),
+            ("HTTP_MD5", &named),
+            ("HTTP_SHA_256", &named),
+            ("HTTP_SHA_512_256_SESS", &named),
+            ("SOCKS", &named),
+            ("SOCKS_CHAP", &named),
         ] {
             let proxy = std::env::var(format!("ARCO_SFTP_TEST_{kind}_AUTH")).unwrap();
             let connect = |password| {
-                Connection::new(&address, "arco", Security::Sftp)
+                Connection::new(address, "arco", Security::Sftp)
                     .unwrap()
                     .with_ssh(&fingerprint, None)
                     .unwrap()
@@ -1014,6 +1176,48 @@ mod tests {
                     .unwrap()
             };
             let session = connect("gate:\"\\only");
+            assert_eq!(
+                session
+                    .list(&session.initial_directory(), &cancel)
+                    .unwrap_or_else(|error| panic!("{kind}: {error}"))
+                    .format,
+                ListFormat::Sftp
+            );
+            let rejected = connect("wrong");
+            assert_eq!(
+                rejected
+                    .list(&rejected.initial_directory(), &cancel)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::PermissionDenied
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires scripts/test-sftp-reference.py"]
+    fn reference_sftp_socks4_user_id_and_dns_modes() {
+        let direct = std::env::var("ARCO_SFTP_TEST_URL").unwrap();
+        let fingerprint = std::env::var("ARCO_SFTP_TEST_FINGERPRINT").unwrap();
+        let cancel = AtomicBool::new(false);
+        for (kind, address) in [
+            ("SOCKS4", direct.replace("127.0.0.1", "localhost")),
+            ("SOCKS4A", direct.replace("127.0.0.1", "ssh.invalid")),
+        ] {
+            let proxy = std::env::var(format!("ARCO_SFTP_TEST_{kind}")).unwrap();
+            let connect = |user| {
+                Connection::new(&address, "arco", Security::Sftp)
+                    .unwrap()
+                    .with_ssh(&fingerprint, None)
+                    .unwrap()
+                    .with_proxy(&proxy)
+                    .unwrap()
+                    .with_proxy_user(user)
+                    .unwrap()
+                    .authenticate("fixture-only")
+                    .unwrap()
+            };
+            let session = connect("proxy-fixture");
             assert_eq!(
                 session
                     .list(&session.initial_directory(), &cancel)
@@ -1034,6 +1238,268 @@ mod tests {
 
     #[test]
     #[ignore = "requires scripts/test-sftp-reference.py"]
+    fn reference_sftp_telnet_proxy_command() {
+        let address = std::env::var("ARCO_SFTP_TEST_URL")
+            .unwrap()
+            .replace("127.0.0.1", "ssh.invalid");
+        let fingerprint = std::env::var("ARCO_SFTP_TEST_FINGERPRINT").unwrap();
+        let cancel = AtomicBool::new(false);
+        let connect = |pin: &str, env| {
+            Connection::new(&address, "arco", Security::Sftp)
+                .unwrap()
+                .with_ssh(pin, None)
+                .unwrap()
+                .with_proxy(&std::env::var(env).unwrap())
+                .unwrap()
+        };
+        let default = connect(&fingerprint, "ARCO_SFTP_TEST_TELNET_DEFAULT")
+            .authenticate("fixture-only")
+            .unwrap();
+        assert_eq!(
+            default
+                .list(&default.initial_directory(), &cancel)
+                .unwrap()
+                .format,
+            ListFormat::Sftp
+        );
+        let authorize = |pin: &str, password| {
+            connect(pin, "ARCO_SFTP_TEST_TELNET")
+                .with_telnet_proxy_command(r"%user\n%pass\nconnect %host %port\r\n")
+                .unwrap()
+                .with_proxy_user("proxy-fixture")
+                .unwrap()
+                .with_proxy_password(password)
+                .unwrap()
+                .authenticate("fixture-only")
+                .unwrap()
+        };
+        let session = authorize(&fingerprint, r#"gate:"\only"#);
+        assert_eq!(
+            session
+                .list(&session.initial_directory(), &cancel)
+                .unwrap()
+                .format,
+            ListFormat::Sftp
+        );
+        let rejected = authorize(&fingerprint, "wrong");
+        assert!(
+            rejected
+                .list(&rejected.initial_directory(), &cancel)
+                .is_err()
+        );
+        let wrong_pin = format!("SHA256:{}", STANDARD_NO_PAD.encode([0; 32]));
+        let rejected = authorize(&wrong_pin, r#"gate:"\only"#);
+        assert_eq!(
+            rejected
+                .list(&rejected.initial_directory(), &cancel)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    #[ignore = "requires scripts/test-sftp-reference.py"]
+    #[cfg(windows)]
+    fn reference_sftp_local_proxy_process() {
+        let direct = std::env::var("ARCO_SFTP_TEST_URL").unwrap();
+        let address = direct.replace("127.0.0.1", "ssh.invalid");
+        let pin = std::env::var("ARCO_SFTP_TEST_FINGERPRINT").unwrap();
+        let cancel = AtomicBool::new(false);
+        let command = std::env::var("ARCO_SFTP_TEST_LOCAL_COMMAND").unwrap();
+        let connect = |address: &str, security, pin: &str, command: &str| {
+            Connection::new(address, "arco", security)
+                .unwrap()
+                .with_ssh(pin, None)
+                .unwrap()
+                .with_proxy("local://command")
+                .unwrap()
+                .with_local_proxy_command(command)
+                .unwrap()
+        };
+        let authenticate = |connection: Connection| {
+            connection
+                .with_proxy_user(r#"gate: "Benutzer""#)
+                .unwrap()
+                .with_proxy_password(r#"paß"%host\only"#)
+                .unwrap()
+                .authenticate("fixture-only")
+                .unwrap()
+        };
+        let session = authenticate(connect(&address, Security::Sftp, &pin, &command));
+        let root = session.initial_directory();
+        assert_eq!(
+            session.list(&root, &cancel).unwrap().format,
+            ListFormat::Sftp
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let dest = temp.path().join("out");
+        std::fs::write(&source, b"binary\x00data").unwrap();
+        session
+            .upload(&root, &source, "local-proxy.bin", false, &cancel)
+            .unwrap();
+        session
+            .download(&root, "local-proxy.bin", &dest, &cancel)
+            .unwrap();
+        assert_eq!(std::fs::read(dest).unwrap(), b"binary\x00data");
+        let listing = session.list_sync(&root, &cancel).unwrap();
+        let uploaded = listing.regular_file("local-proxy.bin").unwrap();
+        session.delete_sync_entry(&root, uploaded, &cancel).unwrap();
+
+        let local_address = direct.replace("127.0.0.1", "localhost");
+        let local_command = std::env::var("ARCO_SFTP_TEST_LOCAL_RESOLVED").unwrap();
+        let resolved = authenticate(
+            connect(&local_address, Security::Sftp, &pin, &local_command)
+                .with_ssh_proxy_dns_locally(true)
+                .unwrap()
+                .with_options(crate::ftp::ConnectionOptions {
+                    family: crate::ftp::AddressFamily::Ipv4,
+                    ..Default::default()
+                })
+                .unwrap(),
+        );
+        assert_eq!(
+            resolved
+                .list(&resolved.initial_directory(), &cancel)
+                .unwrap()
+                .format,
+            ListFormat::Sftp
+        );
+
+        let wrong_pin = format!("SHA256:{}", STANDARD_NO_PAD.encode([0; 32]));
+        let rejected = authenticate(connect(&address, Security::Sftp, &wrong_pin, &command));
+        assert_eq!(
+            rejected.list(&root, &cancel).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+
+        let scp = std::env::var("ARCO_SCP_TEST_URL")
+            .unwrap()
+            .replace("sftp://127.0.0.1", "scp://ssh.invalid");
+        let scp_pin = std::env::var("ARCO_SCP_TEST_FINGERPRINT").unwrap();
+        let scp = authenticate(connect(&scp, Security::Scp, &scp_pin, &command));
+        let root = scp.initial_directory();
+        assert_eq!(scp.list(&root, &cancel).unwrap().format, ListFormat::Scp);
+        let target = temp.path().join("scp");
+        scp.download(&root, "proxy-reference.txt", &target, &cancel)
+            .unwrap();
+        assert_eq!(
+            std::fs::read(target).unwrap(),
+            b"SCP through an authenticated proxy\n"
+        );
+
+        let stall = std::env::var("ARCO_SFTP_TEST_LOCAL_STALL").unwrap();
+        let stalled = connect(&address, Security::Sftp, &pin, &stall)
+            .with_ssh_timing(Some(1), None)
+            .unwrap()
+            .authenticate("fixture-only")
+            .unwrap();
+        assert_eq!(
+            stalled
+                .list(&stalled.initial_directory(), &cancel)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
+    }
+
+    #[test]
+    #[ignore = "requires scripts/test-sftp-reference.py"]
+    fn reference_sftp_parallel_transfers_use_independent_connections() {
+        use std::sync::{Arc, atomic::Ordering, mpsc};
+        use std::time::Duration;
+
+        let session = Connection::new(
+            &std::env::var("ARCO_SFTP_TEST_URL").unwrap(),
+            "arco",
+            Security::Sftp,
+        )
+        .unwrap()
+        .with_ssh(&std::env::var("ARCO_SFTP_TEST_FINGERPRINT").unwrap(), None)
+        .unwrap()
+        .authenticate("fixture-only")
+        .unwrap();
+        let directory = session.initial_directory();
+        let local = tempfile::tempdir().unwrap();
+        let contents = vec![0x5a; 256 * 1024];
+        let source = local.path().join("input");
+        std::fs::write(&source, &contents).unwrap();
+        let name = "parallel-reference.bin";
+        session
+            .upload(&directory, &source, name, false, &AtomicBool::new(false))
+            .unwrap();
+        let outputs = [local.path().join("first"), local.path().join("second")];
+        let stops = [
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        ];
+        let (arrived, progress) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let jobs = std::array::from_fn::<_, 2, _>(|index| {
+                let task_session = session.with_transfer_connection();
+                let stop = stops[index].clone();
+                let arrived = arrived.clone();
+                let output = &outputs[index];
+                let directory = &directory;
+                let (release, wait) = mpsc::channel();
+                let worker = scope.spawn(move || {
+                    let mut first = true;
+                    task_session.download_with_progress(directory, name, output, &stop, |sample| {
+                        if sample.received > 0 && std::mem::take(&mut first) {
+                            arrived.send(index).unwrap();
+                            if wait.recv_timeout(Duration::from_secs(15)).is_err() {
+                                stop.store(true, Ordering::Relaxed);
+                            }
+                        }
+                    })
+                });
+                (release, worker)
+            });
+            let mut entered = [
+                progress.recv_timeout(Duration::from_secs(12)).unwrap(),
+                progress.recv_timeout(Duration::from_secs(12)).unwrap(),
+            ];
+            entered.sort();
+            assert_eq!(entered, [0, 1]);
+            stops[0].store(true, Ordering::Relaxed);
+            let [(release_first, first), (release_second, second)] = jobs;
+            release_first.send(()).unwrap();
+            release_second.send(()).unwrap();
+            assert_eq!(
+                first.join().unwrap().unwrap_err().kind(),
+                io::ErrorKind::Interrupted
+            );
+            second.join().unwrap().unwrap();
+        });
+        assert!(!outputs[0].exists());
+        assert_eq!(std::fs::read(&outputs[1]).unwrap(), contents);
+        let cancel = AtomicBool::new(false);
+        let listing = session.list_sync(&directory, &cancel).unwrap();
+        session
+            .delete_sync_entry(&directory, listing.regular_file(name).unwrap(), &cancel)
+            .unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires scripts/test-sftp-reference.py"]
+    fn reference_sftp_changes_the_limit_while_downloading() {
+        let fingerprint = std::env::var("ARCO_SFTP_TEST_FINGERPRINT").unwrap();
+        let session = Connection::new(
+            &std::env::var("ARCO_SFTP_TEST_URL").unwrap(),
+            "arco",
+            Security::Sftp,
+        )
+        .unwrap()
+        .with_ssh(&fingerprint, None)
+        .unwrap()
+        .authenticate("fixture-only")
+        .unwrap();
+        crate::ftp::rate::tests::check_live_download(&session, &session.initial_directory());
+    }
+
+    #[test]
+    #[ignore = "requires scripts/test-sftp-reference.py"]
     fn reference_sftp_workflow() {
         let address = std::env::var("ARCO_SFTP_TEST_URL").unwrap();
         let fingerprint = std::env::var("ARCO_SFTP_TEST_FINGERPRINT").unwrap();
@@ -1050,27 +1516,36 @@ mod tests {
                 .unwrap()
         };
         let wrong = format!("SHA256:{}", STANDARD_NO_PAD.encode([0; 32]));
-        let rejected = connect("reject-before-login", &wrong, None, "fixture-only");
-        assert_eq!(
-            rejected
-                .list(&rejected.initial_directory(), &cancel)
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::PermissionDenied
+        let other_wrong = format!("SHA256:{}", STANDARD_NO_PAD.encode([1; 32]));
+        let rejected = connect(
+            "reject-before-login",
+            &format!("{wrong};{other_wrong}"),
+            None,
+            "fixture-only",
+        );
+        let error = rejected
+            .list(&rejected.initial_directory(), &cancel)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            error.to_string().contains("weicht vom Profil ab"),
+            "{error}"
         );
 
-        let session = connect("arco", &fingerprint, None, "fixture-only");
+        let session = connect(
+            "arco",
+            &format!("{wrong};{fingerprint}"),
+            None,
+            "fixture-only",
+        );
         let root = session.initial_directory();
         assert_eq!(
             session.list(&root, &cancel).unwrap().format,
             ListFormat::Sftp
         );
-        assert!(
-            session
-                .connection_details(&root, &cancel)
-                .unwrap()
-                .contains(&fingerprint)
-        );
+        let details = session.connection_details(&root, &cancel).unwrap();
+        assert!(details.contains(&fingerprint));
+        assert!(!details.contains(&wrong));
         session
             .create_sync_directory(&root, "Büro #1", &cancel)
             .unwrap();
@@ -1116,6 +1591,16 @@ mod tests {
                 .unwrap(),
             format!("{:x}", sha2::Sha256::digest(&content))
         );
+        let method = session
+            .prepare_checksum(&folder, Some(crate::ftp::ChecksumAlgorithm::Sha1), &cancel)
+            .unwrap();
+        let mut streamed = false;
+        let (algorithm, digest) = session
+            .remote_checksum(&folder, &entry, method, &cancel, |_| streamed = true)
+            .unwrap();
+        assert_eq!(algorithm, "SHA-1");
+        assert_eq!(digest, format!("{:x}", sha1::Sha1::digest(&content)));
+        assert!(!streamed);
         let stamp = "20260101123456";
         session
             .set_sftp_modified(&folder, &entry, stamp, &cancel)

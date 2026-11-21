@@ -504,6 +504,14 @@ pub fn leaf_name(name: &OsStr) -> io::Result<&OsStr> {
 
 fn valid_windows_name(name: &OsStr) -> bool {
     let text = name.to_string_lossy();
+    !text.ends_with(['.', ' '])
+        && !text
+            .chars()
+            .any(|c| c.is_control() || "<>:\"/\\|?*".contains(c))
+        && !windows_device_name(&text)
+}
+
+pub(crate) fn windows_device_name(text: &str) -> bool {
     let stem = text
         .split('.')
         .next()
@@ -518,16 +526,11 @@ fn valid_windows_name(name: &OsStr) -> bool {
             )
         })
     };
-    !text.ends_with(['.', ' '])
-        && !text
-            .chars()
-            .any(|c| c.is_control() || "<>:\"/\\|?*".contains(c))
-        && !matches!(
-            stem.as_str(),
-            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
-        )
-        && !device_number("COM")
-        && !device_number("LPT")
+    matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || device_number("COM")
+        || device_number("LPT")
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

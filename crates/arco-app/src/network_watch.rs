@@ -1,3 +1,4 @@
+use crate::network_sync::sync_names::SyncNames;
 use crate::network_sync::{FtpEndpoint, FtpPlan, MAX_ENTRIES, ftp_ignores, remote_parent};
 use arco_core::{
     files,
@@ -63,6 +64,8 @@ pub fn watch(
     let extra_masks = FileMasks::new(watch.masks)?;
     let ignore = watch.ignore;
     let delete = watch.delete;
+    let rules = endpoint.0.transfer_settings().names;
+    let names = (!rules.is_default()).then(|| SyncNames::new(rules));
     let ignored = |path: &Path, directory: bool| {
         endpoint.0.recycle_relative_path(&endpoint.1, path)
             || remote_ignore(path, directory)
@@ -171,7 +174,15 @@ pub fn watch(
             }
         }
         let deleted = if delete {
-            delete_missing_files(&root, &endpoint, &previous, &current, &mut tracked, cancel)?
+            delete_missing_files(
+                &root,
+                &endpoint,
+                names.as_ref(),
+                &previous,
+                &current,
+                &mut tracked,
+                cancel,
+            )?
         } else {
             0
         };
@@ -197,7 +208,10 @@ fn matches_snapshot(plan: &FtpPlan, selected: &[PathBuf], expected: &Stamps) -> 
         if let Some(info) = row.info(0)
             && let Some(size) = info.size
         {
-            prepared.insert(row.path(0), (size, info.modified));
+            prepared.insert(
+                plan.original_copy_path(0, row.path(0)),
+                (size, info.modified),
+            );
         }
     }
     Ok(selected
@@ -216,7 +230,7 @@ fn apply_uploads(
         |_| {},
         |row, entry| {
             if track {
-                track_file(&plan.local, row, entry, tracked, cancel)?;
+                track_file(plan, row, entry, tracked, cancel)?;
             }
             Ok(())
         },
@@ -240,24 +254,24 @@ fn track_equal_files(
         let Some(info) = row.info(0) else { continue };
         let Some(size) = info.size else { continue };
         if row.comparison == Comparison::Equal
-            && snapshot.get(row.path(0)) == Some(&(size, info.modified))
-            && let Some(entry) = plan.expected.get(row.path(1))
+            && snapshot.get(plan.original_copy_path(0, row.path(0))) == Some(&(size, info.modified))
+            && let Some(entry) = plan.expected.get(plan.original_copy_path(1, row.path(1)))
         {
-            track_file(&plan.local, row, entry.clone(), tracked, cancel)?;
+            track_file(plan, row, entry.clone(), tracked, cancel)?;
         }
     }
     Ok(())
 }
 
 fn track_file(
-    root: &LocalRoot,
+    plan: &FtpPlan,
     row: &Row,
     entry: ftp::Entry,
     tracked: &mut PublishedFiles,
     cancel: &AtomicBool,
 ) -> io::Result<()> {
-    let local = row.path(0);
-    let path = root.checked_path(local)?;
+    let local = plan.original_copy_path(0, row.path(0));
+    let path = plan.local.checked_path(local)?;
     let expected = row.metadata(0).expect("local file snapshot");
     files::ensure_unchanged(&path, expected)?;
     let digest = tools::checksum(&path, Hash::Blake3, cancel)?;
@@ -265,7 +279,7 @@ fn track_file(
     tracked.insert(
         local.to_owned(),
         PublishedFile {
-            path: row.path(1).to_owned(),
+            path: plan.original_copy_path(1, row.path(1)).to_owned(),
             entry,
             digest,
         },
@@ -276,11 +290,23 @@ fn track_file(
 fn delete_missing_files(
     root: &LocalRoot,
     endpoint: &FtpEndpoint,
+    names: Option<&SyncNames>,
     previous: &Stamps,
     current: &Stamps,
     tracked: &mut PublishedFiles,
     cancel: &AtomicBool,
 ) -> io::Result<usize> {
+    let project_snapshot = |stamps: &Stamps| {
+        stamps
+            .keys()
+            .map(|path| names.expect("mapped watch").project(path))
+            .collect::<io::Result<std::collections::BTreeSet<_>>>()
+    };
+    let live = if names.is_some() {
+        Some([project_snapshot(previous)?, project_snapshot(current)?])
+    } else {
+        None
+    };
     let removed: Vec<_> = tracked
         .keys()
         .filter(|path| !previous.contains_key(*path) && !current.contains_key(*path))
@@ -289,14 +315,37 @@ fn delete_missing_files(
     let mut deleted = 0;
     for path in removed {
         files::check_cancel(cancel)?;
-        root.verify_absent(&path)?;
-        let file = &tracked[&path];
-        let parent = remote_parent(endpoint, &file.path)?;
-        if endpoint
-            .0
-            .sync_entry_at(&endpoint.1, &file.path, cancel)?
-            .is_some()
+        let logical = names.map(|names| names.project(&path)).transpose()?;
+        if let (Some(logical), Some(live)) = (&logical, &live)
+            && live.iter().any(|snapshot| snapshot.contains(logical))
         {
+            // A replacement with an equivalent name must never cause a server-side deletion.
+            if live.iter().all(|snapshot| snapshot.contains(logical)) {
+                tracked.remove(&path);
+            }
+            continue;
+        }
+        let verify_local = || {
+            if let (Some(names), Some(logical)) = (names, &logical) {
+                names.verify_local_absent(root, logical, cancel)
+            } else {
+                root.verify_absent(&path)
+            }
+        };
+        verify_local()?;
+        let file = &tracked[&path];
+        let (parent, entry) = if let Some(names) = names {
+            (
+                names.remote_parent(endpoint, &file.path)?,
+                names.find_remote(endpoint, &file.path, cancel, false)?,
+            )
+        } else {
+            (
+                remote_parent(endpoint, &file.path)?,
+                endpoint.0.sync_entry_at(&endpoint.1, &file.path, cancel)?,
+            )
+        };
+        if entry.is_some() {
             let temporary = tempfile::NamedTempFile::new()?;
             endpoint
                 .0
@@ -307,7 +356,7 @@ fn delete_missing_files(
                     file.path.display()
                 )));
             }
-            root.verify_absent(&path)?;
+            verify_local()?;
             endpoint
                 .0
                 .discard_sync_entry(&parent, &file.entry, cancel)

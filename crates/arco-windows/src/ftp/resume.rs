@@ -25,63 +25,120 @@ impl Session {
         remote: &str,
         cancel: &AtomicBool,
     ) -> io::Result<()> {
-        if self.is_sftp() {
-            return Err(super::sftp::binary_only());
+        self.upload_resuming_with_progress(directory, source, remote, cancel, |_| {})
+    }
+
+    pub fn upload_resuming_with_progress(
+        &self,
+        directory: &Url,
+        source: &Path,
+        remote: &str,
+        cancel: &AtomicBool,
+        mut progress: impl FnMut(DownloadProgress),
+    ) -> io::Result<()> {
+        if !self.security().is_ftp() || self.is_http_forward_ftp() {
+            return Err(super::invalid_input(
+                "Dieser fortsetzbare Upload benötigt FTP oder FTPS.",
+            ));
         }
         let url = self.file(directory, remote)?;
         let source_name = source
             .to_str()
             .ok_or_else(|| io::Error::other("curl benötigt einen Unicode-Dateipfad."))?;
-        let original = fs::metadata(source)?;
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.share_mode(1); // Allow readers and keep the upload source fixed.
+        }
+        let source_lock = options.open(source)?;
+        let original = source_lock.metadata()?;
         if !original.is_file() {
             return Err(io::Error::other(
                 "Für FTP-Resume wird eine reguläre lokale Datei benötigt.",
             ));
         }
-        let expected = self.remote_stamp(directory, remote, cancel)?;
-        if expected.size == 0 || expected.size >= original.len() {
-            return Err(io::Error::other(
-                "Die entfernte Teildatei muss kleiner als die lokale Quelle und darf nicht leer sein.",
-            ));
-        }
-        let staged = tempfile::tempdir()?;
-        let partial = staged.path().join("partial");
-        self.download_bounded(directory, remote, &partial, expected.size, cancel)?;
-        compare_prefix(source, &partial, expected.size, cancel)?;
-        if self.remote_stamp(directory, remote, cancel)? != expected
-            || fs::metadata(source)?.modified()? != original.modified()?
-            || fs::metadata(source)?.len() != original.len()
-        {
-            return Err(io::Error::other(
-                "Quelle oder FTP-Teildatei hat sich vor dem Fortsetzen geändert.",
-            ));
-        }
-        let offset = expected.size.to_string();
-        run(
-            self.transfer_command(&url)?,
-            &["--continue-at", &offset, "--upload-file", source_name],
-            None,
-            cancel,
-        )?;
-        let actual = self.remote_stamp(directory, remote, cancel)?;
-        if actual.size != original.len() {
-            return Err(io::Error::other(
-                "FTP-Resume: Die entfernte Datei hat nach dem Anhängen nicht die erwartete Größe.",
-            ));
-        }
-        let finished = staged.path().join("complete");
-        self.download_bounded(directory, remote, &finished, original.len(), cancel)?;
-        compare_prefix(source, &finished, original.len(), cancel)?;
-        if self.remote_stamp(directory, remote, cancel)? != actual
-            || fs::metadata(source)?.modified()? != original.modified()?
-            || fs::metadata(source)?.len() != original.len()
-        {
-            return Err(io::Error::other(
-                "Quelle oder FTP-Datei hat sich während der Abschlussprüfung geändert.",
-            ));
-        }
+        let size = original.len();
+        let modified = original.modified()?;
+        let verify_source = || -> io::Result<()> {
+            let current = fs::metadata(source)?;
+            if current.len() != size || current.modified()? != modified {
+                return Err(io::Error::other("Die lokale FTP-Quelle hat sich geändert."));
+            }
+            Ok(())
+        };
+        let mut appended_from: Option<Stamp> = None;
+        retry_transfer(cancel, &mut progress, |progress| {
+            let expected = self.remote_stamp(directory, remote, cancel)?;
+            let offset = expected.size;
+            if offset == 0 || offset > size || (offset == size && appended_from.is_none()) {
+                return Err(io::Error::other(
+                    "Die entfernte Teildatei muss kleiner als die lokale Quelle und darf nicht leer sein.",
+                ));
+            }
+            if appended_from.as_ref().is_some_and(|previous| {
+                offset < previous.size
+                    || previous.unique.is_some() && expected.unique != previous.unique
+            }) {
+                return Err(io::Error::other(
+                    "Die FTP-Teildatei wurde nach dem Verbindungsabbruch gekürzt oder ersetzt.",
+                ));
+            }
+            let staged = tempfile::tempdir()?;
+            let verify_remote = |stamp: &Stamp, path: &Path| -> io::Result<()> {
+                self.download_bounded(directory, remote, path, stamp.size, cancel)?;
+                compare_prefix(source, path, stamp.size, cancel)?;
+                if self.remote_stamp(directory, remote, cancel)? != *stamp {
+                    return Err(io::Error::other(
+                        "Die FTP-Datei hat sich während der Prüfung geändert.",
+                    ));
+                }
+                verify_source()
+            };
+            progress(DownloadProgress {
+                received: offset,
+                total: Some(size),
+                phase: DownloadPhase::Verifying,
+            });
+            verify_remote(&expected, &staged.path().join("prefix"))?;
+            if offset == size {
+                // The server kept the complete data even though the last attempt lost its reply.
+                return Ok(());
+            }
+            progress(DownloadProgress {
+                received: offset,
+                total: Some(size),
+                phase: DownloadPhase::Receiving,
+            });
+            let request = self.transfer_command(&url)?;
+            appended_from = Some(expected);
+            run(
+                request,
+                &[
+                    "--continue-at",
+                    &offset.to_string(),
+                    "--upload-file",
+                    source_name,
+                ],
+                None,
+                cancel,
+            )?;
+            let actual = self.remote_stamp(directory, remote, cancel)?;
+            if actual.size != size {
+                return Err(io::Error::other(
+                    "FTP-Resume: Die entfernte Datei hat nach dem Anhängen nicht die erwartete Größe.",
+                ));
+            }
+            progress(DownloadProgress {
+                received: size,
+                total: Some(size),
+                phase: DownloadPhase::Verifying,
+            });
+            verify_remote(&actual, &staged.path().join("complete"))
+        })?;
         if self.preserve_transfer_time(false) {
-            let time = chrono::DateTime::<chrono::Utc>::from(original.modified()?);
+            let time = chrono::DateTime::<chrono::Utc>::from(modified);
             self.set_ftp_upload_modified(
                 directory,
                 remote,
@@ -110,10 +167,12 @@ impl Session {
         cancel: &AtomicBool,
         mut progress: impl FnMut(DownloadProgress),
     ) -> io::Result<()> {
-        if !self.is_sftp() {
-            return self.resume_download(directory, remote, destination, cancel, &mut progress);
+        if !(self.is_sftp() || self.security().is_ftp() && !self.is_http_forward_ftp()) {
+            return Err(super::invalid_input(
+                "Dieser fortsetzbare Download benötigt FTP, FTPS oder SFTP.",
+            ));
         }
-        retry_sftp(cancel, &mut progress, |progress| {
+        retry_transfer(cancel, &mut progress, |progress| {
             self.resume_download(directory, remote, destination, cancel, progress)
         })
     }
@@ -133,8 +192,13 @@ impl Session {
                 destination.display().to_string(),
             ));
         }
-        let expected = self.remote_stamp(directory, remote, cancel)?;
         let (partial_path, stamp_path) = self.checkpoint_paths(&url, destination)?;
+        if self.is_sftp()
+            && self.resume_sftp_segments(&url, destination, &partial_path, cancel, progress)?
+        {
+            return Ok(());
+        }
+        let expected = self.remote_stamp(directory, remote, cancel)?;
         let mut partial = open_checkpoint(&partial_path, &stamp_path, &expected)?;
         let offset = partial.metadata()?.len();
         if offset > expected.size {
@@ -147,13 +211,7 @@ impl Session {
             let remote_bytes = if self.is_sftp() {
                 self.read_sftp_range(&url, start..offset, cancel)?
             } else {
-                let overlap = format!("{start}-{}", offset - 1);
-                run(
-                    self.transfer_command(&url)?,
-                    &["--range", &overlap],
-                    None,
-                    cancel,
-                )?
+                self.read_ftp_overlap(&url, start..offset, cancel)?
             };
             let mut local_bytes = vec![0; (offset - start) as usize];
             partial.seek(SeekFrom::Start(start))?;
@@ -165,8 +223,14 @@ impl Session {
             }
         }
         let mut observe = || {
+            let received = partial.metadata()?.len();
+            if received > expected.size {
+                return Err(io::Error::other(
+                    "Die empfangenen Daten überschreiten die gemeldete Dateigröße.",
+                ));
+            }
             progress(DownloadProgress {
-                received: partial.metadata()?.len(),
+                received,
                 total: Some(expected.size),
                 phase: DownloadPhase::Receiving,
             });
@@ -225,29 +289,57 @@ impl Session {
         Ok(())
     }
 
+    fn read_ftp_overlap(
+        &self,
+        url: &Url,
+        range: std::ops::Range<u64>,
+        cancel: &AtomicBool,
+    ) -> io::Result<Vec<u8>> {
+        let length = range.end - range.start;
+        let overlap = format!("{}-{}", range.start, range.end - 1);
+        let mut data = tempfile::tempfile()?;
+        let result = run(
+            self.transfer_command(url)?,
+            &["--range", &overlap],
+            Some(data.try_clone()?),
+            cancel,
+        );
+        // FTPS can close its data socket while ending a bounded range. The bytes
+        // already received are sufficient for the overlap comparison.
+        if let Err(error) = result
+            && (!is_retryable_transport(&error) || data.metadata()?.len() != length)
+        {
+            return Err(error);
+        }
+        check_cancel(cancel)?;
+        data.seek(SeekFrom::Start(0))?;
+        let mut bytes = Vec::new();
+        data.take(length + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != length {
+            return Err(io::Error::other(
+                "FTP lieferte einen ungültigen Prüfbereich.",
+            ));
+        }
+        Ok(bytes)
+    }
+
     fn remote_stamp(
         &self,
         directory: &Url,
         remote: &str,
         cancel: &AtomicBool,
     ) -> io::Result<Stamp> {
-        let entry = self
-            .list_sync(directory, cancel)?
-            .entries
-            .into_iter()
-            .find(|entry| entry.name == remote && entry.directory == Some(false))
-            .ok_or_else(|| {
-                io::Error::other("Der Server liefert keinen eindeutigen Dateieintrag.")
-            })?;
-        let (Some(size), Some(modified)) = (entry.size, entry.modified) else {
+        let listing = self.list_sync(directory, cancel)?;
+        let entry = listing.regular_file(remote)?;
+        let (Some(size), Some(modified)) = (entry.size, &entry.modified) else {
             return Err(io::Error::other(
                 "Fortsetzbare Downloads benötigen Größe und Änderungszeit vom Server.",
             ));
         };
         Ok(Stamp {
             size,
-            modified,
-            unique: entry.unique,
+            modified: modified.clone(),
+            unique: entry.unique.clone(),
         })
     }
 
@@ -277,26 +369,16 @@ impl Session {
     }
 }
 
-pub(super) fn retry_sftp(
+pub(super) fn retry_transfer(
     cancel: &AtomicBool,
     progress: &mut impl FnMut(DownloadProgress),
     mut work: impl FnMut(&mut dyn FnMut(DownloadProgress)) -> io::Result<()>,
 ) -> io::Result<()> {
     let mut retries = 2;
     loop {
+        check_cancel(cancel)?;
         match work(progress) {
-            Err(error)
-                if retries > 0
-                    && matches!(
-                        error.kind(),
-                        io::ErrorKind::ConnectionAborted
-                            | io::ErrorKind::ConnectionRefused
-                            | io::ErrorKind::ConnectionReset
-                            | io::ErrorKind::BrokenPipe
-                            | io::ErrorKind::TimedOut
-                            | io::ErrorKind::UnexpectedEof
-                    ) =>
-            {
+            Err(error) if retries > 0 && is_retryable_transport(&error) => {
                 retries -= 1;
                 progress(DownloadProgress {
                     received: 0,
@@ -311,6 +393,18 @@ pub(super) fn retry_sftp(
             result => return result,
         }
     }
+}
+
+pub(super) fn is_retryable_transport(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::TimedOut
+            | io::ErrorKind::UnexpectedEof
+    )
 }
 
 fn compare_prefix(
@@ -394,7 +488,7 @@ fn open_checkpoint(partial: &Path, stamp: &Path, expected: &Stamp) -> io::Result
     }
 }
 
-fn is_regular(metadata: &fs::Metadata) -> bool {
+pub(super) fn is_regular(metadata: &fs::Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;

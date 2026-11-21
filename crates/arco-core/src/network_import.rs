@@ -10,30 +10,7 @@ mod ghisler;
 mod openssh;
 pub use ghisler::read_ghisler_sftp;
 pub use openssh::{KnownHosts, read_openssh};
-
-pub const WINSCP_FIELDS: &[&str] = &[
-    "HostName",
-    "PortNumber",
-    "UserName",
-    "FSProtocol",
-    "Ftps",
-    "RemoteDirectory",
-    "LocalDirectory",
-    "PublicKeyFile",
-    "SshHostKey",
-    "AddressFamily",
-    "Timeout",
-    "FtpPasvMode",
-    "ProxyMethod",
-    "ProxyHost",
-    "ProxyPort",
-    "ProxyUsername",
-    "Tunnel",
-    "S3DefaultRegion",
-    "TlsClientCertificateFile",
-    "Workspace",
-    "AuthGSSAPIKEX",
-];
+pub use winscp::WINSCP_FIELDS;
 pub const PUTTY_FIELDS: &[&str] = &[
     "Protocol",
     "HostName",
@@ -338,7 +315,11 @@ mod tests {
         };
         let win_scp = vec![(
             "Build%20Team".into(),
-            fields(&[("HostName", "build.example"), ("UserName", "dev%2Bops")]),
+            fields(&[
+                ("HostName", "build.example"),
+                ("UserName", "dev%2Bops"),
+                ("SynchronizeBrowsing", "1"),
+            ]),
         )];
         let putty = vec![(
             "Work%20Lab".into(),
@@ -355,8 +336,10 @@ mod tests {
         assert_eq!(win_scp[0].0, "Build Team");
         assert_eq!(putty[0].0, "Work Lab");
         assert_eq!(win_scp[0].1.as_ref().unwrap().user, "dev+ops");
+        assert!(win_scp[0].1.as_ref().unwrap().synchronize_browsing);
         assert_eq!(putty[0].1.as_ref().unwrap().user, "dev%2Bops");
         assert!(putty[0].1.as_ref().unwrap().ssh_agent.is_none());
+        assert!(!putty[0].1.as_ref().unwrap().synchronize_browsing);
         let kerberos = vec![(
             "Kerberos".into(),
             fields(&[

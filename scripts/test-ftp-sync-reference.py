@@ -1,8 +1,10 @@
 # Local disposable FTP synchronization reference; no Arco GUI is opened.
+from contextlib import ExitStack
 import hashlib
 import json
 import logging
 import os
+import shlex
 import shutil
 from pathlib import Path
 import subprocess
@@ -18,6 +20,7 @@ REPOSITORY = next(folder for folder in Path(__file__).resolve().parents if (fold
 CARGO = ['rtk', 'cargo'] if shutil.which('rtk') else ['cargo']
 from pyftpdlib.authorizers import DummyAuthorizer
 from pyftpdlib.handlers import FTPHandler
+from pyftpdlib.ioloop import IOLoop
 from pyftpdlib.log import config_logging
 from pyftpdlib.servers import FTPServer
 
@@ -30,8 +33,14 @@ def run_fixture(hash_mode, tests):
         if not hash_mode and os.environ.get('ARCO_TEST_NET_EXE'):
             authorizer.add_anonymous(share, perm='elr')
         transfers = []
+        link_folder = Path(share).resolve() / 'arco-link-fixture'
+        link_reference = any(name == 'reference_ftp_site_symlink' for _, name in tests)
+        if link_reference:
+            link_folder.mkdir()
+            (link_folder / 'Quell Datei.txt').write_bytes(b'preserve original')
         class Fixture(FTPHandler):
             proto_cmds = dict(FTPHandler.proto_cmds)
+            proto_cmds['SITE SYMLINK'] = dict(perm=None, auth=True, arg=True, help='SITE SYMLINK source destination')
             if hash_mode:
                 proto_cmds['HASH'] = dict(perm='r', auth=True, arg=True, help='HASH <path>')
             def on_connect(self):
@@ -58,6 +67,19 @@ def run_fixture(hash_mode, tests):
             def ftp_STOR(self, file, mode='w'):
                 transfers.append(('put', self._current_type))
                 return super().ftp_STOR(file, mode)
+            def ftp_SITE_SYMLINK(self, line):
+                try:
+                    source, destination = shlex.split(line)
+                    source_path = Path(self.fs.ftp2fs(source)).resolve()
+                    link = Path(self.fs.ftp2fs(destination)).resolve()
+                    if source_path.parent != link_folder or link.parent != link_folder or not source_path.is_file():
+                        raise ValueError('invalid fixture paths')
+                    with link.open('x', encoding='utf-8') as stream:
+                        stream.write(source)
+                except (OSError, ValueError):
+                    self.respond('550 Invalid link or destination already exists.')
+                else:
+                    self.respond('200 SITE SYMLINK command successful.')
         Fixture.authorizer = authorizer
         server = FTPServer(('127.0.0.1', 0), Fixture)
         thread = threading.Thread(target=server.serve_forever, kwargs={'timeout': .1, 'handle_exit': False}, daemon=True)
@@ -65,6 +87,7 @@ def run_fixture(hash_mode, tests):
         environment = os.environ.copy()
         variable = 'ARCO_TEST_HASH_FTP' if hash_mode else 'ARCO_TEST_FTP'
         environment[variable] = f'ftp://127.0.0.1:{server.socket.getsockname()[1]}'
+        environment['ARCO_TEST_FTP_ROOT'] = share
         try:
             for package, name in tests:
                 print(f'Reference: {name}', flush=True)
@@ -73,7 +96,7 @@ def run_fixture(hash_mode, tests):
                 result = subprocess.run(command,env=environment,cwd=REPOSITORY,stdin=subprocess.DEVNULL,creationflags=subprocess.CREATE_NO_WINDOW,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,encoding='utf-8',errors='replace')
                 print(result.stdout,flush=True)
                 result.check_returncode()
-            if not hash_mode and (executable := environment.get('ARCO_TEST_NET_EXE')):
+            if not hash_mode and not link_reference and (executable := environment.get('ARCO_TEST_NET_EXE')):
                 reference_transfers(executable, Path(share), environment[variable], transfers)
         finally:
             server.close_all()
@@ -225,10 +248,100 @@ def reference_transfers(executable, root, base, transfers):
         assert rows[8]['sessions'] == []
         print('FTP transfer presets and multiple script sessions passed.', flush=True)
 
+def run_fxp_copy():
+    stamp = 1_700_000_031
+    for host in ('127.0.0.1', '::1'):
+        with ExitStack() as resources:
+            source, target = [Path(resources.enter_context(tempfile.TemporaryDirectory(prefix='arco-f5-fxp-')))
+                              for _ in range(2)]
+            (source / 'batch/nested').mkdir(parents=True)
+            (source / 'batch/empty').mkdir()
+            (target / 'batch').mkdir()
+            (target / 'batch/rename.txt').write_bytes(b'keep this original')
+            (target / 'batch/replace.txt').write_bytes(b'old target data')
+            payloads = {name: f'payload for {name}'.encode() for name in
+                        ('nested/fresh.txt', 'rename.txt', 'replace.txt', 'race.txt', 'ignored.txt', 'omit.bin')}
+            for name, payload in payloads.items():
+                path = source / 'batch' / name
+                path.write_bytes(payload)
+                os.utime(path, (stamp, stamp))
+            channels, prevented = [], []
+
+            class DirectSource(FTPHandler):
+                direct = False
+
+                def ftp_PORT(self, line):
+                    self.direct = True
+                    return super().ftp_PORT(line)
+
+                def ftp_EPRT(self, line):
+                    self.direct = True
+                    return super().ftp_EPRT(line)
+
+                def ftp_RETR(self, path):
+                    name = Path(path).name
+                    if not self.direct:
+                        prevented.append(name)
+                        self.respond('550 Data must go directly to the target FTP server.')
+                        return
+                    channels.append(name)
+                    if name == 'race.txt':
+                        (target / 'batch/race.txt').write_bytes(b'created during direct transfer')
+                    return super().ftp_RETR(path)
+
+            def start(folder, base):
+                authorizer = DummyAuthorizer()
+                authorizer.add_user('arco', 'test-only', str(folder), perm='elradfmwMT')
+                handler = type('FxpFixture', (base,), {'authorizer': authorizer})
+                server = FTPServer((host, 0), handler, ioloop=IOLoop())
+                thread = threading.Thread(target=server.serve_forever, kwargs={'timeout': .05, 'handle_exit': False}, daemon=True)
+                thread.start()
+
+                def stop():
+                    server.close_all()
+                    thread.join(2)
+
+                resources.callback(stop)
+                address = f'[{host}]' if ':' in host else host
+                return f'ftp://{address}:{server.address[1]}/'
+
+            environment = dict(os.environ, ARCO_TEST_FXP_COPY_SOURCE=start(source, DirectSource),
+                               ARCO_TEST_FXP_COPY_TARGET=start(target, FTPHandler))
+            name = 'app::ftp_sync::tests::direct_fxp_copy_reviews_and_applies_a_directory'
+            runner = environment.get('ARCO_TEST_RUNNER_APP')
+            command = [runner, name] if runner else CARGO + ['test', '-p', 'arco-app', '--bin', 'arco-commander', '--locked', name, '--']
+            result = subprocess.run([*command, '--exact', '--ignored', '--nocapture'], env=environment,
+                                    cwd=REPOSITORY, timeout=120 if runner else None, creationflags=subprocess.CREATE_NO_WINDOW,
+                                    capture_output=True, encoding='utf-8', errors='replace')
+            print(result.stdout, end='', flush=True)
+            if result.returncode:
+                print(result.stderr, file=sys.stderr, flush=True)
+            result.check_returncode()
+            assert '1 passed' in result.stdout
+            assert sorted(channels) == ['fresh.txt', 'race.txt', 'rename.txt', 'replace.txt'] and not prevented
+            assert (target / 'batch/empty').is_dir()
+            assert (target / 'batch/rename.txt').read_bytes() == b'keep this original'
+            assert (target / 'batch/race.txt').read_bytes() == b'created during direct transfer'
+            assert not (target / 'batch/ignored.txt').exists() and not (target / 'batch/omit.bin').exists()
+            for destination, original in [('nested/fresh.txt', 'nested/fresh.txt'), ('gewählt.txt', 'rename.txt'), ('replace.txt', 'replace.txt')]:
+                file = target / 'batch' / destination
+                assert file.read_bytes() == payloads[original]
+                assert int(file.stat().st_mtime) == stamp
+            staged, = (target / 'batch').glob('.arco-fxp-*')
+            assert staged.read_bytes() == payloads['race.txt']
+            print(f'F5 FXP applied the reviewed directory on {host} with direct data, conflicts, masks, and timestamps.', flush=True)
+
+
+if os.environ.get('ARCO_TEST_FXP_COPY') == '1':
+    run_fxp_copy()
+    raise SystemExit(0)
+
 run_fixture(False, [
+    ('arco-app','ftp_edits_can_be_published_twice_and_detect_content_conflicts'),
     ('arco-windows','synchronized_upload_is_published_in_the_selected_directory_and_checks_snapshots'),
     ('arco-app','ftp_plan_compares_content_and_synchronizes_both_directions'),
     ('arco-app','ftp_mirror_checks_absence_and_keeps_deletions_out_of_failed_copy_runs'),
     ('arco-app','ftp_mirror_protects_directories_containing_ignored_remote_files'),
 ])
+run_fixture(False, [('arco-windows','reference_ftp_site_symlink')])
 run_fixture(True,[('arco-app','ftp_content_comparison_uses_advertised_hash_without_retr')])

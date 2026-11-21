@@ -2,6 +2,10 @@
 mod keep_up_to_date;
 #[path = "../network_profile.rs"]
 mod network_profile;
+#[path = "arco-net/remove.rs"]
+mod remove;
+#[path = "arco-net/s3_versions.rs"]
+mod s3_versions;
 #[cfg(windows)]
 #[path = "arco-net/schedule_cli.rs"]
 mod schedule_cli;
@@ -9,17 +13,20 @@ mod schedule_cli;
 mod synchronize;
 #[path = "arco-net/transfer_batch.rs"]
 mod transfer_batch;
+#[path = "arco-net/transfer_names.rs"]
+mod transfer_names;
 #[path = "arco-net/transfer_tree.rs"]
 mod transfer_tree;
 
 use arco_app::{
-    network_crypto,
+    network_commands, network_crypto,
     network_sync::{FtpEndpoint, check_transfer_mask},
     network_transfer,
 };
 use arco_core::{
     files,
     profile::{FtpProfile, Profile},
+    ssh_host_keys::HostKeyPins,
 };
 use arco_windows::ftp::{self, Session, Url};
 use serde_json::{Value, json};
@@ -184,9 +191,20 @@ fn execute_script(args: &Arguments) -> io::Result<()> {
     result
 }
 
+enum CallSource<'a> {
+    Direct(&'a str),
+    Template(&'a str),
+    Saved(&'a str),
+}
+
+enum OpenOption<'a> {
+    HostKeys(HostKeyPins),
+    S3TokenEnv(&'a str),
+}
+
 enum Command<'a> {
     Watch(keep_up_to_date::KeepUpToDate<'a>),
-    Open(&'a str),
+    Open(&'a str, Option<OpenOption<'a>>),
     Close(Option<usize>),
     Sessions,
     UseSession(usize),
@@ -197,19 +215,25 @@ enum Command<'a> {
     Echo(Vec<&'a str>),
     FailOnNoMatch(bool),
     List(Option<&'a str>),
+    Call(CallSource<'a>, Vec<&'a str>),
     Stat(&'a str),
-    Chmod(&'a str, u16),
-    Checksum(&'a str),
+    UnixMetadata(&'a str, ftp::UnixMetadata, bool),
+    Checksum(&'a str, Option<ftp::ChecksumAlgorithm>),
     Cd(&'a str),
     Lcd(&'a str),
     Put(Transfer<'a>),
+    AbortS3Upload(&'a str),
+    S3Versions(s3_versions::Command<'a>),
     Get(Transfer<'a>),
     GetUrl(Transfer<'a>),
     PutEncrypted(&'a str, &'a str),
     GetEncrypted(&'a str, &'a str, Option<&'a str>),
     Mkdir(&'a str),
+    ReadLink(&'a str),
+    CreateLink(&'a str, &'a str, ftp::RemoteLinkKind),
+    UpdateLink(&'a str, &'a str, &'a str),
     Move(&'a str, &'a str),
-    Remove(&'a str, bool, bool),
+    Remove(remove::Remove<'a>),
     TrashList,
     TrashPut(&'a str),
     TrashRestore(&'a str, Option<&'a str>),
@@ -221,7 +245,20 @@ fn parse(words: &[String]) -> io::Result<Option<Command<'_>>> {
     Ok(Some(match words.as_slice() {
         ["keepuptodate", args @ ..] => Command::Watch(keep_up_to_date::KeepUpToDate::parse(args)?),
         [] => return Ok(None),
-        ["open", profile] => Command::Open(profile),
+        ["open", profile] => Command::Open(profile, None),
+        ["open", profile, option] if option.starts_with("-hostkey=") => Command::Open(
+            profile,
+            Some(OpenOption::HostKeys(HostKeyPins::parse(
+                &option["-hostkey=".len()..],
+            )?)),
+        ),
+        ["open", profile, option] if option.starts_with("-s3-token-env=") => {
+            let name = &option["-s3-token-env=".len()..];
+            if name.is_empty() {
+                return Err(invalid("-s3-token-env benötigt eine Umgebungsvariable."));
+            }
+            Command::Open(profile, Some(OpenOption::S3TokenEnv(name)))
+        }
         ["close"] => Command::Close(None),
         ["close", number] => Command::Close(Some(session_number(number)?)),
         ["session"] => Command::Sessions,
@@ -237,20 +274,37 @@ fn parse(words: &[String]) -> io::Result<Option<Command<'_>>> {
         }
         ["ls" | "dir"] => Command::List(None),
         ["ls" | "dir", path] => Command::List(Some(path)),
-        ["stat", name] => Command::Stat(name),
-        ["chmod", mode, name] => {
-            let mode = u16::from_str_radix(mode, 8)
-                .ok()
-                .filter(|mode| *mode <= 0o7777)
-                .ok_or_else(|| {
-                    invalid("Dateirechte als Oktalzahl zwischen 0000 und 7777 angeben.")
-                })?;
-            Command::Chmod(name, mode)
+        ["call" | "!", "-template", template, files @ ..] => {
+            network_commands::validate_selection(template, files)?;
+            Command::Call(CallSource::Template(template), files.to_vec())
         }
-        ["checksum", name] => Command::Checksum(name),
+        ["call" | "!", "-saved", name, files @ ..] if !name.trim().is_empty() => {
+            Command::Call(CallSource::Saved(name), files.to_vec())
+        }
+        ["call" | "!", command]
+            if !command.trim().is_empty() && !matches!(*command, "-saved" | "-template") =>
+        {
+            Command::Call(CallSource::Direct(command), Vec::new())
+        }
+        ["stat", name] => Command::Stat(name),
+        [verb @ ("chmod" | "chown" | "chgrp"), args @ ..] => unix_metadata(verb, args)?,
+        ["checksum", name] => Command::Checksum(name, None),
+        ["checksum", algorithm, name] => Command::Checksum(
+            name,
+            Some(
+                ftp::ChecksumAlgorithm::parse(algorithm)
+                    .ok_or_else(|| invalid("Unbekanntes Prüfsummenverfahren."))?,
+            ),
+        ),
         ["cd", path] => Command::Cd(path),
         ["lcd", path] => Command::Lcd(path),
         ["put" | "send" | "mput", args @ ..] => Command::Put(Transfer::parse(args, true)?),
+        ["abort-upload", name] => Command::AbortS3Upload(name),
+        [
+            "s3-versions" | "s3-get-version" | "s3-restore-version" | "s3-delete-version"
+            | "s3-versioning",
+            ..,
+        ] => Command::S3Versions(s3_versions::Command::parse(&words)?),
         ["get" | "recv" | "mget", args @ ..] => Command::Get(Transfer::parse(args, true)?),
         ["get-url", args @ ..] => Command::GetUrl(Transfer::parse(args, false)?),
         ["put-encrypted", source, password_env] => Command::PutEncrypted(source, password_env),
@@ -261,11 +315,16 @@ fn parse(words: &[String]) -> io::Result<Option<Command<'_>>> {
             Command::GetEncrypted(source, password_env, Some(folder))
         }
         ["mkdir", name] => Command::Mkdir(name),
+        ["readlink", name] => Command::ReadLink(name),
+        ["ln" | "symlink", target, name] => {
+            Command::CreateLink(target, name, ftp::RemoteLinkKind::Symbolic)
+        }
+        ["ln", "-hard", target, name] => {
+            Command::CreateLink(target, name, ftp::RemoteLinkKind::Hard)
+        }
+        ["setlink", name, expected, target] => Command::UpdateLink(name, expected, target),
         ["mv", from, to] => Command::Move(from, to),
-        ["rm", name] => Command::Remove(name, false, false),
-        ["rmdir", name] => Command::Remove(name, true, false),
-        ["rm", "-permanent", name] => Command::Remove(name, false, true),
-        ["rmdir", "-permanent", name] => Command::Remove(name, true, true),
+        [verb @ ("rm" | "rmdir"), args @ ..] => Command::Remove(remove::Remove::parse(verb, args)?),
         ["trash"] => Command::TrashList,
         ["trash", "put", name] => Command::TrashPut(name),
         ["trash", "restore", slot] => Command::TrashRestore(slot, None),
@@ -287,6 +346,41 @@ fn session_number(value: &str) -> io::Result<usize> {
         .ok()
         .filter(|number| *number > 0)
         .ok_or_else(|| invalid("Gib eine positive Sitzungsnummer an."))
+}
+
+fn unix_metadata<'a>(verb: &str, args: &[&'a str]) -> io::Result<Command<'a>> {
+    use arco_app::network_metadata::parse_unix_id;
+    let (value, name, recursive) = match args {
+        [value, name] => (*value, *name, false),
+        ["-R" | "-recursive", value, name] => (*value, *name, true),
+        _ => {
+            return Err(invalid(
+                "Gib den neuen Wert und einen Serverpfad an. Mit -recursive bearbeitest du auch Unterordner.",
+            ));
+        }
+    };
+    let mut edit = ftp::UnixMetadata::default();
+    match verb {
+        "chmod" => {
+            edit.mode = Some(
+                u16::from_str_radix(value, 8)
+                    .ok()
+                    .filter(|mode| *mode <= 0o7777)
+                    .ok_or_else(|| {
+                        invalid("Dateirechte als Oktalzahl zwischen 0000 und 7777 angeben.")
+                    })?,
+            );
+        }
+        "chown" => {
+            let (owner, group) = value
+                .split_once(':')
+                .map_or((value, None), |(owner, group)| (owner, Some(group)));
+            edit.owner = Some(parse_unix_id(owner)?);
+            edit.group = group.map(parse_unix_id).transpose()?;
+        }
+        _ => edit.group = Some(parse_unix_id(value)?),
+    }
+    Ok(Command::UnixMetadata(name, edit, recursive))
 }
 
 fn encryption_passphrase(variable: &str) -> io::Result<Zeroizing<String>> {
@@ -312,6 +406,7 @@ struct Transfer<'a> {
     speed: Option<u32>,
     preserve_time: Option<bool>,
     mode: Option<ftp::PreferredTransferMode>,
+    names: transfer_names::NameOverrides,
     masks: &'a str,
     latest: bool,
     fail_on_no_match: bool,
@@ -331,13 +426,15 @@ impl<'a> Transfer<'a> {
             speed: None,
             preserve_time: None,
             mode: None,
+            names: transfer_names::NameOverrides::default(),
             masks: "",
             latest: false,
             fail_on_no_match: false,
             resume: false,
             recursive: false,
         };
-        for &arg in args {
+        let mut args = args.iter().copied().peekable();
+        while let Some(arg) = args.next() {
             if !positional {
                 if arg == "--" {
                     positional = true;
@@ -377,6 +474,9 @@ impl<'a> Transfer<'a> {
                     }
                     arco_core::sync::FileMasks::new(masks)?;
                     transfer.masks = masks;
+                    continue;
+                }
+                if transfer.names.parse(arg, &mut args)? {
                     continue;
                 }
                 if matches!(arg, "-preservetime" | "-nopreservetime") {
@@ -426,15 +526,33 @@ impl<'a> Transfer<'a> {
         profile: &Profile,
         session: &Arc<Session>,
         directory: &Url,
-        local: &Path,
+        local: Option<&Path>,
         name: &str,
     ) -> io::Result<Arc<Session>> {
-        let session = self.effective_session(profile, session, directory, local.parent())?;
+        let session = self.effective_session(profile, session, directory, local)?;
         check_transfer_mask(&session, name)?;
         if !arco_core::sync::FileMasks::new(self.masks)?.includes(Path::new(name)) {
             return Err(invalid("Die Datei ist durch -filemask ausgeschlossen."));
         }
         Ok(session)
+    }
+
+    fn download_destination(
+        &self,
+        profile: &Profile,
+        session: &Arc<Session>,
+        directory: &Url,
+        local: &Path,
+        name: &str,
+    ) -> io::Result<(Arc<Session>, PathBuf)> {
+        let target = self.target.map(|target| local.join(target));
+        let parent = target.as_deref().and_then(Path::parent).unwrap_or(local);
+        let session = self.session(profile, session, directory, Some(parent), name)?;
+        let target = match target {
+            Some(target) => target,
+            None => local.join(session.transfer_settings().names.download(name)?),
+        };
+        Ok((session, target))
     }
 
     fn effective_session(
@@ -451,8 +569,14 @@ impl<'a> Transfer<'a> {
             local,
             self.preset,
         )?;
-        if self.resume && !(session.is_sftp() || session.security().is_ftp()) {
-            return Err(invalid("-resume benötigt FTP, FTPS oder SFTP."));
+        if self.resume
+            && !(session.is_sftp()
+                || session.security().is_ftp()
+                || session.security() == ftp::Security::S3)
+        {
+            return Err(invalid(
+                "-resume benötigt FTP, FTPS, SFTP oder einen S3-Upload.",
+            ));
         }
         if self.resume
             && self
@@ -464,6 +588,7 @@ impl<'a> Transfer<'a> {
         if self.mode.is_none()
             && self.speed.is_none()
             && self.preserve_time.is_none()
+            && self.names.is_empty()
             && !self.resume
         {
             return Ok(session);
@@ -483,6 +608,7 @@ impl<'a> Transfer<'a> {
         if self.preserve_time.is_some() {
             settings.preserve_time = self.preserve_time;
         }
+        self.names.apply(&mut settings.names);
         if self.resume {
             settings.mode = ftp::PreferredTransferMode::Binary;
         }
@@ -498,6 +624,9 @@ impl<'a> Transfer<'a> {
         cancel: &AtomicBool,
     ) -> io::Result<()> {
         if self.resume {
+            if session.security() == ftp::Security::S3 {
+                return Err(invalid("-resume unterstützt S3 nur beim Hochladen."));
+            }
             session.download_resuming(directory, name, target, cancel)
         } else {
             session.download_preferred(directory, name, target, cancel, |_| {})
@@ -515,6 +644,9 @@ impl<'a> Transfer<'a> {
         if self.resume {
             if session.is_sftp() {
                 return session.upload_sftp_resuming(directory, source, name, cancel, |_| {});
+            }
+            if session.security() == ftp::Security::S3 {
+                return session.upload_s3_resuming(directory, source, name, cancel, |_| {});
             }
             let listing = session.list_sync(directory, cancel)?;
             if listing.entries.iter().any(|item| item.name == name) {
@@ -596,7 +728,7 @@ fn run(args: &Arguments, output: &mut impl Write) -> io::Result<()> {
     if args.password_env.is_some()
         && commands
             .iter()
-            .filter(|command| matches!(command, Some(Command::Open(_) | Command::GetUrl(..))))
+            .filter(|command| matches!(command, Some(Command::Open(..) | Command::GetUrl(..))))
             .count()
             != 1
     {
@@ -670,12 +802,12 @@ fn execute(
     cancel: &AtomicBool,
 ) -> io::Result<Value> {
     match command {
-        Command::Open(name) => {
+        Command::Open(name, option) => {
             let (label, session, file, profile_name) =
                 if let Some(target) = profile.ftp_profiles.get(name) {
                     (
                         name.to_owned(),
-                        connect(profile, name, target, password_env)?,
+                        connect(profile, name, target, password_env, option.as_ref())?,
                         None,
                         Some(name.to_owned()),
                     )
@@ -688,7 +820,13 @@ fn execute(
                         .unwrap_or_else(|| link.connection.address.clone());
                     (
                         label,
-                        connect(profile, profile_name, &link.connection, password_env)?,
+                        connect(
+                            profile,
+                            profile_name,
+                            &link.connection,
+                            password_env,
+                            option.as_ref(),
+                        )?,
                         link.file,
                         link.profile,
                     )
@@ -721,18 +859,16 @@ fn execute(
             let name = link
                 .file
                 .ok_or_else(|| invalid("get-url benötigt die URL einer Serverdatei."))?;
-            let target = match transfer.target {
-                Some(path) => local.join(path),
-                None => local.join(files::leaf_name(OsStr::new(&name))?),
-            };
             let session = Arc::new(connect(
                 profile,
                 link.profile.as_deref().unwrap_or_default(),
                 &link.connection,
                 password_env,
+                None,
             )?);
             let directory = session.initial_directory();
-            let session = transfer.session(profile, &session, &directory, &target, &name)?;
+            let (session, target) =
+                transfer.download_destination(profile, &session, &directory, local, &name)?;
             session.list_sync(&directory, cancel)?.regular_file(&name)?;
             transfer.download_file(&session, &directory, &name, &target, cancel)?;
             return Ok(json!({"downloaded": target}));
@@ -805,41 +941,143 @@ fn execute(
             cancel,
         );
     }
+    let profile_name = remote.profile.as_deref();
     let (session, directory) = &mut remote.endpoint;
     match command {
         Command::Pwd => Ok(json!({"remote": Session::directory_path(directory)})),
         Command::List(path) => list_remote(session, directory, path, fail_on_no_match, cancel),
-        Command::Stat(name) => {
-            Ok(json!({"entry": entry_json(&entry(session, directory, name, cancel)?)}))
-        }
-        Command::Chmod(name, permissions) => {
-            let entry = entry(session, directory, name, cancel)?;
-            session.set_unix_permissions(directory, &entry, permissions, cancel)?;
-            Ok(json!({"permissions": format!("{permissions:04o}"), "name": name}))
-        }
-        Command::Checksum(name) => {
-            let entry = entry(session, directory, name, cancel)?;
-            if session.is_sftp() {
-                let digest = session.sftp_sha256(directory, &entry, cancel, |_| {})?;
-                return Ok(json!({"checksum": digest, "algorithm": "SHA-256", "name": name}));
+        Command::Call(source, files) => {
+            let templated = !matches!(source, CallSource::Direct(_));
+            if session.security().is_ssh() {
+                let commands = match source {
+                    CallSource::Direct(command) => vec![command.to_owned()],
+                    CallSource::Template(template) => network_commands::expand_for_session(
+                        template,
+                        session,
+                        directory,
+                        profile_name,
+                        &files,
+                    )?,
+                    CallSource::Saved(name) => {
+                        let template =
+                            profile.network_command_templates.get(name).ok_or_else(|| {
+                                invalid("Die SSH-Befehlsvorlage ist nicht gespeichert.")
+                            })?;
+                        network_commands::expand_for_session(
+                            template,
+                            session,
+                            directory,
+                            profile_name,
+                            &files,
+                        )?
+                    }
+                };
+                let mut results = Vec::with_capacity(commands.len());
+                let mut bytes = 0usize;
+                for command in commands {
+                    let output = session.ssh_command(directory, &command, cancel)?;
+                    if output.status != 0 {
+                        return Err(io::Error::other(format!(
+                            "SSH-Befehl mit Status {} beendet. {}",
+                            output.status,
+                            output.stderr.trim()
+                        )));
+                    }
+                    bytes += output.stdout.len() + output.stderr.len();
+                    if bytes > 4 * 1024 * 1024 {
+                        return Err(invalid(
+                            "Die SSH-Befehlsausgaben überschreiten zusammen 4 MiB.",
+                        ));
+                    }
+                    results.push(json!({"stdout": output.stdout, "stderr": output.stderr, "status": output.status}));
+                }
+                return Ok(if templated {
+                    json!({"commands": results})
+                } else {
+                    results.pop().expect("one command")
+                });
             }
-            let supported = || {
-                io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "Der Server stellt keine geeignete Prüfsumme bereit.",
-                )
+            if session.security().is_ftp()
+                && let CallSource::Direct(command) = source
+            {
+                return Ok(
+                    json!({"stdout": session.server_command(directory, command, cancel)?, "status": 0}),
+                );
+            }
+            let message = if templated {
+                "Befehlsvorlagen benötigen SFTP oder SCP."
+            } else {
+                "call benötigt FTP, FTPS, SFTP oder SCP."
             };
-            let method = session
-                .sync_checksum_method(directory, cancel)?
-                .ok_or_else(supported)?;
-            let (algorithm, digest) = session
-                .sync_checksum(directory, &entry, method, cancel)?
-                .ok_or_else(supported)?;
+            Err(io::Error::new(io::ErrorKind::Unsupported, message))
+        }
+        Command::Stat(name) => {
+            let (parent, leaf) = session.download_location(directory, name)?;
+            let entry = entry(session, &parent, &leaf, cancel)?;
+            let mut data = entry_json(&entry);
+            if session.security().is_ssh() {
+                match session.unix_metadata(&parent, &entry, cancel) {
+                    Ok(metadata) => {
+                        data["permissions"] =
+                            json!(metadata.mode.map(|mode| format!("{mode:04o}")));
+                        data["uid"] = json!(metadata.owner);
+                        data["gid"] = json!(metadata.group);
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => return Err(error),
+                    Err(_) => {}
+                }
+            }
+            Ok(json!({"entry": data}))
+        }
+        Command::UnixMetadata(name, edit, recursive) => {
+            let (parent, leaf) = session.download_location(directory, name)?;
+            let entry = entry(session, &parent, &leaf, cancel)?;
+            let report = arco_app::network_metadata::edit_selection(
+                &(session.clone(), parent),
+                &[entry],
+                edit,
+                recursive,
+                cancel,
+                |_, _, _| {},
+            )?;
+            if report.cancelled {
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            if let Some(error) = report.errors.first() {
+                return Err(io::Error::other(format!(
+                    "Server-Metadaten nach {} erfolgreichen Änderungen: {error}",
+                    report.completed
+                )));
+            }
+            let mut event = serde_json::Map::from_iter([("name".to_owned(), json!(name))]);
+            if let Some(mode) = edit.mode {
+                event.insert("permissions".into(), json!(format!("{mode:04o}")));
+            }
+            if let Some(owner) = edit.owner {
+                event.insert("uid".into(), json!(owner));
+            }
+            if let Some(group) = edit.group {
+                event.insert("gid".into(), json!(group));
+            }
+            if recursive {
+                event.insert("completed".into(), json!(report.completed));
+            }
+            Ok(Value::Object(event))
+        }
+        Command::Checksum(name, algorithm) => {
+            let (parent, leaf) = session.download_location(directory, name)?;
+            let listing = session.list_sync(&parent, cancel)?;
+            let entry = listing.regular_file(&leaf)?;
+            let method = session.prepare_checksum(&parent, algorithm, cancel)?;
+            let (algorithm, digest) =
+                session.remote_checksum(&parent, entry, method, cancel, |_| {})?;
             Ok(json!({"checksum": digest, "algorithm": algorithm, "name": name}))
         }
         Command::Cd(path) => {
             let next = if path == ".." {
                 session.parent_directory(directory)?
+            } else if path.starts_with('/') {
+                session.directory(path)?
             } else {
                 session.relative_directory(directory, Path::new(path))?
             };
@@ -851,37 +1089,35 @@ fn execute(
             session.create_sync_directory(directory, name, cancel)?;
             Ok(json!({"created": name}))
         }
+        Command::ReadLink(name) => {
+            let (parent, leaf) = session.download_location(directory, name)?;
+            let target = session.remote_link_target(&parent, &leaf, cancel)?;
+            Ok(json!({"name": name, "target": target}))
+        }
+        Command::CreateLink(target, name, kind) => {
+            let (parent, leaf) = session.download_location(directory, name)?;
+            session.create_remote_link(&parent, &leaf, target, kind, cancel)?;
+            Ok(
+                json!({"created": name, "target": target, "hard": kind == ftp::RemoteLinkKind::Hard}),
+            )
+        }
+        Command::UpdateLink(name, expected, target) => {
+            let (parent, leaf) = session.download_location(directory, name)?;
+            session.update_remote_link(&parent, &leaf, expected, target, cancel)?;
+            Ok(json!({"name": name, "target": target}))
+        }
+        Command::AbortS3Upload(name) => {
+            let (parent, name) = session.download_location(directory, name)?;
+            let discarded = session.discard_s3_upload(&parent, &name, cancel)?;
+            Ok(json!({"upload": name, "discarded": discarded}))
+        }
+        Command::S3Versions(command) => command.run(session, directory, local, cancel),
         Command::Move(from, to) => {
             let entry = entry(session, directory, from, cancel)?;
             session.rename_sync_entry(directory, &entry, to, cancel)?;
             Ok(json!({"renamed": from, "name": to}))
         }
-        Command::Remove(name, directory_only, permanent) => {
-            let entry = entry(session, directory, name, cancel)?;
-            if entry.directory != Some(directory_only) {
-                return Err(invalid("Der Eintrag hat einen anderen Dateityp."));
-            }
-            if session.protects_recycle_directory(directory, &entry, cancel)? {
-                return Err(invalid(
-                    "Öffne den Server-Papierkorb, um seine Inhalte zu entfernen.",
-                ));
-            }
-            if !permanent && session.will_recycle(directory) {
-                let slot = session.recycle_entry(directory, &entry, cancel)?;
-                return Ok(json!({"recycled": name, "slot": slot}));
-            }
-            if directory_only {
-                let folder = session.relative_directory(directory, Path::new(name))?;
-                if !session.list_sync(&folder, cancel)?.entries.is_empty() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::DirectoryNotEmpty,
-                        "Der Serverordner ist nicht leer.",
-                    ));
-                }
-            }
-            session.delete_sync_entry(directory, &entry, cancel)?;
-            Ok(json!({"removed": name}))
-        }
+        Command::Remove(remove) => remove.run(session, directory, fail_on_no_match, cancel),
         Command::TrashList => {
             let bin = session.ensure_recycle_directory(cancel)?;
             let entries = session.list_sync(&bin, cancel)?;
@@ -948,13 +1184,23 @@ fn execute(
                 return transfer.upload_batch(profile, session, directory, local, cancel);
             }
             let source = local.join(transfer.source);
-            let name = transfer
-                .target
-                .or_else(|| source.file_name().and_then(OsStr::to_str))
+            let source_name = source
+                .file_name()
+                .and_then(OsStr::to_str)
                 .ok_or_else(|| invalid("Für den Upload fehlt ein gültiger Name."))?;
             files::regular_metadata(&source)?;
-            let session = transfer.session(profile, session, directory, &source, name)?;
-            transfer.upload_file(&session, directory, &source, name, cancel)?;
+            let session = transfer.session(
+                profile,
+                session,
+                directory,
+                source.parent(),
+                transfer.target.unwrap_or(source_name),
+            )?;
+            let name = match transfer.target {
+                Some(explicit) => explicit.to_owned(),
+                None => session.transfer_settings().names.upload(source_name)?,
+            };
+            transfer.upload_file(&session, directory, &source, &name, cancel)?;
             Ok(json!({"uploaded": name}))
         }
         Command::Get(mut transfer) => {
@@ -995,9 +1241,8 @@ fn execute(
                     cancel,
                 );
             }
-            files::leaf_name(OsStr::new(&name))?;
-            let target = local.join(transfer.target.unwrap_or(&name));
-            let session = transfer.session(profile, session, &parent, &target, &name)?;
+            let (session, target) =
+                transfer.download_destination(profile, session, &parent, local, &name)?;
             transfer.download_file(&session, &parent, &name, &target, cancel)?;
             Ok(json!({"downloaded": target}))
         }
@@ -1085,7 +1330,11 @@ fn list_local(current: &Path, pattern: Option<&str>) -> io::Result<Value> {
 }
 
 fn entry_json(entry: &ftp::Entry) -> Value {
-    json!({"name": entry.name, "directory": entry.directory, "size": entry.size, "modified_utc": entry.modified})
+    let mut data = json!({"name": entry.name, "directory": entry.directory, "size": entry.size, "modified_utc": entry.modified});
+    if entry.symlink {
+        data["symlink"] = json!(true);
+    }
+    data
 }
 
 fn entry(
@@ -1113,9 +1362,29 @@ fn connect(
     name: &str,
     profile: &FtpProfile,
     password_env: Option<&str>,
+    option: Option<&OpenOption<'_>>,
 ) -> io::Result<Session> {
-    let connection = network_profile::connection(profile)?;
-    let secret = credential(profile, &connection, password_env)?;
+    let narrowed = match option {
+        Some(OpenOption::HostKeys(pins)) => Some(pin_session(profile, pins)?),
+        _ => None,
+    };
+    let mut connection = network_profile::connection(narrowed.as_ref().unwrap_or(profile))?;
+    if let Some(OpenOption::S3TokenEnv(name)) = option {
+        let token = Zeroizing::new(std::env::var(name).map_err(|_| {
+            invalid("Die Umgebungsvariable für das S3-Sitzungstoken ist nicht verfügbar.")
+        })?);
+        connection = connection.with_s3_session_token(token)?;
+    }
+    // Read credentials using the original scope when a script narrows the profile pins.
+    let secret = if narrowed.is_some() && profile.credential.is_some() && password_env.is_none() {
+        credential(
+            profile,
+            &network_profile::connection_settings(profile)?,
+            None,
+        )?
+    } else {
+        credential(profile, &connection, password_env)?
+    };
     let mut hops = Vec::new();
     for (_, profile) in network_profile::jump_profiles(name, profile, &profiles.ftp_profiles)? {
         let hop = network_profile::connection(profile)?;
@@ -1128,6 +1397,22 @@ fn connect(
         connection.with_ssh_jumps(hops)?
     };
     connection.authenticate(&secret)
+}
+
+fn pin_session(profile: &FtpProfile, pins: &HostKeyPins) -> io::Result<FtpProfile> {
+    if !profile.security.is_ssh() {
+        return Err(invalid("-hostkey ist nur für SFTP und SCP verfügbar."));
+    }
+    if !profile.ssh_fingerprint.is_empty()
+        && !pins.is_subset(&HostKeyPins::parse(&profile.ssh_fingerprint)?)
+    {
+        return Err(invalid(
+            "-hostkey enthält einen Schlüssel außerhalb der gespeicherten oder in der URL genannten Fingerabdrücke.",
+        ));
+    }
+    let mut narrowed = profile.clone();
+    narrowed.ssh_fingerprint = pins.to_string();
+    Ok(narrowed)
 }
 
 fn credential(
@@ -1165,6 +1450,33 @@ fn invalid(message: &str) -> io::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remote_metadata_parses_legacy_modes_and_recursive_ids() {
+        let chmod = words("chmod 0 target").unwrap();
+        assert!(matches!(
+            parse(&chmod).unwrap(),
+            Some(Command::UnixMetadata(
+                "target",
+                ftp::UnixMetadata { mode: Some(0), .. },
+                false
+            ))
+        ));
+        let ownership = words(r#"chown -R 123:456 "/demo folder""#).unwrap();
+        assert!(matches!(
+            parse(&ownership).unwrap(),
+            Some(Command::UnixMetadata(
+                "/demo folder",
+                ftp::UnixMetadata {
+                    mode: None,
+                    owner: Some(123),
+                    group: Some(456)
+                },
+                true
+            ))
+        ));
+        let reserved = words("chgrp 4294967295 target").unwrap();
+        assert!(parse(&reserved).is_err());
+    }
     use super::*;
 
     #[test]
@@ -1180,7 +1492,11 @@ mod tests {
             }))
         ));
         assert!(words("open \"unclear").is_err());
-        assert!(parse(&words("call program").unwrap()).is_err());
+        assert!(matches!(
+            parse(&words("call program").unwrap()).unwrap(),
+            Some(Command::Call(CallSource::Direct("program"), files)) if files.is_empty()
+        ));
+        assert!(parse(&words("call -saved").unwrap()).is_err());
     }
 
     #[test]
@@ -1197,4 +1513,21 @@ mod tests {
         ));
         assert!(parse(&words("put a -preset=x -preset=y").unwrap()).is_err());
     }
+}
+#[test]
+fn checksum_accepts_legacy_and_explicit_algorithm_syntax() {
+    let legacy = words("checksum report.txt").unwrap();
+    assert!(matches!(
+        parse(&legacy).unwrap(),
+        Some(Command::Checksum("report.txt", None))
+    ));
+    let explicit = words(r#"checksum sha-1 "/reports/test file.txt""#).unwrap();
+    assert!(matches!(
+        parse(&explicit).unwrap(),
+        Some(Command::Checksum(
+            "/reports/test file.txt",
+            Some(ftp::ChecksumAlgorithm::Sha1)
+        ))
+    ));
+    assert!(parse(&words("checksum unknown report.txt").unwrap()).is_err());
 }

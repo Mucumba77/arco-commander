@@ -1,6 +1,8 @@
 use super::{
-    Entry, ListFormat, Listing, Session, Url, check_cancel, check_segment, http, invalid_input,
+    Connection, Entry, ListFormat, Listing, Security, Session, Url, check_cancel, check_segment,
+    http, invalid_input,
 };
+use std::borrow::Cow;
 use std::io;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -8,20 +10,40 @@ use std::sync::atomic::AtomicBool;
 const DAV: &str = "DAV:";
 const PROPERTIES: &str = r#"<d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/><d:getcontentlength/><d:getlastmodified/><d:getetag/></d:prop></d:propfind>"#;
 
+mod redirect;
+
+impl Connection {
+    pub fn with_webdav_options(
+        mut self,
+        liberal_escaping: bool,
+        windows_auth: bool,
+    ) -> io::Result<Self> {
+        if self.security != Security::WebDav {
+            return Err(invalid_input("Diese Optionen benötigen WebDAV."));
+        }
+        self.webdav_liberal_escaping = liberal_escaping;
+        self.webdav_windows_auth = windows_auth;
+        Ok(self)
+    }
+}
+
 impl Session {
     pub(super) fn list_webdav(&self, directory: &Url, cancel: &AtomicBool) -> io::Result<Listing> {
+        self.prepare_webdav_root(directory, cancel)?;
         let mut request = self.http(directory, "PROPFIND")?;
         request
             .header("Depth", "1")?
             .header("Content-Type", "application/xml")?
             .body(PROPERTIES)?;
+        let original = request.wire_url().clone();
         let response = request.send(cancel)?.expect(&[207])?;
+        let effective = redirect::as_directory(response.url.clone())?;
         let xml = http::xml(&response.body)?;
         let root = xml.root_element();
         if !root.has_tag_name((DAV, "multistatus")) {
             return Err(invalid_input("Ungültige WebDAV-Verzeichnisauskunft."));
         }
-        let path = segments(directory)?;
+        let path = segments(&effective)?;
         let mut entries = Vec::new();
         let mut names = std::collections::BTreeSet::new();
         for resource in root
@@ -31,8 +53,16 @@ impl Session {
             check_cancel(cancel)?;
             let address = text(resource, "href")
                 .ok_or_else(|| invalid_input("WebDAV-Ressource ohne Adresse."))?;
-            let url = directory.join(address).map_err(io::Error::other)?;
-            self.validate(&url)?;
+            let address = href_path(address, self.connection.webdav_liberal_escaping)?;
+            let url = effective.join(&address).map_err(io::Error::other)?;
+            if url.origin() != effective.origin()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+            {
+                return Err(invalid_input("FTP host differs from the active connection"));
+            }
             let parts = segments(&url)?;
             if parts == path {
                 continue;
@@ -45,6 +75,7 @@ impl Session {
             let mut entry = Entry {
                 name: name.to_owned(),
                 directory: None,
+                symlink: false,
                 size: None,
                 modified: None,
                 unique: None,
@@ -93,6 +124,7 @@ impl Session {
             }
             entries.push(entry);
         }
+        self.remember_webdav_alias(directory, &original, &response.url)?;
         Ok(Listing {
             entries,
             format: ListFormat::WebDav,
@@ -154,7 +186,7 @@ impl Session {
             self.webdav_forget_removed_locks(url);
             return Ok(());
         }
-        let token = self.webdav_acquire_lock(url, directory, 120, cancel)?.token;
+        let lock = self.webdav_acquire_lock(url, directory, 120, cancel)?;
         let result = (|| {
             let mut folder = url.clone();
             folder
@@ -183,16 +215,19 @@ impl Session {
                 self.verify_sync_entry(&folder, before, cancel)?;
             }
             let mut request = self.http(url, "DELETE")?;
+            lock.check_request(&request)?;
             request.header(
                 "If",
-                &zeroize::Zeroizing::new(format!("({})", token.as_str())),
+                &zeroize::Zeroizing::new(format!("({})", lock.token.as_str())),
             )?;
             request.send(cancel)?.expect(&[200, 204]).map(|_| ())
         })();
         if result.is_err() {
             let mut unlock = self.http(url, "UNLOCK")?;
-            unlock.header("Lock-Token", &token)?;
-            let _ = unlock.send(&AtomicBool::new(false));
+            if lock.check_request(&unlock).is_ok() {
+                unlock.header("Lock-Token", &lock.token)?;
+                let _ = unlock.send(&AtomicBool::new(false));
+            }
         }
         result
     }
@@ -207,7 +242,13 @@ impl Session {
     ) -> io::Result<()> {
         self.validate(to)?;
         let mut request = self.http(from, "MOVE")?;
-        request.header("Destination", to.as_str())?;
+        let destination = self.webdav_wire_url(to)?;
+        if destination.origin() != request.wire_url().origin() {
+            return Err(invalid_input(
+                "Die WebDAV-Dateioperation benötigt Quelle und Ziel auf demselben Server.",
+            ));
+        }
+        request.header("Destination", destination.as_str())?;
         if let Some(tag) = source
             .and_then(|entry| entry.unique.as_deref())
             .and_then(etag)
@@ -268,6 +309,48 @@ impl Session {
     }
 }
 
+fn href_path(href: &str, liberal: bool) -> io::Result<Cow<'_, str>> {
+    if href.is_empty() || href.contains(['?', '#', '\\']) || href.chars().any(char::is_control) {
+        return Err(invalid_input("Ungültige WebDAV-Ressourcenadresse."));
+    }
+    // Leave the authority untouched. URL parsing and the session check still validate it.
+    let authority = ["https://", "http://", "//"].into_iter().find(|prefix| {
+        href.get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    });
+    let start = authority.map_or(0, |prefix| {
+        href[prefix.len()..]
+            .find('/')
+            .map_or(href.len(), |offset| prefix.len() + offset)
+    });
+    let mut normalized = None::<String>;
+    let bytes = href.as_bytes();
+    let mut index = start;
+    while let Some(&byte) = bytes.get(index) {
+        let valid_escape = byte == b'%'
+            && bytes
+                .get(index + 1..index + 3)
+                .is_some_and(|digits| digits.iter().all(u8::is_ascii_hexdigit));
+        if valid_escape || byte.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@/".contains(&byte) {
+            let width = if valid_escape { 3 } else { 1 };
+            if let Some(output) = &mut normalized {
+                output.push_str(&href[index..index + width]);
+            }
+            index += width;
+        } else if liberal {
+            use std::fmt::Write as _;
+            let output = normalized.get_or_insert_with(|| href[..index].to_owned());
+            write!(output, "%{byte:02X}").expect("format WebDAV path escape");
+            index += 1;
+        } else {
+            return Err(invalid_input(
+                "Die WebDAV-Liste enthält nicht kodierte Sonderzeichen. Aktiviere bei Bedarf den Kompatibilitätsmodus im Profil.",
+            ));
+        }
+    }
+    Ok(normalized.map_or(Cow::Borrowed(href), Cow::Owned))
+}
+
 fn segments(url: &Url) -> io::Result<Vec<String>> {
     url.path_segments()
         .into_iter()
@@ -308,6 +391,25 @@ mod tests {
     use super::*;
     use crate::ftp::{Connection, Security};
     use std::fs;
+
+    #[test]
+    #[ignore = "requires the WebDAV redirect reference server"]
+    fn reference_deferred_webdav_redirect() {
+        let cancel = AtomicBool::new(false);
+        for name in [
+            "ARCO_TEST_DAV_REDIRECT_DEFERRED",
+            "ARCO_TEST_DAV_DIRECT_SUBFOLDER",
+        ] {
+            let root = std::env::var(name).unwrap();
+            let session = Connection::new(&root, "arco", Security::WebDav)
+                .unwrap()
+                .authenticate("fixture-only")
+                .unwrap();
+            let directory = session.directory("actual").unwrap();
+            let listing = session.list(&directory, &cancel).unwrap();
+            assert!(listing.regular_file("existing.bin").is_ok());
+        }
+    }
 
     #[test]
     #[ignore = "requires scripts/test-native-http-reference.py"]
@@ -367,6 +469,7 @@ mod tests {
         let parent = session
             .relative_directory(&root, Path::new("Büro & Team"))
             .unwrap();
+        crate::ftp::rate::tests::check_live_download(&session, &parent);
         let local = tempfile::tempdir().unwrap();
         let source = local.path().join("source");
         let output = local.path().join("download");

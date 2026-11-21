@@ -17,8 +17,23 @@ const DISCOVERY_XML: &str =
 
 pub(super) struct WriteLock {
     pub(super) token: Zeroizing<String>,
+    resource: Url,
     recursive: bool,
     expires: Option<Instant>,
+}
+
+impl WriteLock {
+    pub(super) fn check_request(&self, request: &HttpRequest<'_>) -> io::Result<()> {
+        let url = request.wire_url();
+        if self.resource.origin() != url.origin()
+            || self.resource.path().trim_end_matches('/') != url.path().trim_end_matches('/')
+        {
+            return Err(invalid_input(
+                "Die weitergeleitete Ressource stimmt nicht mit der WebDAV-Sperre überein.",
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub struct WebDavLockInfo {
@@ -62,8 +77,10 @@ impl Session {
             .map(|node| {
                 let token = child(node, "locktoken").map(|node| value(node, "href"));
                 let owned = token.is_some_and(|token| {
-                    own.values()
-                        .any(|lock| lock.token.trim_matches(['<', '>']) == token)
+                    own.values().any(|lock| {
+                        lock.resource.origin() == response.url.origin()
+                            && lock.token.trim_matches(['<', '>']) == token
+                    })
                 });
                 let owner = child(node, "owner")
                     .map(|node| {
@@ -115,6 +132,7 @@ impl Session {
         let mut own = self.lock_map(cancel)?;
         let lock = own.get(url).ok_or_else(missing_lock)?;
         let mut request = self.http(url, "LOCK")?;
+        lock.check_request(&request)?;
         request
             .header("Timeout", &timeout(seconds)?)?
             .header("If", &Zeroizing::new(format!("({})", lock.token.as_str())))?
@@ -132,6 +150,7 @@ impl Session {
         let mut own = self.lock_map(cancel)?;
         let lock = own.get(url).ok_or_else(missing_lock)?;
         let mut request = self.http(url, "UNLOCK")?;
+        lock.check_request(&request)?;
         request.header("Lock-Token", &lock.token)?;
         let response = request.send(cancel)?;
         if matches!(response.status, 200 | 204 | 404 | 409 | 412) {
@@ -172,16 +191,18 @@ impl Session {
         let expires = expiration(&response, seconds);
         Ok(WriteLock {
             token,
+            resource: response.url,
             recursive,
             expires,
         })
     }
 
     pub(super) fn webdav_has_write_lock(&self, url: &Url, cancel: &AtomicBool) -> io::Result<bool> {
+        let wire = self.webdav_wire_url(url)?;
         Ok(self
             .lock_map(cancel)?
-            .iter()
-            .any(|(root, lock)| applies(root, lock, url)))
+            .values()
+            .any(|lock| applies(lock, &wire)))
     }
 
     pub(super) fn webdav_conditions(
@@ -193,16 +214,26 @@ impl Session {
         let own = self.lock_map(cancel)?;
         let mut header = Zeroizing::new(String::new());
         for &(url, tag) in resources {
-            let tokens = own.iter().filter(|(root, lock)| applies(root, lock, url));
+            let wire = if request.logical_url() == url {
+                request.wire_url().clone()
+            } else {
+                self.webdav_wire_url(url)?
+            };
+            if wire.origin() != request.wire_url().origin() {
+                return Err(invalid_input(
+                    "Die WebDAV-Dateioperation benötigt Quelle und Ziel auf demselben Server.",
+                ));
+            }
+            let tokens = own.values().filter(|lock| applies(lock, &wire));
             let mut conditions = Zeroizing::new(String::new());
-            for (_, lock) in tokens {
+            for lock in tokens {
                 write!(conditions, "{} ", lock.token.as_str()).expect("format DAV token");
             }
             if let Some(tag) = tag {
                 write!(conditions, "[{tag}]").expect("format DAV ETag");
             }
             if !conditions.is_empty() {
-                write!(header, "<{url}> ({}) ", conditions.trim()).expect("format DAV conditions");
+                write!(header, "<{wire}> ({}) ", conditions.trim()).expect("format DAV conditions");
             }
         }
         if !header.is_empty() {
@@ -215,6 +246,7 @@ impl Session {
         if let Ok(mut own) = self.webdav_locks.lock() {
             own.retain(|root, _| !within(url, root));
         }
+        self.forget_webdav_aliases(url);
     }
 
     fn lock_map(
@@ -270,9 +302,48 @@ fn within(root: &Url, url: &Url) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
-fn applies(root: &Url, lock: &WriteLock, url: &Url) -> bool {
-    root.path().trim_end_matches('/') == url.path().trim_end_matches('/')
-        || (lock.recursive && within(root, url))
+fn applies(lock: &WriteLock, url: &Url) -> bool {
+    let root = &lock.resource;
+    root.origin() == url.origin()
+        && (root.path().trim_end_matches('/') == url.path().trim_end_matches('/')
+            || (lock.recursive && within(root, url)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ftp::Connection;
+
+    #[test]
+    fn lock_cannot_be_used_after_a_change_of_origin() {
+        let session = Connection::new("https://dav.test/files/", "", Security::WebDav)
+            .unwrap()
+            .authenticate("")
+            .unwrap();
+        let logical = session.initial_directory();
+        let lock = WriteLock {
+            token: Zeroizing::new("<urn:fixture>".into()),
+            resource: logical.clone(),
+            recursive: true,
+            expires: None,
+        };
+        assert!(
+            lock.check_request(&session.http(&logical, "UNLOCK").unwrap())
+                .is_ok()
+        );
+        let redirected = Url::parse("https://other.test/files/").unwrap();
+        session
+            .webdav_aliases
+            .lock()
+            .unwrap()
+            .insert(logical.clone(), redirected.clone());
+        assert!(
+            lock.check_request(&session.http(&logical, "UNLOCK").unwrap())
+                .is_err()
+        );
+        assert!(!applies(&lock, &redirected.join("child.txt").unwrap()));
+        assert!(applies(&lock, &logical.join("child.txt").unwrap()));
+    }
 }
 
 fn child<'a, 'input>(

@@ -31,12 +31,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut portable = false;
     let mut instance = None;
     let mut session_url = None;
+    let mut workspace = None;
     while let Some(argument) = arguments.next() {
         match argument.to_str() {
             Some("--help" | "-h" | "/?") => {
                 arco_windows::attach_parent_console_for_help();
                 println!(
-                    "{VERSION}\n  --left PFAD | /L=PFAD\n  --right PFAD | /R=PFAD\n  --portable\n  --profile DATEI\n  --instance NAME\n  --session-url URL\n  --version"
+                    "{VERSION}\n  --left PFAD | /L=PFAD\n  --right PFAD | /R=PFAD\n  --portable\n  --profile DATEI\n  --instance NAME\n  --session-url URL\n  --workspace NAME\n  --version"
                 );
                 return Ok(());
             }
@@ -48,6 +49,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some("--left") => paths[0] = Some(next_path(&mut arguments, "--left")?),
             Some("--right") => paths[1] = Some(next_path(&mut arguments, "--right")?),
             Some("--portable") => portable = true,
+            Some("--workspace") => {
+                if workspace.is_some() {
+                    return Err("Gib genau einen Arbeitsbereich an.".into());
+                }
+                workspace = Some(
+                    arguments
+                        .next()
+                        .and_then(|arg| arg.into_string().ok())
+                        .filter(|name| {
+                            !name.trim().is_empty() && !name.chars().any(char::is_control)
+                        })
+                        .ok_or("Der Name des Arbeitsbereichs fehlt oder ist ungültig.")?,
+                );
+            }
             Some("--profile") => profile = Some(next_path(&mut arguments, "--profile")?),
             Some("--session-url") => {
                 if session_url.is_some() {
@@ -92,6 +107,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    if workspace.is_some() && (session_url.is_some() || paths.iter().any(Option::is_some)) {
+        return Err(
+            "--workspace lässt sich nicht mit Startpfaden oder Sitzungs-URLs kombinieren.".into(),
+        );
+    }
     let fallback = std::env::current_dir()?;
     let profile_name = |base: &str| {
         instance.as_ref().map_or_else(
@@ -112,6 +132,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(saved) => (saved, None),
         Err(error) => (Profile::default(), Some(error.to_string())),
     };
+    let previously_active = saved.active_workspace.take();
+    if workspace.is_none() && session_url.is_none() && paths.iter().all(Option::is_none) {
+        workspace = previously_active.filter(|name| {
+            saved
+                .workspaces
+                .get(name)
+                .is_some_and(|workspace| workspace.auto_save)
+        });
+    }
     for (panel, path) in saved.panels.iter_mut().zip(paths) {
         if let Some(path) = path {
             let path = if path.is_absolute() {
@@ -140,6 +169,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     window.show()?;
     window_placement::restore(window.window(), &placement);
     window.invoke_focus_panels();
+    if let Some(name) = workspace {
+        let mut app = state.borrow_mut();
+        if let Err(error) = app.open_workspace(&name) {
+            app.error("Arbeitsbereich öffnen", &error.to_string());
+        }
+    }
     if let Some(url) = session_url {
         let mut app = state.borrow_mut();
         if let Err(error) = app.prepare_session_url(&url) {

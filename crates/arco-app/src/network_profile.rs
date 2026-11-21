@@ -7,9 +7,15 @@ use std::io;
 use zeroize::Zeroizing;
 
 pub(crate) fn connection(profile: &FtpProfile) -> io::Result<Connection> {
-    let connection = connection_settings(profile)?;
+    let mut connection = connection_settings(profile)?;
     if let Some(id) = profile.proxy_credential.as_deref() {
-        return connection.use_proxy_password(id);
+        connection = connection.use_proxy_password(id)?;
+    }
+    if profile.security == FtpSecurity::S3
+        && profile.s3_temporary
+        && let Some(id) = profile.s3_token_credential.as_deref()
+    {
+        connection = connection.use_s3_session_token(id)?;
     }
     Ok(connection)
 }
@@ -37,6 +43,10 @@ pub(crate) fn connection_settings(profile: &FtpProfile) -> io::Result<Connection
         .with_remote_recycle_bin(profile.recycle_remote)?
         .with_recycled_overwrites(profile.recycle_overwrites)?
         .with_proxy(&profile.proxy)?
+        .with_telnet_proxy_command(&profile.telnet_proxy_command)?
+        .with_local_proxy_command(&profile.local_proxy_command)?
+        .with_ssh_proxy_dns_locally(profile.ssh_proxy_dns_locally)?
+        .with_ftp_gateway(profile.ftp_gateway)?
         .with_proxy_user(&profile.proxy_user)?
         .with_listing_mode(listing)
         .with_active_mode(profile.active)?
@@ -50,6 +60,7 @@ pub(crate) fn connection_settings(profile: &FtpProfile) -> io::Result<Connection
             speed_kib: profile.transfer.speed_kib,
             preserve_time: profile.transfer.preserve_time,
             masks: profile.transfer.masks.clone(),
+            names: profile.transfer.names,
         })?
         .with_options(ftp::ConnectionOptions {
             family: match profile.address_family {
@@ -63,12 +74,24 @@ pub(crate) fn connection_settings(profile: &FtpProfile) -> io::Result<Connection
             ca_bundle: profile.ca_bundle.clone(),
             client_certificate: profile.client_certificate.clone(),
             mode_z: profile.mode_z,
+            http_forward: profile.http_forward,
             otp: profile.otp,
         })?;
     if mode == ftp::Security::S3 {
         return connection
             .with_s3_region(&profile.s3_region)?
-            .with_s3_aws_profile(profile.s3_aws_profile.as_deref());
+            .with_s3_request_options(profile.s3_virtual_host, profile.s3_requester_pays)?
+            .with_s3_aws_profile(profile.s3_aws_profile.as_deref())?
+            .with_s3_role_arn(&profile.s3_role_arn)?
+            .with_s3_temporary_credentials(profile.s3_temporary);
+    }
+    if mode == ftp::Security::WebDav {
+        return connection
+            .with_webdav_options(profile.webdav_liberal_escaping, profile.webdav_windows_auth)?
+            .with_webdav_redirects(
+                profile.webdav_cross_domain_redirects,
+                profile.webdav_unencrypted_redirects,
+            );
     }
     if mode.is_ssh() {
         let connection = if profile.ssh_kerberos_kex {
@@ -151,6 +174,7 @@ pub(crate) fn saved_secret(
 ) -> io::Result<Option<Zeroizing<String>>> {
     if profile.ssh_agent.is_some()
         || profile.ssh_kerberos.is_some()
+        || (profile.security == FtpSecurity::WebDav && profile.webdav_windows_auth)
         || (matches!(profile.security, FtpSecurity::WebDav | FtpSecurity::S3)
             && profile.user.is_empty())
     {

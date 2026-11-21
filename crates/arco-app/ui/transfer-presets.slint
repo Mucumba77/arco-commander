@@ -8,11 +8,18 @@ export struct TransferPresetData {
     speed: string,
     time: int,
     masks: string,
+    name-case: int,
+    windows-names: bool,
     automatic: bool,
     host: string,
     user: string,
     local: string,
     remote: string,
+}
+
+export component TransferNameCase inherits ComboBox {
+    model: [@tr("Schreibweise beibehalten"), @tr("Kleinbuchstaben"), @tr("Großbuchstaben"), @tr("Ersten Buchstaben großschreiben"), @tr("DOS-8.3-Uploads kleinschreiben")];
+    accessible-label: @tr("Schreibweise des Zielnamens");
 }
 
 export component TransferPresetsCard inherits Rectangle {
@@ -45,6 +52,8 @@ export component TransferPresetsCard inherits Rectangle {
         speed.text = root.data.speed;
         time.current-index = root.data.time;
         masks.text = root.data.masks;
+        name-case.current-index = root.data.name-case;
+        windows-names.checked = root.data.windows-names;
         automatic.checked = root.data.automatic;
         host.text = root.data.host;
         user.text = root.data.user;
@@ -54,7 +63,8 @@ export component TransferPresetsCard inherits Rectangle {
 
     function draft() -> TransferPresetData {
         return { name: name.text, mode: mode.current-index, speed: speed.text, time: time.current-index,
-            masks: masks.text, automatic: automatic.checked, host: host.text, user: user.text,
+            masks: masks.text, name-case: name-case.current-index, windows-names: windows-names.checked,
+            automatic: automatic.checked, host: host.text, user: user.text,
             local: local.text, remote: remote.text };
     }
 
@@ -110,6 +120,10 @@ export component TransferPresetsCard inherits Rectangle {
                             masks := LineEdit { placeholder-text: "*.txt;*.csv | *.tmp"; accessible-label: @tr("Dateimaske für Transfers"); }
                         }
                     }
+                }
+                FormSection { title: @tr("Zielnamen");
+                    name-case := TransferNameCase {}
+                    windows-names := CheckBox { text: @tr("Windows-Dateinamen umwandeln"); }
                 }
                 FormSection { title: @tr("Automatische Auswahl");
                     automatic := CheckBox { text: @tr("Auswahlregel aktivieren"); }
